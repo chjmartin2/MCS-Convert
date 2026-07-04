@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MCS Player (GUI)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "mcs_convert.gui.player",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "MCS Player (open a song…)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "mcs_convert.gui.player",
+      "args": ["${input:songPath}"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "songPath",
+      "type": "promptString",
+      "description": "Path to an .MCS / .MCD song to open",
+      "default": "samples/ia_1984/extracted/whmcs/MINUETG.MCS"
+    }
+  ]
+}

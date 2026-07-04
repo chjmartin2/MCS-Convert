@@ -12,6 +12,19 @@ decoded), bass-clef octaves are uncalibrated, and accidentals are dropped.
 
 from __future__ import annotations
 
+# Allow "Run" in an IDE (which executes this file as a plain script, so relative imports
+# would fail). Re-launch ourselves as a proper package module, then stop.
+if __package__ in (None, ""):
+    import os as _os
+    import sys as _sys
+    import runpy as _runpy
+
+    _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    _runpy.run_module("mcs_convert.gui.player", run_name="__main__", alter_sys=True)
+    raise SystemExit(0)
+
 import os
 import sys
 import tkinter as tk
