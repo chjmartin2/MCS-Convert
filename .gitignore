@@ -18,6 +18,10 @@ samples/*
 # Rendered audio
 *.wav
 
+# Third-party tools / copyrighted ROMs dropped in the working dir
+NSFPlay/
+*.nsf
+
 # Editor / OS
 .vscode/
 .idea/
