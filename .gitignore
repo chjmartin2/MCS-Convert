@@ -25,6 +25,7 @@ NSFPlay/
 # Editor / OS
 .vscode/*
 !.vscode/launch.json
+!.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db

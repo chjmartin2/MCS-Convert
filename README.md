@@ -66,8 +66,19 @@ samples/            drop .nsf / .mcs sample files here (gitignored)
 
 ## Development
 
-```bash
-python -m venv .venv && . .venv/Scripts/activate   # Windows
-pip install -e .
+Create the project venv and install the package (editable) with dev/runtime deps:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1        # PowerShell   (Git Bash: source .venv/Scripts/activate)
+pip install -e ".[dev]"             # installs numpy, pytest, and mcs-convert itself
 pytest
+```
+
+VS Code picks up `.venv` automatically via `.vscode/settings.json`, so Run ▶, F5, and the
+integrated terminal all use it. Launch the player with the *MCS Player* debug config, the
+Run button on `play.py`, or:
+
+```powershell
+python -m mcs_convert play samples\ia_1984\extracted\whmcs\MINUETG.MCS
 ```
