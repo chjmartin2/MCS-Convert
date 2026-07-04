@@ -40,6 +40,59 @@ def scan(paths):
               f"{d[5]:3} {d[6]:3}  {head}{flag}")
 
 
+def parse_records(d):
+    """Yield (offset, count, prev, [(byte0,byte1), ...]) for each FF FF record."""
+    i = 0x0F
+    while i < len(d) - 1:
+        if d[i] == 0xFF and d[i + 1] == 0xFF:
+            count = d[i + 2] if i + 2 < len(d) else 0
+            prev = d[i + 3] if i + 3 < len(d) else 0
+            j = i + 4
+            pairs = []
+            while j < len(d) - 1 and not (d[j] == 0xFF and d[j + 1] == 0xFF):
+                pairs.append((d[j], d[j + 1]))
+                j += 2
+            yield i, count, prev, pairs
+            i = j
+        else:
+            i += 1
+
+
+def split_staves(records):
+    """Group records into staves. A staff ends at a (0, prev) record; the trailing
+    (0,0) separates staves. Returns list of staves, each a list of note entries
+    (the leading clef record is kept as staff[0])."""
+    staves, cur = [], []
+    for _off, count, _prev, pairs in records:
+        if count == 0:
+            if cur:
+                staves.append(cur)
+                cur = []
+            continue
+        cur.append(pairs)
+    if cur:
+        staves.append(cur)
+    return staves
+
+
+def notes(path):
+    """Print ordered pitch (byte1) stream per staff, for melody-contour matching."""
+    d = open(path, "rb").read()
+    print(f"# {os.path.basename(path)}  ({len(d)} bytes)")
+    staves = split_staves(parse_records(d))
+    for si, staff in enumerate(staves):
+        clef = staff[0][0] if staff and staff[0] else (0, 0)
+        melody = [n for rec in staff[1:] for n in rec]  # skip leading clef record
+        b1 = [n[1] for n in melody]
+        b0 = [n[0] for n in melody]
+        diffs = [b1[k + 1] - b1[k] for k in range(len(b1) - 1)]
+        kind = {106: "treble", 108: "bass"}.get(clef[1], f"clef?{clef[1]}")
+        print(f"\n  staff {si} ({kind}, clef entry={clef}):  {len(b1)} notes")
+        print(f"    pitch(byte1): {b1}")
+        print(f"    diffs:        {diffs}")
+        print(f"    attr (byte0): {[hex(x) for x in b0]}")
+
+
 def dump(path):
     """Annotated structural dump of a single song."""
     d = open(path, "rb").read()
@@ -83,9 +136,12 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", help="song file, or directory when using --scan")
     ap.add_argument("--scan", action="store_true", help="header table over a directory")
+    ap.add_argument("--notes", action="store_true", help="ordered pitch stream per staff")
     args = ap.parse_args(argv)
 
-    if args.scan:
+    if args.notes:
+        notes(args.path)
+    elif args.scan:
         paths = sorted(glob.glob(os.path.join(args.path, "*.MC[SD]")))
         if not paths:
             print(f"no .MCS/.MCD files under {args.path}", file=sys.stderr)

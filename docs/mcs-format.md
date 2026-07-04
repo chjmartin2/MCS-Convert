@@ -47,12 +47,32 @@ every bass staff opens with **pitch 108, byte0 0x0d**. Constant across all songs
 the **clef glyphs**, not sounding notes. (Time signature may share this leading record —
 BARG opens `(2,0)` with a second entry; to confirm.)
 
-### Note entry = `(byte0, byte1)` (CONFIRMED shape; fields partial)
-- **byte1 = pitch** — a staff vertical position. Monotonic through `SCALES.MCS`
-  (42, 66, 89, 113, ...). Step ≈ **16 units per diatonic staff position**. Mapping to an
-  absolute semitone still needs the accidental bits and a reference point.
-- **byte0 = duration + attributes** — low nibble clusters on 2/3/4 (likely note value),
-  high nibble varies (likely horizontal position / beaming / accidental). Not fully decoded.
+### Note entry = `(byte0, byte1)` (pitch CONFIRMED; byte0 partial)
+Notes appear in **time order** as stored (early doubt about pitch-sorting was wrong —
+those songs simply had scalar/arpeggiated passages).
+
+- **byte1 = pitch.** Exactly **16 units per diatonic staff step**, higher value = higher
+  pitch. Pinned to ground truth: `MINUETG.MCS` (Bach Minuet in G) opens byte1
+  `34,50,66,82,98` → **G4 A4 B4 C5 D5**, the tune's rising-scale opening. Decode:
+
+  ```
+  steps_above_G4 = round((byte1 - clef_byte1 + 80) / 16)   # 80 = G4 offset below the
+  midi = walk C-major white keys from G4 by steps_above_G4  #      treble clef's anchor
+  ```
+
+  The clef's own byte1 is the per-song vertical anchor (114 in MINUETG, 106 elsewhere),
+  so pitch is normalized relative to it. Implemented + tested in
+  [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
+- **byte0 = duration + attributes** — NOT yet decoded. Low 2 bits ∈ {0,1,2,3}, higher
+  bits vary; likely note value + dotting + accidental (sharp/flat/natural). Reader uses a
+  placeholder duration of 1 tick/note until this is cracked.
+
+### Still to tweak (first-pass gaps)
+- **byte0 → duration** (whole/half/quarter/…) and **accidentals** — the melody pitches are
+  right, but rhythm is flat and sharps/flats are dropped (e.g. MINUETG's F♯ reads as F).
+- **Bass-clef anchor** — bass staff currently reuses the treble offset, so bass octaves are
+  wrong; needs its own calibration constant.
+- **Key signature** — probably in the header (0x00–0x0C); would supply default accidentals.
 
 ## What we know (from research, 2026-07)
 
@@ -79,10 +99,10 @@ Sources:
 - [x] **Get sample song files** — 80 songs from the 1984 IA rip (`samples/ia_1984/`).
 - [x] **Dissect gross structure** — file-length field, `FF FF (count,prev)` record chain,
       two-staff grand-staff layout, clef-as-first-record, `(byte0=dur, byte1=pitch)` entry.
-- [ ] **Decode byte1 → absolute pitch** — establish the units-per-step and a reference so a
-      staff position maps to a MIDI note; find where the accidental (sharp/flat/natural) lives.
-- [ ] **Decode byte0** — note value (whole/half/quarter/…), dotting, beaming, and the
-      horizontal-position component (high nibble).
+- [x] **Decode byte1 → pitch** — 16 units/diatonic step, clef-relative, validated against
+      MINUETG's known opening. Reader + tests landed. Accidentals still dropped.
+- [ ] **Decode byte0** — note value (whole/half/quarter/…), dotting, beaming, accidental.
+- [ ] **Bass-clef anchor + key signature** — fix bass octaves; find the key sig for defaults.
 - [ ] **Decode the header** (0x00–0x0C): confirm tempo, time/key signature, the two staff
       region offsets at 0x09/0x0B.
 - [ ] **Validate by editing** — open a song in DOSBox MCS, change ONE known note/duration,
