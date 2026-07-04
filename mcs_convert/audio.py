@@ -3,13 +3,16 @@
 Deliberately simple — a chiptune-flavoured square/triangle synth good enough to *hear*
 whether the decoded notes are right. Not a faithful PC-speaker/Tandy emulation.
 
-Playback uses winsound with an in-memory WAV image (no temp files). Non-Windows hosts can
-still synthesize and get WAV bytes; only live playback is Windows-only for now.
+Playback writes a short-lived temp WAV and plays it async via winsound (so Stop works — see
+Player). Non-Windows hosts can still synthesize and get WAV bytes; only live playback is
+Windows-only for now.
 """
 
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import wave
 from typing import List, Tuple
 
@@ -73,7 +76,7 @@ def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.125
 
 
 def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
-    """Wrap mono 16-bit PCM in a WAV container (for winsound SND_MEMORY / file save)."""
+    """Wrap mono 16-bit PCM in a WAV container (for playback or file save)."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -84,17 +87,37 @@ def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
 
 
 class Player:
-    """Async WAV playback with stop, backed by winsound (Windows)."""
+    """Async, stoppable WAV playback backed by winsound (Windows).
+
+    Plays via ``SND_FILENAME | SND_ASYNC`` from a temp file rather than ``SND_MEMORY``:
+    Windows rejects async-from-memory outright, and ``SND_PURGE`` can't reliably interrupt
+    a *synchronous* in-memory sound running on a worker thread — so a memory-based player
+    can't honour Stop. Async-from-file is the pattern winsound actually supports stopping.
+    """
 
     def __init__(self) -> None:
-        self._wav = b""  # keep a reference alive during SND_ASYNC playback
+        self._path: str | None = None   # temp WAV backing the current playback
 
     def play(self, wav: bytes) -> None:
         import winsound
-        self._wav = wav
-        winsound.PlaySound(self._wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
+
+        self.stop()  # halt anything playing and clean up its temp file
+        fd, path = tempfile.mkstemp(prefix="mcs_", suffix=".wav")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(wav)
+        self._path = path
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
 
     def stop(self) -> None:
         import winsound
-        winsound.PlaySound(None, winsound.SND_PURGE)
-        self._wav = b""
+
+        winsound.PlaySound(None, winsound.SND_PURGE)  # stops the async sound, frees the file
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        if self._path:
+            try:
+                os.remove(self._path)
+            except OSError:
+                pass  # file may still be held briefly, or already gone; harmless to skip
+            self._path = None

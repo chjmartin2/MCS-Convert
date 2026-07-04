@@ -6,8 +6,9 @@ reverse-engineering: when a song plays back recognizably, we've decoded it corre
 
 Run:  python -m mcs_convert.gui.player [SONG.MCS]      (or:  mcs-convert play SONG.MCS)
 
-Known first-pass limitations (see docs/mcs-format.md): durations are uniform (byte0 not yet
-decoded), bass-clef octaves are uncalibrated, and accidentals are dropped.
+Known first-pass limitations (see docs/mcs-format.md): rests aren't decoded yet (the melody
+plays gap-free), bass-clef octaves are uncalibrated, and accidentals are dropped. Note
+durations (half/quarter/eighth/sixteenth) now come from byte0.
 """
 
 from __future__ import annotations
@@ -124,7 +125,7 @@ class PlayerApp:
         total = sum(len(t.notes) for t in self.song.tracks)
         self.status.configure(
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
-                 f"{total} notes.  (durations uniform; bass octave uncalibrated)")
+                 f"{total} notes.  (rests not yet decoded; bass octave uncalibrated)")
 
     def play(self) -> None:
         if not self.song:

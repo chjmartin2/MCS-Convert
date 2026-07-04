@@ -63,13 +63,30 @@ those songs simply had scalar/arpeggiated passages).
   The clef's own byte1 is the per-song vertical anchor (114 in MINUETG, 106 elsewhere),
   so pitch is normalized relative to it. Implemented + tested in
   [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
-- **byte0 = duration + attributes** — NOT yet decoded. Low 2 bits ∈ {0,1,2,3}, higher
-  bits vary; likely note value + dotting + accidental (sharp/flat/natural). Reader uses a
-  placeholder duration of 1 tick/note until this is cracked.
+- **byte0 = duration + render/attribute bits** (duration CONFIRMED; other bits partial).
+  Decoded over the ~80-song corpus:
+  - **bits[1:0] = note value**, longest→shortest: **0=half, 1=quarter, 2=eighth, 3=sixteenth**.
+    Corpus frequencies 9 / 25 / 35 / 31 % (long notes rare, eighths/sixteenths common). Pinned
+    to ground truth: DAISY's "Dai-sy" reads `0` (long) then `1` (short); JINGLE/MINUETG beamed
+    runs read `2`/`3`. Implemented in `note_duration()` — reader now emits real durations.
+  - **bits[7:5] = stem/beam render length, NOT musical.** It moves *linearly with pitch*
+    within a beam group (MINUETG's rising G-A-B-C-D run → 4,3,2,1 as noteheads climb toward
+    the beam). A drawing artifact; ignored for timing.
+  - **bits[4:2] = flag bits** (dot / accidental / beam?) — mostly 0, not yet decoded.
+
+### Rests are NOT in the note stream (negative result)
+Rests do **not** appear as note entries. Test: bin every entry by its byte0 low-5-bits field
+and look at the spread of byte1 (pitch) in each bin — a rest glyph sits at a *fixed* staff
+line, so a rest code would show a near-constant byte1. Every byte0 value instead spans the
+full pitch range (stdev ~40–60 across the corpus), i.e. there is no "rest" byte0 code and no
+rest pitch sentinel (byte1 is never 0; range 16–246). So rests must live elsewhere — likely
+implied by horizontal note spacing (an x-position we haven't isolated) or a record-level
+field. **Highest-signal next step: the DOSBox edit-one-note diff** — insert a single rest in
+MCS, re-save, diff the bytes. Until then the melody plays gap-free.
 
 ### Still to tweak (first-pass gaps)
-- **byte0 → duration** (whole/half/quarter/…) and **accidentals** — the melody pitches are
-  right, but rhythm is flat and sharps/flats are dropped (e.g. MINUETG's F♯ reads as F).
+- **Rests** — see above; not yet located.
+- **Accidentals** — dropped (e.g. MINUETG's F♯ reads as F); byte0 bits[4:2] are the suspect.
 - **Bass-clef anchor** — bass staff currently reuses the treble offset, so bass octaves are
   wrong; needs its own calibration constant.
 - **Key signature** — probably in the header (0x00–0x0C); would supply default accidentals.
@@ -101,7 +118,10 @@ Sources:
       two-staff grand-staff layout, clef-as-first-record, `(byte0=dur, byte1=pitch)` entry.
 - [x] **Decode byte1 → pitch** — 16 units/diatonic step, clef-relative, validated against
       MINUETG's known opening. Reader + tests landed. Accidentals still dropped.
-- [ ] **Decode byte0** — note value (whole/half/quarter/…), dotting, beaming, accidental.
+- [x] **Decode byte0 duration** — bits[1:0] = half/quarter/eighth/sixteenth (reader emits real
+      durations). bits[7:5] identified as stem-render (ignored). Dot/accidental bits[4:2] TODO.
+- [ ] **Locate rests** — confirmed *not* in the note stream (see negative result above);
+      likely horizontal spacing or a record field. DOSBox edit-one-rest diff is the next probe.
 - [ ] **Bass-clef anchor + key signature** — fix bass octaves; find the key sig for defaults.
 - [ ] **Decode the header** (0x00–0x0C): confirm tempo, time/key signature, the two staff
       region offsets at 0x09/0x0B.

@@ -1,7 +1,8 @@
-import wave
 import io
+import sys
+import wave
 
-from mcs_convert.audio import midi_to_freq, synth_song, wav_bytes
+from mcs_convert.audio import Player, midi_to_freq, synth_song, wav_bytes
 from mcs_convert.model import NoteEvent, Song, Track
 
 
@@ -41,3 +42,37 @@ def test_wav_bytes_roundtrip():
         assert w.getsampwidth() == 2
         assert w.getframerate() == sr
         assert w.getnframes() == len(pcm) // 2
+
+
+def test_player_plays_async_from_file_and_stop_purges(monkeypatch):
+    import os
+
+    pcm, sr = synth_song(_demo_song(), step_seconds=0.05)
+    wav = wav_bytes(pcm, sr)
+
+    calls: list[tuple[object, int]] = []
+
+    class DummyWinSound:
+        SND_FILENAME = 0x20000
+        SND_ASYNC = 0x1
+        SND_PURGE = 0x40
+        def PlaySound(self, data, flags):
+            calls.append((data, flags))
+
+    monkeypatch.setitem(sys.modules, "winsound", DummyWinSound())
+
+    player = Player()
+    player.play(wav)
+
+    # Played asynchronously from a real file whose contents are our WAV bytes.
+    path, flags = calls[-1]
+    assert isinstance(path, str) and os.path.exists(path)
+    assert flags == DummyWinSound.SND_FILENAME | DummyWinSound.SND_ASYNC
+    with open(path, "rb") as fh:
+        assert fh.read() == wav
+
+    # Stop purges the async sound and removes the temp file.
+    player.stop()
+    assert calls[-1] == (None, DummyWinSound.SND_PURGE)
+    assert not os.path.exists(path)
+    assert player._path is None
