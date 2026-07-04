@@ -17,9 +17,18 @@ pitch-detection problems that raw audio (WAV/MP3) would bring. Raw audio is expl
 ```
 
 ### What works today
+- **MCS/MCD viewer + player GUI** — open a song, see it in a tracker-style grid, play it
+  back: `python -m mcs_convert play [SONG.MCS]` (or `mcs-convert play`). This is our
+  format-validation harness: if a song plays back recognizably, we decoded it right.
+- **MCS reader** — parse `.MCS`/`.MCD` into the neutral model (pitch decoded and validated
+  against Bach's Minuet in G; see [docs/mcs-format.md](docs/mcs-format.md)).
 - NSF header parsing and inspection: `python -m mcs_convert inspect song.nsf`
 - Frequency/period ↔ MIDI-note conversion helpers.
 - The intermediate note-event model that both ends talk through.
+
+> Player caveats (first pass): note durations are uniform (byte0 not yet decoded),
+> bass-clef octaves are uncalibrated, and accidentals are dropped. These are the next
+> reverse-engineering targets — and the player is how we'll confirm each one.
 
 ### What's stubbed / in progress
 - **6502 + APU emulation** — needed to turn an NSF's player code into a timed stream of

@@ -15,6 +15,9 @@ venv/
 samples/*
 !samples/.gitkeep
 
+# Rendered audio
+*.wav
+
 # Editor / OS
 .vscode/
 .idea/

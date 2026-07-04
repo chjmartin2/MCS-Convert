@@ -38,6 +38,11 @@ def _cmd_inspect(args) -> int:
     return 0
 
 
+def _cmd_play(args) -> int:
+    from .gui.player import main as gui_main
+    return gui_main([args.file] if args.file else [])
+
+
 def _cmd_convert(args) -> int:
     from .nsf.extract import extract_song
     from .mcs.writer import write_mcs
@@ -59,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect = sub.add_parser("inspect", help="print NSF header info")
     p_inspect.add_argument("file", help="path to a .nsf file")
     p_inspect.set_defaults(func=_cmd_inspect)
+
+    p_play = sub.add_parser("play", help="open the MCS/MCD viewer + player GUI")
+    p_play.add_argument("file", nargs="?", help="optional .mcs/.mcd file to open")
+    p_play.set_defaults(func=_cmd_play)
 
     p_conv = sub.add_parser("convert", help="convert NSF -> MCS (in progress)")
     p_conv.add_argument("input", help="path to a .nsf file")
