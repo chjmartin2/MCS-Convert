@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcs-convert"
+version = "0.0.1"
+description = "Convert chiptune music (starting with NES NSF) into Will Harvey's Music Construction Set song format"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "chjmartin2" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+mcs-convert = "mcs_convert.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mcs_convert*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
