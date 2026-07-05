@@ -1,109 +1,89 @@
 """Parse a Music Construction Set (IBM-PC 1984) song into our neutral Song model.
 
-This is the inverse of the (still-blocked) writer and doubles as living documentation of
-the format decoded in docs/mcs-format.md.
+The decoding below is no longer inferred — it matches MCSDISK.EXE's own player,
+located by disassembly (see docs/mcs-format.md for the full write-up):
 
-Structure (confirmed):
-  0x00..0x08  header: 0x00 global scroll?; 0x01..0x04 per-staff vertical scroll values
-              (a ladder in steps of 3: 0x77, 0x7a, ... 0x8c); 0x05..0x08 tempo? flags?
-  0x09 uint16 byte size of the staff-1 section   (CONFIRMED via SCALE4: moving one note
-  0x0B uint16 byte size of the staff-2 section    between staves moved 2 bytes here)
+  0x00..0x08  header: view/scroll bytes (display only — pitch does NOT depend on
+              them) and a tempo word at 0x05 stored as 0x3AF9 + setting.
+  0x09 uint16 byte size of the staff-1 section (CONFIRMED)
+  0x0B uint16 byte size of the staff-2 section (CONFIRMED)
   0x0D uint16 total file length (CONFIRMED)
-  0x0F..      body: FF FF (count, prev_count) records; each record's `count` note
-              entries follow as (byte0, byte1) pairs.
+  0x0F..      body: FF FF (count, prev_count) records = MEASURES; (0, prev!=0) is an
+              empty measure, (0, 0) terminates a staff. Staff 1 then staff 2.
 
-  Records are MEASURES. A (0, prev) record is an EMPTY MEASURE (confirmed: SCALE's
-  treble measure 1 is empty while the bass plays, and gained a note in SCALE4).
-  A (0, 0) record is the staff terminator; the next chain is the second staff.
-  The first record of each staff holds the clef glyph (byte0 0x06 treble / 0x0D bass)
-  and optionally a time-signature glyph (low nibble 0xF).
+Note entry = 16-bit little-endian word (byte0, byte1):
 
-Note entry (byte0, byte1) — ground-truthed with MartyPC edit-and-diff experiments:
-  byte1      = HORIZONTAL pixel position within the measure (SCALE2: moving a note one
-               slot right changed only byte1, +8). Layout only, except that it reveals
-               chords (same x = same stem) and a staff's late entry into a measure.
-  byte0[3:0] = note/rest symbol. bit3 = rest flag; value 1..5 = 16th/8th/quarter/half/
-               whole on a doubling ladder (rests 8..12 mirror it).
-  byte0[4]   = unknown flag (~22% of corpus notes; accidental or tie — open).
-  byte0[7:5] = the LOW 3 BITS of the vertical staff position, inverted: one step UP in
-               pitch decrements the class mod 8 (SCALE3: up one step, 0x21 -> 0x01;
-               SCALE's 40-note scale counts down 0,7,6,...,1 continuously, even across
-               the bass->treble staff hop).
+  bits [15:11] (byte1 top 5) = HORIZONTAL slot, 8-px units
+  bits [10:5]  = v, the 6-bit VERTICAL staff position (1-based, smaller = higher;
+                 staff 1 uses v 1..20, staff 2 uses v 21..41 — the engine splits at
+                 v*4 >= 0x54). The old models missed that byte1's low 3 bits are the
+                 high half of the vertical.
+  bits [4:0]   = symbol:
+                 0x01..0x05  note: 16th, 8th, quarter, half, whole (2**(n-1) ticks)
+                 0x06 / 0x0D treble / bass clef glyph
+                 0x08..0x0C  rest of the same ladder (n-7)
+                 0x0E / 0x0F / 0x10  natural / sharp / flat glyph. In the clef record
+                             these build the KEY SIGNATURE (applied at the glyph's
+                             staff degree in every octave); inside a measure they set
+                             a measure-scoped accidental at that exact position.
+                 0x11        augmentation dot: the engine adds half the previous
+                             note's duration to it (handler at MCSDISK 0x245c).
+                 0x12        in the clef record: 8va for the staff (+12 semitones).
+                 0x1F        the FF FF record marker seen as an entry; skipped.
 
-  The octave/coarse vertical is NOT stored per note (proof: SCALE stores D4, E5 and F6
-  as byte-identical 0x81 entries on one staff). MCS reconstructs it from context; we
-  resolve each note to the class candidate nearest its predecessor, ties broken
-  downward (D5 -> class 4 must give G4, a fourth down, not A5 a fifth up — MINUETG).
-  That reproduces every ground-truth melody except leaps > a fifth (MINUETG bar 4's
-  G5->G4 octave-ish drop decodes as A5); MCS's exact rule is still open.
+  Pitch: the engine xlats v-1 through a fixed 41-byte grand-staff ladder chosen by
+  the two staves' clefs (tables at MCSDISK image 0x5c88..): value = 2 x semitone.
+  Accidentals add +/-2, the 8va adds +24, and the result indexes a 68-entry chromatic
+  period table whose entry for G4 is PIT divisor 3044 = 392.00 Hz exactly, anchoring
+  MIDI = value/2 + 44. Treble staff window = E7..G4, bass = G5..B2 (they overlap by
+  an octave; the windows are FIXED — the header scroll bytes are pure view state).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from ..model import NoteEvent, Song, Track
 
-CLEF_TREBLE_B0 = 0x06
-CLEF_BASS_B0 = 0x0D
-REST_FLAG = 0x08
-# Duration in sixteenth-ticks per low-nibble symbol. Nibbles 6,7,0 (and rest mirrors
-# 13,14,15) are uncommon and provisional — likely dotted values; see docs/mcs-format.md.
-_NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16, 6: 2, 7: 4, 0: 4}
-_REST_TICKS = {8: 1, 9: 2, 10: 4, 11: 8, 12: 16, 13: 8, 14: 2, 15: 4}
+CLEF_TREBLE = 0x06
+CLEF_BASS = 0x0D
+SYM_NATURAL, SYM_SHARP, SYM_FLAT = 0x0E, 0x0F, 0x10
+SYM_DOT = 0x11
+SYM_OCTAVA = 0x12
+SYM_MARKER = 0x1F
 
-# Semitone offsets of the white keys within an octave: C D E F G A B.
-_WHITE = [0, 2, 4, 5, 7, 9, 11]
-C4_MIDI = 60
+# The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
+# 2 x semitone per byte, one byte per staff position top-down, 0 = unusable.
+_TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # E7..G4
+_BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  # G5..B2,-
+MIDI_ANCHOR = 44          # ladder 0 = G#2: G4's PIT divisor 3044 = 392.00 Hz exactly
 
-# Staff positions are diatonic steps relative to C4 (C4=0, D4=1, ... C5=7, D5=8).
-# The class frame is GLOBAL: class == (-pos) % 8 with C4 = 0 fits MINUETG, DIXIE and
-# SCALE simultaneously (no per-song shift). A staff's first note is resolved into the
-# octave window around a per-clef anchor, fitted to ground truth: D5 (+8) starts
-# MINUETG's treble correctly, and G3/B3 (around -4) starts its bass chord correctly.
-# (MCS's true first-note rule — probably the header's per-staff scroll state — is open.)
-CLEF_ANCHOR = {CLEF_TREBLE_B0: 8, CLEF_BASS_B0: -4}
-# Plausible position range per clef (staff plus generous ledger room). Octave
-# resolution is contextual, so a mis-resolved big leap shifts everything after it by
-# 8 steps; without a backstop that drift compounds and walks off the MIDI range in
-# leap-heavy songs. Out-of-range resolutions are pulled back by whole 8-step wraps.
-CLEF_RANGE = {CLEF_TREBLE_B0: (-7, 28), CLEF_BASS_B0: (-24, 11)}
-# Entries this close in x share a stem — a chord (MINUETG's bass opens with two half
-# notes at the same x; DIXIE has pairs 1 px apart).
-CHORD_X_SLOP = 3
+_NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
+
+
+def vertical(byte0: int, byte1: int) -> int:
+    """The 6-bit staff position: byte1's low 3 bits are the high half."""
+    return ((byte1 & 7) << 3) | (byte0 >> 5)
+
+
+def symbol(byte0: int) -> int:
+    return byte0 & 0x1F
+
+
+def x_slot(byte1: int) -> int:
+    """Horizontal position in 8-px slots (byte1's top 5 bits)."""
+    return byte1 >> 3
 
 
 def decode_duration(byte0: int) -> tuple[bool, int]:
-    """(is_rest, duration_ticks) for a note entry's byte0. One tick = one sixteenth."""
-    nib = byte0 & 0x0F
-    if nib & REST_FLAG:
-        return True, _REST_TICKS[nib]
-    return False, _NOTE_TICKS[nib]
-
-
-def pitch_class(byte0: int) -> int:
-    """The 3-bit vertical class from byte0[7:5] (inverted: +1 step up = class-1 mod 8)."""
-    return byte0 >> 5
-
-
-def resolve_position(cls: int, ref: int) -> int:
-    """Absolute staff position (diatonic steps from C4) for a class, nearest `ref`.
-
-    Candidates satisfy class == (-pos) % 8 and repeat every octave-plus-one (8 steps);
-    the nearest to `ref` wins, ties broken DOWNWARD (ground truth: from D5, class 4 is
-    G4 — a fourth below — not A5 a fifth above; both are 4 steps away).
-    """
-    base = (-cls) % 8
-    lo = base + 8 * ((ref - base) // 8)      # nearest candidate at or below ref
-    hi = lo + 8
-    return lo if (ref - lo) <= (hi - ref) else hi
-
-
-def position_to_midi(pos: int) -> int:
-    """MIDI note of a staff position (diatonic steps from C4), naturals only."""
-    octave, degree = divmod(pos, 7)
-    return C4_MIDI + 12 * octave + _WHITE[degree]
+    """(is_rest, ticks) for a note/rest symbol. One tick = one sixteenth."""
+    sym = symbol(byte0)
+    if 1 <= sym <= 5:
+        return False, _NOTE_TICKS[sym]
+    if 8 <= sym <= 12:
+        return True, _NOTE_TICKS[sym - 7]
+    raise ValueError(f"symbol 0x{sym:02x} is not a note or rest")
 
 
 def _u16(d: bytes, off: int) -> int:
@@ -137,8 +117,8 @@ def parse_records(d: bytes) -> List[Record]:
 
 
 def split_staves(recs: List[Record]) -> List[List[Record]]:
-    """Group records into staves. Only a (0, 0) record terminates a staff; a (0, prev)
-    record with prev != 0 is an EMPTY MEASURE and is kept in place."""
+    """Group records into staves. Only a (0, 0) record terminates a staff; (0, prev)
+    with prev != 0 is an EMPTY MEASURE and is kept in place."""
     staves: List[List[Record]] = []
     cur: List[Record] = []
     for r in recs:
@@ -154,90 +134,130 @@ def split_staves(recs: List[Record]) -> List[List[Record]]:
 
 
 @dataclass
+class _Staff:
+    clef: int
+    v_base: int                    # staff 1 notes live at v 1..20, staff 2 at 21..41
+    keysig: List[int]              # semitone*2 offset per staff degree (0..6)
+    octava: int                    # +24 if the clef record carries an 8va glyph
+    records: List[Record]
+
+    def window(self) -> bytes:
+        return _TREBLE_WINDOW if self.clef == CLEF_TREBLE else _BASS_WINDOW
+
+    def midi(self, v: int, acc2: int) -> int:
+        """MIDI note for vertical position v with accidental offset (2x semitones)."""
+        idx = v - self.v_base
+        win = self.window()
+        if not (0 <= idx < len(win)) or win[idx] == 0:
+            return 0
+        return (win[idx] + acc2 + self.octava) // 2 + MIDI_ANCHOR
+
+
+def _read_staff(recs: List[Record], v_base: int) -> _Staff:
+    clef = CLEF_TREBLE if v_base == 1 else CLEF_BASS
+    keysig = [0] * 7
+    octava = 0
+    if recs and recs[0].entries:
+        for b0, b1 in recs[0].entries:
+            sym = symbol(b0)
+            if sym in (CLEF_TREBLE, CLEF_BASS):
+                clef = sym
+            elif sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
+                acc = {SYM_NATURAL: 0, SYM_SHARP: 2, SYM_FLAT: -2}[sym]
+                keysig[(vertical(b0, b1) - 1) % 7] = acc
+            elif sym == SYM_OCTAVA:
+                octava = 24
+    return _Staff(clef, v_base, keysig, octava, recs[1:])
+
+
+@dataclass
 class _Slot:
-    """One rhythmic position in a measure: a note, rest, or chord (shared stem/x)."""
-    x: int
+    """One rhythmic position in a measure: a note, rest, or chord (same x slot)."""
+    slot_x: int
     duration: int
     is_rest: bool
-    positions: List[int]             # resolved staff positions (empty for a rest)
+    midis: List[int]
 
 
-def _decode_staff_slots(staff: List[Record], clef_b0: int) -> List[List[_Slot]]:
-    """Decode one staff's measures into slots with resolved vertical positions."""
-    ref = CLEF_ANCHOR.get(clef_b0, 8)
-    lo, hi = CLEF_RANGE.get(clef_b0, (-24, 28))
+def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
     measures: List[List[_Slot]] = []
-    for rec in staff[1:]:                    # staff[0] is the clef/time-sig record
+    for rec in staff.records:
         slots: List[_Slot] = []
-        for byte0, byte1 in rec.entries:
-            is_rest, dur = decode_duration(byte0)
-            if is_rest:
-                slots.append(_Slot(byte1, dur, True, []))
+        measure_acc: Dict[int, int] = {}       # explicit accidentals, per position
+        for b0, b1 in rec.entries:
+            sym = symbol(b0)
+            v = vertical(b0, b1)
+            if sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
+                # 0x0C is the engine's "forced natural" marker (beats the key sig)
+                measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: 2, SYM_FLAT: -2}[sym]
                 continue
-            pos = resolve_position(pitch_class(byte0), ref)
-            while pos < lo:
-                pos += 8
-            while pos > hi:
-                pos -= 8
-            ref = pos
-            if slots and not slots[-1].is_rest and abs(byte1 - slots[-1].x) <= CHORD_X_SLOP:
-                slots[-1].positions.append(pos)
-                slots[-1].duration = max(slots[-1].duration, dur)
-            else:
-                slots.append(_Slot(byte1, dur, False, [pos]))
+            if sym == SYM_DOT:
+                # augmentation dot: engine adds half the note's own duration
+                for s in reversed(slots):
+                    if not s.is_rest:
+                        s.duration += s.duration // 2
+                        break
+                continue
+            if 1 <= sym <= 5 or 8 <= sym <= 12:
+                is_rest, dur = decode_duration(b0)
+                if is_rest:
+                    slots.append(_Slot(x_slot(b1), dur, True, []))
+                    continue
+                acc = measure_acc.get(v, staff.keysig[(v - 1) % 7])
+                if acc == 0x0C:
+                    acc = 0
+                midi = staff.midi(v, acc)
+                if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
+                    slots[-1].midis.append(midi)          # chord: same 8-px slot
+                    slots[-1].duration = max(slots[-1].duration, dur)
+                else:
+                    slots.append(_Slot(x_slot(b1), dur, False, [midi]))
+            # clefs, 8va, markers, unknown symbols: no time, no pitch
         measures.append(slots)
     return measures
 
 
-def _measure_span(slots: List[_Slot]) -> int:
+def _span(slots: List[_Slot]) -> int:
     return sum(s.duration for s in slots)
 
 
 def parse(path: str) -> Song:
-    """Parse an .MCS/.MCD file into a Song (pitch, duration, rests, chords, measures).
-
-    Staves are time-aligned by measure: records are measures, empty (0, prev) records
-    are silent measures, and a staff that enters a shared measure late (SCALE's treble
-    picks up mid-measure where the bass leaves off) is front-padded when its first x
-    is to the right of the other staff's.
-    """
+    """Parse an .MCS/.MCD file into a Song. Staves are time-aligned by measure;
+    a staff entering a shared measure late (first x slot to the right of the other
+    staff's) is front-padded by the measure's deficit."""
     with open(path, "rb") as fh:
         d = fh.read()
     song = Song(title="", source=f"mcs:{path}")
 
-    staves = split_staves(parse_records(d))
+    staff_recs = split_staves(parse_records(d))
     decoded: List[Tuple[str, List[List[_Slot]]]] = []
-    for si, staff in enumerate(staves):
-        if not staff or not staff[0].entries:
-            continue
-        clef_b0 = staff[0].entries[0][0]
-        name = {CLEF_TREBLE_B0: "Treble", CLEF_BASS_B0: "Bass"}.get(clef_b0, f"Staff {si}")
-        decoded.append((name, _decode_staff_slots(staff, clef_b0)))
+    for si, recs in enumerate(staff_recs[:2]):
+        staff = _read_staff(recs, 1 if si == 0 else 21)
+        name = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
+        decoded.append((name, _decode_measures(staff)))
 
-    # One measure length for the whole song = the fullest measure seen (3/4 -> 12, 4/4 -> 16).
-    measure_len = max((_measure_span(m) for _, ms in decoded for m in ms), default=16)
+    measure_len = max((_span(m) for _, ms in decoded for m in ms), default=16)
 
     for idx, (name, measures) in enumerate(decoded):
         track = Track(name=name)
         for mi, slots in enumerate(measures):
             tick = mi * measure_len
-            span = _measure_span(slots)
-            if slots and span < measure_len:
-                # Late entry? Front-pad iff another staff starts this measure further left.
-                other_first_x = min(
-                    (ms[mi][0].x for j, (_, ms) in enumerate(decoded)
+            deficit = measure_len - _span(slots)
+            if slots and deficit > 0:
+                other_first = min(
+                    (ms[mi][0].slot_x for j, (_, ms) in enumerate(decoded)
                      if j != idx and mi < len(ms) and ms[mi]),
                     default=None)
-                if other_first_x is not None and slots[0].x > other_first_x:
-                    tick += measure_len - span
+                if other_first is not None and slots[0].slot_x > other_first:
+                    tick += deficit
             for s in slots:
                 if s.is_rest:
                     track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
                                         midi_note=0, is_rest=True))
                 else:
-                    for pos in s.positions:
+                    for m in s.midis:
                         track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
-                                            midi_note=position_to_midi(pos)))
+                                            midi_note=m))
                 tick += s.duration
         song.add_track(track)
     return song

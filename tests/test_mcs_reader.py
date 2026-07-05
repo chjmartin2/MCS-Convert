@@ -1,20 +1,20 @@
 """Ground-truth tests for the MCS reader.
 
-Pitch comes from byte0's top 3 bits: the vertical staff position mod 8, INVERTED
-(one step up = class-1), in a global frame where C4 has class 0. The octave is not
-stored; it is reconstructed by resolving each note to the class candidate nearest
-its predecessor (ties break downward). All byte values below are lifted verbatim
-from MINUETG.MCS / SCALE.MCS dumps and MartyPC edit-and-diff experiments.
+The decode matches MCSDISK.EXE's own player (found by disassembly): the vertical
+position is 6 bits — byte1's low 3 bits over byte0's top 3 — indexing fixed per-clef
+pitch windows (treble E7..G4 at v 1..20, bass G5..B2 at v 21..41), with the key
+signature coming from accidental glyphs in the clef record. All byte values below are
+verbatim from MINUETG.MCS / SCALE.MCS.
 """
 
 from mcs_convert.mcs.reader import (
     decode_duration,
     parse,
     parse_records,
-    pitch_class,
-    position_to_midi,
-    resolve_position,
     split_staves,
+    symbol,
+    vertical,
+    x_slot,
 )
 
 
@@ -24,47 +24,37 @@ def _song(body: bytes, tmp_path):
     return parse(str(p))
 
 
+EMPTY_TREBLE = bytes([0xFF, 0xFF, 1, 0, 0x06, 0x72, 0xFF, 0xFF, 0, 0])
+
+
 # ---- primitives -----------------------------------------------------------------
 
-def test_pitch_class_and_position_frame():
-    # class = byte0 >> 5; global frame: C4 -> 0, D4 -> 7, ... D5 -> 0 again.
-    assert pitch_class(0x21) == 1
-    assert pitch_class(0xE1) == 7
-    assert position_to_midi(0) == 60     # C4
-    assert position_to_midi(8) == 74     # D5
-    assert position_to_midi(4) == 67     # G4
-    assert position_to_midi(-1) == 59    # B3
-    assert position_to_midi(-3) == 55    # G3
-
-
-def test_resolve_nearest_and_tie_down():
-    # From D5 (pos 8), class 4 is G4 and A5, both 4 steps away: ties break DOWN
-    # (MINUETG bar 1: D5 quarter then G4 eighth — not A5).
-    assert resolve_position(4, 8) == 4          # G4
-    # Stepwise motion resolves to the adjacent candidate (SCALE's +1 ladder).
-    assert resolve_position(7, 8) == 9          # D5 -> E5
-    assert resolve_position(0, 9) == 8          # E5 -> D5
-    # Exact hit stays put.
-    assert resolve_position(0, 8) == 8
+def test_entry_bitfields():
+    # SCALE's F3: byte0 0x21, byte1 0x93 -> v = (3 << 3) | 1 = 25, x slot 0x93 >> 3.
+    assert vertical(0x21, 0x93) == 25
+    assert symbol(0x21) == 1                 # sixteenth note
+    assert symbol(0xEF) == 0x0F              # sharp glyph
+    assert x_slot(0x93) == 18
+    # DIXIE's 1-px-apart chord pair shares an 8-px slot
+    assert x_slot(27) == x_slot(28) == 3
 
 
 def test_decode_duration_note_ladder():
-    # low nibble = note value: 1=16th 2=8th 3=quarter 4=half 5=whole -> 2**(v-1) ticks.
     assert decode_duration(0x01) == (False, 1)    # sixteenth
     assert decode_duration(0x02) == (False, 2)    # eighth
     assert decode_duration(0x03) == (False, 4)    # quarter
     assert decode_duration(0x04) == (False, 8)    # half
     assert decode_duration(0x05) == (False, 16)   # whole
-    # class bits (7:5) must not change the decoded duration
+    # vertical bits must not change the decoded duration
     assert decode_duration(0x82) == (False, 2)
 
 
-def test_decode_duration_rest_flag():
-    # bit3 (0x08) set = rest; low value picks the value: 8..12 = 16th..whole rest.
-    assert decode_duration(0x08) == (True, 1)     # sixteenth rest
-    assert decode_duration(0x09) == (True, 2)     # eighth rest  (MIN2 ground truth: 0x82->0x89)
-    assert decode_duration(0x0A) == (True, 4)     # quarter rest
-    assert decode_duration(0x89) == (True, 2)     # eighth rest with class bits set
+def test_decode_duration_rest_ladder():
+    # rests are note symbol + 7 (MIN2 ground truth: 8th note 0x82 -> 8th rest 0x89)
+    assert decode_duration(0x08) == (True, 1)
+    assert decode_duration(0x89) == (True, 2)
+    assert decode_duration(0x0A) == (True, 4)
+    assert decode_duration(0x0C) == (True, 16)
 
 
 # ---- record / staff structure -----------------------------------------------------
@@ -78,10 +68,8 @@ def test_records_and_staves_with_empty_measures():
         0xFF, 0xFF, 1, 0, 0x0D, 0x74,               # bass clef
         0xFF, 0xFF, 0, 0,
     ])
-    recs = parse_records(b"\x00" * 0x0F + body)
-    staves = split_staves(recs)
+    staves = split_staves(parse_records(b"\x00" * 0x0F + body))
     assert len(staves) == 2
-    # the empty measure is kept in place, not treated as a terminator
     assert [r.count for r in staves[0]] == [1, 2, 0]
     assert staves[0][0].entries[0] == (0x06, 0x72)
     assert staves[1][0].entries[0] == (0x0D, 0x74)
@@ -90,11 +78,9 @@ def test_records_and_staves_with_empty_measures():
 # ---- MINUETG ground truth ---------------------------------------------------------
 
 def test_minuet_opening_two_bars(tmp_path):
-    # MINUETG.MCS treble bars 1-2, byte-for-byte from the file:
-    #   bar 1: quarter c0 + eighths c4 c3 c2 c1  = D5  G4 A4 B4 C5
-    #   bar 2: quarter c0 + quarters c4 c4       = D5  G4 G4
+    # Treble bars 1-2, byte-for-byte: D5 G4 A4 B4 C5 | D5 G4 G4.
     body = bytes([
-        0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,                      # clef + 3/4 glyph
+        0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,   # clef + key-sig sharp on the F line
         0xFF, 0xFF, 5, 2,
         0x03, 34, 0x82, 50, 0x62, 66, 0x42, 82, 0x22, 98,
         0xFF, 0xFF, 3, 5,
@@ -105,33 +91,49 @@ def test_minuet_opening_two_bars(tmp_path):
     notes = _song(body, tmp_path).tracks[0].notes
     assert [n.midi_note for n in notes] == [74, 67, 69, 71, 72, 74, 67, 67]
     assert [n.duration_ticks for n in notes] == [4, 2, 2, 2, 2, 4, 4, 4]
-    # 3/4 time: measure length 12; bar 2 starts on tick 12
     assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10, 12, 16, 20]
 
 
-def test_minuet_bass_chord(tmp_path):
-    # MINUETG.MCS bass bar 1: two HALF notes at the same x (a chord) + a quarter.
-    # Classes 1 & 3 around the bass anchor = B3 + G3, then class 2 = A3.
-    # The chord counts once toward the measure: 8 + 4 = 12 ticks = 3/4. Exact fit.
+def test_minuet_bar3_key_signature_and_bar4_leap(tmp_path):
+    # Bar 3: E5 C5 D5 E5 F#5 — the F# comes from the key-sig glyph (sharp at v=7,
+    # degree 6, i.e. the staff's F positions). Bar 4 opens with the G5 -> G4 drop
+    # that no proximity-based model could decode.
     body = bytes([
-        0xFF, 0xFF, 1, 0, 0x0D, 0x74,
-        0xFF, 0xFF, 3, 1,
-        0x24, 36, 0x64, 36, 0x43, 100,
+        0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,
+        0xFF, 0xFF, 5, 2,
+        0xE3, 41, 0x22, 58, 0x02, 74, 0xE2, 81, 0xC2, 97,
+        0xFF, 0xFF, 3, 5,
+        0xA3, 41, 0x83, 58, 0x83, 74,
         0xFF, 0xFF, 0, 3,
         0xFF, 0xFF, 0, 0,
     ])
     notes = _song(body, tmp_path).tracks[0].notes
+    assert [n.midi_note for n in notes] == [76, 72, 74, 76, 78, 79, 67, 67]
+    #                                       E5  C5  D5  E5 F#5  G5  G4  G4
+
+
+def test_minuet_bass_chord_and_dot(tmp_path):
+    # Bass bar 1: {B3, G3} half chord (same x slot) + A3 quarter = 12 ticks = 3/4.
+    # Bar 2: a half note with an augmentation dot (sym 0x11) = 12 ticks.
+    body = (EMPTY_TREBLE + bytes([
+        0xFF, 0xFF, 2, 0, 0x0D, 0x74, 0xBF, 0x83,   # bass clef + key-sig sharp
+        0xFF, 0xFF, 3, 2,
+        0x24, 36, 0x64, 36, 0x43, 100,
+        0xFF, 0xFF, 2, 3,
+        0x24, 60, 0x31, 76,                          # half B3 + dot
+        0xFF, 0xFF, 0, 2,
+        0xFF, 0xFF, 0, 0,
+    ]))
+    notes = _song(body, tmp_path).tracks[1].notes
     assert [(n.midi_note, n.start_tick, n.duration_ticks) for n in notes] == [
-        (59, 0, 8),    # B3 half  (chord)
-        (55, 0, 8),    # G3 half  (chord, same start)
-        (57, 8, 4),    # A3 quarter
+        (59, 0, 8),     # B3 half (chord)
+        (55, 0, 8),     # G3 half (chord, same slot)
+        (57, 8, 4),     # A3 quarter
+        (59, 12, 12),   # dotted half B3 fills bar 2
     ]
 
 
 def test_rest_replaces_note_like_min2(tmp_path):
-    # Bar 1 with the first eighth replaced by an eighth rest (the MIN2 experiment:
-    # byte0 0x82 -> 0x89). Rests keep time but carry no pitch and don't move the
-    # octave-resolution reference.
     body = bytes([
         0xFF, 0xFF, 1, 0, 0x06, 0x72,
         0xFF, 0xFF, 5, 1,
@@ -149,8 +151,8 @@ def test_rest_replaces_note_like_min2(tmp_path):
 # ---- SCALE ground truth -----------------------------------------------------------
 
 def _scale_body() -> bytes:
-    """SCALE.MCS body, verbatim: a 40-note ascending white-key scale. Treble staff:
-    clef, EMPTY measure, 12 notes, 8 notes. Bass staff: clef, 16 notes, 4 notes."""
+    """SCALE.MCS body, verbatim: every staff position bottom-to-top as 16th notes.
+    Treble staff: clef, EMPTY measure, 12 notes, 8 notes. Bass: clef, 16, 4."""
     def notes(*pairs):
         out = []
         for b0, b1 in pairs:
@@ -179,21 +181,20 @@ def _scale_body() -> bytes:
     return treble + bass
 
 
-def test_scale_ascends_within_each_staff(tmp_path):
+def test_scale_covers_the_fixed_windows(tmp_path):
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}
-    for name in ("Treble", "Bass"):
-        midis = [n.midi_note for n in by_name[name].notes]
+    treble = [n.midi_note for n in by_name["Treble"].notes]
+    bass = [n.midi_note for n in by_name["Bass"].notes]
+    # Each staff sweeps its fixed window bottom-to-top: bass B2..G5, treble G4..E7.
+    assert bass[0] == 47 and bass[-1] == 79        # B2 .. G5
+    assert treble[0] == 67 and treble[-1] == 100   # G4 .. E7
+    for midis in (treble, bass):
         assert len(midis) == 20
-        # strictly ascending white keys: every step is +1 or +2 semitones
-        deltas = [b - a for a, b in zip(midis, midis[1:])]
-        assert all(d in (1, 2) for d in deltas), (name, midis)
+        assert all(b - a in (1, 2) for a, b in zip(midis, midis[1:]))
 
 
 def test_scale_measure_alignment(tmp_path):
-    # 16 sixteenths in the fullest measure -> 4/4. Treble sits out measure 1 (empty
-    # record) and enters measure 2 four ticks late (its 12 notes start to the right
-    # of the bass's 4). The bass fills measure 1 from tick 0.
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}
     assert by_name["Bass"].notes[0].start_tick == 0

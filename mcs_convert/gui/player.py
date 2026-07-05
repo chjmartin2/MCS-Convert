@@ -6,10 +6,9 @@ reverse-engineering: when a song plays back recognizably, we've decoded it corre
 
 Run:  python -m mcs_convert.gui.player [SONG.MCS]      (or:  mcs-convert play SONG.MCS)
 
-Pitch comes from byte0's vertical class bits (octaves reconstructed by proximity),
-durations/rests from its low nibble; staves are measure-aligned, chords supported. Known
-remaining gaps (see docs/mcs-format.md): leaps larger than a fifth may pick the wrong
-octave, and accidentals are dropped.
+The decoder matches MCSDISK.EXE's own playback engine (recovered by disassembly):
+6-bit vertical positions into fixed per-clef pitch windows, key signatures and
+accidentals, dots, chords, rests, and measure-aligned staves. See docs/mcs-format.md.
 """
 
 from __future__ import annotations
@@ -133,7 +132,7 @@ class PlayerApp:
         rests = sum(1 for tr in self.song.tracks for n in tr.notes if n.is_rest)
         self.status.configure(
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
-                 f"{total} notes ({rests} rests).  (accidentals dropped)")
+                 f"{total} notes ({rests} rests).")
 
     def play(self) -> None:
         if not self.song:
