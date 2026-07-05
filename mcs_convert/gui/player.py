@@ -31,7 +31,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from ..audio import Player, synth_song, wav_bytes
+from ..audio import Player, synth_song, tempo_bpm, tempo_step_seconds, wav_bytes
 from ..mcs.reader import parse
 from ..pitch import midi_to_name
 
@@ -50,6 +50,7 @@ class PlayerApp:
         root.geometry("560x640")
 
         self._build_toolbar()
+        self._build_meta()
         self._build_tracker()
         self._build_statusbar()
 
@@ -67,14 +68,19 @@ class PlayerApp:
         self.stop_btn = tk.Button(bar, text="■ Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
 
-        tk.Label(bar, text="Tempo", bg=_BG, fg=_FG).pack(side="left", padx=(16, 4))
-        self.tempo = tk.IntVar(value=8)  # notes (steps) per second
-        tk.Scale(bar, from_=2, to=16, orient="horizontal", variable=self.tempo,
-                 bg=_BG, fg=_FG, highlightthickness=0, length=110).pack(side="left")
-
-        self.wave = tk.StringVar(value="square")
-        ttk.Combobox(bar, textvariable=self.wave, width=9, state="readonly",
-                     values=["square", "triangle", "sine"]).pack(side="left", padx=(12, 0))
+    def _build_meta(self) -> None:
+        # Read-only song metadata extracted from the file. Playback follows these; there
+        # are no manual overrides — the point is to reproduce what the .MCS actually stores.
+        meta = tk.Frame(self.root, bg=_BG)
+        meta.pack(fill="x", padx=8, pady=(0, 2))
+        self.meta_vars = {k: tk.StringVar(value="—") for k in ("Time", "Key", "Tempo")}
+        for label in ("Time", "Key", "Tempo"):
+            cell = tk.Frame(meta, bg=_BG)
+            cell.pack(side="left", padx=(0, 20))
+            tk.Label(cell, text=label, bg=_BG, fg=_ACCENT,
+                     font=("TkDefaultFont", 8)).pack(anchor="w")
+            tk.Label(cell, textvariable=self.meta_vars[label], bg=_BG, fg=_FG,
+                     font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
 
     def _build_tracker(self) -> None:
         frame = tk.Frame(self.root, bg=_BG)
@@ -128,6 +134,15 @@ class PlayerApp:
         for i in range(max(len(tnotes), len(bnotes))):
             self.tree.insert("", "end",
                              values=(i + 1, label(tnotes, i), label(bnotes, i)))
+
+        self.meta_vars["Time"].set(self.song.time_signature or "—")
+        self.meta_vars["Key"].set(self.song.key_signature or "—")
+        if self.song.tempo_level is not None:
+            self.meta_vars["Tempo"].set(
+                f"{self.song.tempo_level}/3  (≈{round(tempo_bpm(self.song.tempo_level))} BPM)")
+        else:
+            self.meta_vars["Tempo"].set("—")
+
         total = sum(len(t.notes) for t in self.song.tracks)
         rests = sum(1 for tr in self.song.tracks for n in tr.notes if n.is_rest)
         self.status.configure(
@@ -137,8 +152,9 @@ class PlayerApp:
     def play(self) -> None:
         if not self.song:
             return
-        step = 1.0 / max(1, self.tempo.get())
-        pcm, sr = synth_song(self.song, step_seconds=step, waveform=self.wave.get())
+        # Timing comes from the file's own stored tempo; timbre is the PC-speaker square.
+        step = tempo_step_seconds(self.song.tempo_level)
+        pcm, sr = synth_song(self.song, step_seconds=step, waveform="square")
         if not pcm:
             self.status.configure(text="Nothing to play (no decoded notes).")
             return

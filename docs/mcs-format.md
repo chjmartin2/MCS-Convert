@@ -24,11 +24,27 @@ Ground-truth edits are made on the self-booting test disk
 | Offset | Size | Field |
 |--------|------|-------|
 | 0x00–0x04 | 5 | vertical scroll/view bytes (ladder of 3: 0x77, 0x7A … 0x8C). **Display state only — pitch does not depend on them.** |
-| 0x05   | 2 | tempo word, stored as `0x3AF9 + setting` (engine compares against 0x3AF9 at image 0x1470) |
-| 0x07   | 2 | ? (often 0) |
+| 0x05   | 2 | **tempo word**, stored as `0x3AF9 + 3·level`. `level` (0–3 across the corpus: 13/44/8/15 songs) is fed into the note-timing multiply at image 0x1535. Each level is one equal-tempered semitone (~5.9%) faster. |
+| 0x07   | 2 | ? (often 0; a few songs hold 16/18/20 — likely the clef+key-sig pixel width, not meter) |
 | 0x09   | 2 | byte size of the staff-1 section (confirmed by SCALE4: +2/−2 when a note moved between staves) |
 | 0x0B   | 2 | byte size of the staff-2 section |
 | 0x0D   | 2 | total file length |
+
+### Derived metadata (tempo / time signature / key / volume)
+The reader surfaces three display values; a fourth (volume) provably isn't in the file.
+- **Tempo** — the 0x05 level (above). It's a coarse 4-step speed index, not a BPM. We
+  reproduce the *relative* steps faithfully and anchor level 1 (the default) to 120 BPM;
+  the absolute anchor is a calibration (true rate depends on the PIT ISR).
+- **Time signature** — **not stored**; the engine just plays measures back to back, so
+  meter is emergent. We report the modal measure length in sixteenth-ticks
+  (12→3/4, 16→4/4, 8→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
+  handful of pickup/irregular songs. MINUETG → 3/4 ✓.
+- **Key signature** — from the accidental glyphs in the clef record (see below).
+  MINUETG's single sharp → **G major** ✓.
+- **Volume** — **there is none.** The note word is fully accounted for (x, v, symbol);
+  the PC-speaker output is 1-bit. The engine's Tandy/SN76489 path (OUT 0xC0) has 4-bit
+  attenuation but it's driven by clef/voice config, not per-note or per-song file data.
+  In the player, "volume" can only ever be a synth-amplitude control, not song data.
 
 ### Body: measures and staves
 `FF FF count prev_count` records, each followed by `count` 2-byte entries.

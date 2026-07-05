@@ -14,7 +14,7 @@ import io
 import os
 import tempfile
 import wave
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -23,6 +23,26 @@ from .model import Song
 
 def midi_to_freq(midi: int) -> float:
     return 440.0 * 2.0 ** ((midi - 69) / 12.0)
+
+
+# MCS's stored tempo is a discrete speed index (the 0x05 header word). The engine's
+# tempo table steps by one equal-tempered "semitone" (2^(1/12)) per level, so each level
+# up is ~5.9% faster. We anchor level 1 (by far the most common) to a musical 120 BPM
+# (a quarter = 4 sixteenths = 0.5 s); the *relative* steps are faithful to the file, the
+# absolute anchor is a calibration (the true rate depends on the PIT ISR — see docs).
+_SEMITONE = 2.0 ** (1.0 / 12.0)
+_STEP_AT_LEVEL_1 = 0.125          # seconds per sixteenth-tick at tempo level 1
+
+
+def tempo_step_seconds(level: Optional[int]) -> float:
+    """Seconds per sixteenth-tick for an MCS stored tempo level (defaults to level 1)."""
+    lvl = 1 if level is None else level
+    return _STEP_AT_LEVEL_1 * _SEMITONE ** (1 - lvl)
+
+
+def tempo_bpm(level: Optional[int]) -> float:
+    """Approximate quarter-note BPM for a stored tempo level (4 sixteenths per quarter)."""
+    return 60.0 / (4.0 * tempo_step_seconds(level))
 
 
 def _wave(phase: np.ndarray, waveform: str) -> np.ndarray:

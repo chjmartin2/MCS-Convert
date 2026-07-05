@@ -194,6 +194,45 @@ def test_scale_covers_the_fixed_windows(tmp_path):
         assert all(b - a in (1, 2) for a, b in zip(midis, midis[1:]))
 
 
+def test_metadata_tempo_time_key(tmp_path):
+    # A 3/4 measure (quarter + 4 eighths = 12) in G major (one sharp glyph in the clef
+    # record), with the tempo word 0x3B02 = level 3 at header offset 0x05.
+    header = bytearray(0x0F)
+    header[0x05], header[0x06] = 0x02, 0x3B      # tempo word 0x3B02 -> level 3
+    body = bytes([
+        0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,   # treble clef + key-sig sharp (F line)
+        0xFF, 0xFF, 5, 2,
+        0x03, 34, 0x82, 50, 0x62, 66, 0x42, 82, 0x22, 98,
+        0xFF, 0xFF, 0, 5,
+        0xFF, 0xFF, 0, 0,
+    ])
+    p = tmp_path / "meta.mcs"
+    p.write_bytes(bytes(header) + body)
+    song = parse(str(p))
+    assert song.time_signature == "3/4"
+    assert song.key_signature == "G major"
+    assert song.tempo_level == 3
+    assert song.tempo_raw == 0x3B02
+
+
+def test_metadata_four_four_c_major(tmp_path):
+    # No accidental glyphs -> C major; a 16-tick measure -> 4/4; default tempo word.
+    header = bytearray(0x0F)
+    header[0x05], header[0x06] = 0xFC, 0x3A       # 0x3AFC -> level 1
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,
+        0xFF, 0xFF, 4, 1, 0x03, 34, 0x03, 50, 0x03, 66, 0x03, 82,   # 4 quarters = 16
+        0xFF, 0xFF, 0, 4,
+        0xFF, 0xFF, 0, 0,
+    ])
+    p = tmp_path / "c44.mcs"
+    p.write_bytes(bytes(header) + body)
+    song = parse(str(p))
+    assert song.time_signature == "4/4"
+    assert song.key_signature == "C major"
+    assert song.tempo_level == 1
+
+
 def test_scale_measure_alignment(tmp_path):
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}

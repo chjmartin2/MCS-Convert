@@ -2,8 +2,28 @@ import io
 import sys
 import wave
 
-from mcs_convert.audio import Player, midi_to_freq, synth_song, wav_bytes
+from mcs_convert.audio import (
+    Player,
+    midi_to_freq,
+    synth_song,
+    tempo_bpm,
+    tempo_step_seconds,
+    wav_bytes,
+)
 from mcs_convert.model import NoteEvent, Song, Track
+
+
+def test_tempo_level_1_is_120_bpm():
+    # Level 1 (the corpus default) anchors to a musical 120 BPM = 0.125 s per sixteenth.
+    assert tempo_step_seconds(1) == 0.125
+    assert round(tempo_bpm(1)) == 120
+    assert tempo_step_seconds(None) == tempo_step_seconds(1)   # unknown -> default
+
+
+def test_higher_tempo_level_plays_faster():
+    # Each level up is one engine "semitone" faster.
+    assert tempo_step_seconds(3) < tempo_step_seconds(1) < tempo_step_seconds(0)
+    assert tempo_bpm(3) > tempo_bpm(1) > tempo_bpm(0)
 
 
 def _demo_song():

@@ -53,6 +53,11 @@ class Song:
     tick_hz: float = 60.0                       # player calls per second
     tracks: List[Track] = field(default_factory=list)
     source: str = ""                            # provenance, e.g. "nsf:mygame.nsf#3"
+    # Extracted display metadata (populated by the MCS reader; see docs/mcs-format.md).
+    time_signature: str = ""                    # e.g. "3/4", derived from measure length
+    key_signature: str = ""                     # e.g. "G major", from the clef-record accidentals
+    tempo_level: Optional[int] = None           # MCS stored speed index (0..3), None if unknown
+    tempo_raw: Optional[int] = None             # the raw 0x05 header word
 
     def add_track(self, track: Track) -> Track:
         self.tracks.append(track)

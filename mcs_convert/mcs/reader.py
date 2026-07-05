@@ -61,6 +61,33 @@ MIDI_ANCHOR = 44          # ladder 0 = G#2: G4's PIT divisor 3044 = 392.00 Hz ex
 
 _NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
 
+# Tempo: the 0x05 header word is 0x3AF9 + 3*level; the engine feeds `level` into its
+# note-timing multiply (image 0x1535). The corpus uses levels 0..3 only.
+TEMPO_BASE = 0x3AF9
+TEMPO_STEP = 3
+
+# Key names by number of sharps / flats in the clef-record signature.
+_SHARP_KEYS = ["C", "G", "D", "A", "E", "B", "F#", "C#"]
+_FLAT_KEYS = ["C", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"]
+
+# Common measure lengths (in sixteenth-ticks) -> time signature label.
+_TIME_SIG = {2: "2/8", 4: "1/4", 6: "3/8", 8: "2/4", 12: "3/4",
+             16: "4/4", 20: "5/4", 24: "6/8", 32: "4/2"}
+
+
+def _time_signature(sixteenths: int) -> str:
+    if sixteenths in _TIME_SIG:
+        return _TIME_SIG[sixteenths]
+    return f"{sixteenths}/16" if sixteenths else ""
+
+
+def _key_name(keysig: List[int]) -> str:
+    sharps = sum(1 for v in keysig if v > 0)
+    flats = sum(1 for v in keysig if v < 0)
+    if flats:
+        return f"{_FLAT_KEYS[min(flats, 7)]} major"
+    return f"{_SHARP_KEYS[min(sharps, 7)]} major"
+
 
 def vertical(byte0: int, byte1: int) -> int:
     """The 6-bit staff position: byte1's low 3 bits are the high half."""
@@ -231,12 +258,26 @@ def parse(path: str) -> Song:
 
     staff_recs = split_staves(parse_records(d))
     decoded: List[Tuple[str, List[List[_Slot]]]] = []
+    staves: List[_Staff] = []
     for si, recs in enumerate(staff_recs[:2]):
         staff = _read_staff(recs, 1 if si == 0 else 21)
+        staves.append(staff)
         name = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
         decoded.append((name, _decode_measures(staff)))
 
-    measure_len = max((_span(m) for _, ms in decoded for m in ms), default=16)
+    spans = [_span(m) for _, ms in decoded for m in ms if m]
+    measure_len = max(spans, default=16)
+
+    # --- display metadata --------------------------------------------------
+    if len(d) >= 0x07:
+        song.tempo_raw = _u16(d, 0x05)
+        song.tempo_level = max(0, (song.tempo_raw - TEMPO_BASE) // TEMPO_STEP)
+    if spans:
+        modal = max(set(spans), key=spans.count)   # the meter is the typical measure length
+        song.time_signature = _time_signature(modal)
+    if staves:
+        treble = next((s for s in staves if s.clef == CLEF_TREBLE), staves[0])
+        song.key_signature = _key_name(treble.keysig)
 
     for idx, (name, measures) in enumerate(decoded):
         track = Track(name=name)
