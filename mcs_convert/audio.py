@@ -33,18 +33,21 @@ def _wave(phase: np.ndarray, waveform: str) -> np.ndarray:
     return np.sin(2 * np.pi * phase).astype(np.float32)  # sine
 
 
-def _render_track(notes: List[Tuple[int, int, bool]], sr: int, step: float,
+def _render_track(events: List[Tuple[int, int, int]], sr: int, step: float,
                   amp: float, waveform: str) -> np.ndarray:
-    total_samples = int(sum(d for _, d, _ in notes) * step * sr)
+    """Render (start_tick, duration_ticks, midi) events at their absolute positions.
+
+    Placement is by start_tick (not cumulative), so chords overlap and a staff that
+    sits out a measure stays silent for it. Rests need no events — silence is the
+    default between placed notes.
+    """
+    total_samples = int(max(s + d for s, d, _ in events) * step * sr)
     out = np.zeros(max(total_samples, 1), dtype=np.float32)
     fade = max(1, int(0.006 * sr))
-    pos = 0
-    for midi, dur, is_rest in notes:
+    for start, dur, midi in events:
+        pos = int(start * step * sr)
         ns = int(dur * step * sr)
         if ns <= 0:
-            continue
-        if is_rest:
-            pos += ns          # timed silence: leave the zeros, advance the cursor
             continue
         t = np.arange(ns, dtype=np.float32) / sr
         seg = amp * _wave(midi_to_freq(midi) * t, waveform)
@@ -54,7 +57,6 @@ def _render_track(notes: List[Tuple[int, int, bool]], sr: int, step: float,
             seg[:f] *= np.linspace(0.0, 1.0, f, dtype=np.float32)
             seg[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
         out[pos:pos + ns] += seg
-        pos += ns
     return out
 
 
@@ -63,9 +65,10 @@ def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.125
     """Render every track (mixed) to mono 16-bit PCM. Returns (pcm_bytes, sample_rate)."""
     tracks = []
     for tr in song.tracks:
-        notes = [(n.midi_note, n.duration_ticks, n.is_rest) for n in tr.notes]
-        if notes:
-            tracks.append(_render_track(notes, sample_rate, step_seconds, amplitude, waveform))
+        events = [(n.start_tick, n.duration_ticks, n.midi_note)
+                  for n in tr.notes if not n.is_rest]
+        if events:
+            tracks.append(_render_track(events, sample_rate, step_seconds, amplitude, waveform))
     if not tracks:
         return b"", sample_rate
     length = max(len(t) for t in tracks)

@@ -1,155 +1,159 @@
 # Music Construction Set (IBM-PC) song format — reverse-engineering log
 
-**Status: actively decoded.** No public spec exists, but we now have the original 1984
-IBM-PC release and ~80 sample songs, and the structure is largely worked out (below).
-This file is the running investigation; update it as facts land.
+**Status: largely decoded.** No public spec exists, but with the original 1984 IBM-PC
+release, ~80 sample songs, and controlled edit-and-diff experiments in MartyPC
+(MIN2/SCALE2/SCALE3/SCALE4), the note encoding is now understood end to end except for
+one open rule (octave resolution of large leaps) and a few flags. This file is the
+running investigation; update it as facts land.
 
 ## Corpus
 
 From the Internet Archive "Will Harvey's Music Construction Set (1984)" DOSBox rip
-(`samples/ia_1984/`, gitignored). Contains `MCS.EXE`/`MCSDISK.EXE`, `MCSHAND.ASM`
-(Demonlord's INT-13h rip shim — *not* the note format), `READ.TXT`, and ~80 song files:
-54 `.MCS` + 26 `.MCD`. Analyze with [`tools/mcs_dump.py`](../tools/mcs_dump.py).
+(`samples/ia_1984/`, gitignored). Contains `MCS.EXE`/`MCSDISK.EXE`, `READ.TXT`, and ~80
+song files: 54 `.MCS` + 26 `.MCD` (same format; `.MCD` are the bundled demos). Analyze
+with [`tools/mcs_dump.py`](../tools/mcs_dump.py). Ground-truth edits are made on the
+self-booting test disk ([martypc-test-disk.md](martypc-test-disk.md)) and extracted with
+`tools/make_mcs_dsk.py`'s `extract_file_from_image`.
 
-`.MCS` vs `.MCD`: both are songs and share the same structure; `.MCD` are the bundled
-demo tunes (demo mode plays the first `.MCD`), `.MCS` is the default save extension.
+## File layout (confirmed)
 
-## Confirmed structure
-
-### File header (first 15 bytes)
+### Header (first 15 bytes)
 | Offset | Size | Field | Status |
 |--------|------|-------|--------|
-| 0x00   | 1    | ? (0x77-0x86 range) | hypothesis: view/scroll or top staff-position |
-| 0x01   | 4    | four bytes in pitch range (e.g. 77 77 89 89) | hypothesis: staff view bounds |
-| 0x05   | 2    | uint16 ~0x3AFC-0x3B06 | hypothesis: tempo |
-| 0x09   | 2    | uint16 | hypothesis: offset/size of staff 1 region |
-| 0x0B   | 2    | uint16 | hypothesis: offset/size of staff 2 region |
-| **0x0D** | **2** | **uint16 total file length** | **CONFIRMED (80/80 songs)** |
+| 0x00   | 1    | byte in the 0x77–0x8C range | global vertical scroll? (view state) |
+| 0x01   | 4    | four bytes on a ladder of 3 (0x77, 0x7A, … 0x8C) | per-staff vertical scroll positions (view state; possibly top/bottom per staff) |
+| 0x05   | 2    | uint16 ~0x3AF9-0x3B02 | hypothesis: tempo |
+| 0x07   | 2    | uint16 | ? (often 0; 0x12/0x14 seen) |
+| **0x09** | **2** | **uint16 byte size of the staff-1 section** | **CONFIRMED** |
+| **0x0B** | **2** | **uint16 byte size of the staff-2 section** | **CONFIRMED** |
+| **0x0D** | **2** | **uint16 total file length** | **CONFIRMED (80/80)** |
+
+0x09/0x0B were confirmed by SCALE4: moving one note from the bass staff to the treble
+staff changed them by exactly +2/−2 (one 2-byte entry migrating). Each size spans from
+the staff's first record up to but not including its `(0,0)` terminator.
 
 Note data begins at **0x0F**.
 
-### Note data = doubly-linked records (CONFIRMED)
-The body is a sequence of records, each introduced by the marker **`FF FF`** followed by a
-2-byte tag **`(count, prev_count)`**:
-- `count` = number of 2-byte note entries in *this* record.
-- `prev_count` = the `count` of the *previous* record (a back-link for MCS's editor).
+### Body = two staff sections of measure records (confirmed)
+A sequence of records, each `FF FF count prev_count` followed by `count` 2-byte entries.
+`prev_count` back-links to the previous record's count (editor convenience).
 
-Verified across SCALES/YANKEE/BARG/BUGGY: e.g. chain `(1,0) (7,1) (6,7) (8,6) (6,8) ...`.
+- **A record is one MEASURE.** Durations in a full record sum to the time signature
+  (12 sixteenths for MINUETG's 3/4, 16 for 4/4 songs).
+- **`(0, prev)` with prev ≠ 0 is an EMPTY MEASURE**, not a terminator. (SCALE's treble
+  measure 1 is empty while the bass plays; in SCALE4 that record gained the moved note.)
+- **`(0, 0)` terminates the staff**; the next chain is the second staff of the grand
+  staff. Both staves advance measure-by-measure in parallel.
+- The **first record of each staff** holds the clef glyph — byte0 `0x06` treble,
+  `0x0D` bass — and optionally a **time-signature glyph** (low nibble `0xF`, e.g.
+  MINUETG's `(0xEF, 128)` for 3/4). These are display glyphs, not sounding notes; a
+  glyph entry's byte1 is its x position (~106–128).
 
-### Grand staff = two sections (CONFIRMED)
-A staff's record chain ends with `(0, prev)` then `(0, 0)`. After the terminator, a **new
-chain starts fresh** for the second staff. So each song has two staves — MCS's **treble +
-bass grand staff**. (The header words at 0x09/0x0B probably locate these two regions.)
+## Note entry = `(byte0, byte1)` — ground-truthed field by field
 
-### The clef is the first record (CONFIRMED)
-Every treble staff opens with a single-entry record whose note is **pitch 106, byte0 0x06**;
-every bass staff opens with **pitch 108, byte0 0x0d**. Constant across all songs ⇒ these are
-the **clef glyphs**, not sounding notes. (Time signature may share this leading record —
-BARG opens `(2,0)` with a second entry; to confirm.)
+```
+byte0:  [7:5] vertical class   [4] flag?   [3:0] symbol (bit3 = rest)
+byte1:  horizontal pixel position within the measure
+```
 
-### Note entry = `(byte0, byte1)` (pitch CONFIRMED; byte0 partial)
-Notes appear in **time order** as stored (early doubt about pitch-sorting was wrong —
-those songs simply had scalar/arpeggiated passages).
+### byte1 = HORIZONTAL position (confirmed)
+SCALE2 (move one note one slot right): byte1 +8, nothing else moves. Horizontal slot
+spacing is ~8 px for dense 16th passages, ~16 px otherwise, with placement jitter —
+MCS reloads exact placement, which is why it's stored. Uses:
+- notes at (nearly) the same x share a stem = a **chord** (MINUETG's bass opens with
+  two half notes at x=36 — with the quarter that follows, exactly 3/4);
+- a staff entering a shared measure late sits to the right (SCALE's treble enters
+  measure 2 at slot 4, after the bass's 4 notes).
 
-- **byte1 = a vertical PIXEL position**, higher value = higher pitch, normalized against the
-  clef's own byte1 anchor. Decode:
+**Earlier byte1-as-pitch decoding was wrong.** It "worked" on ascending scales because
+pitch and x rise together there; MINUETG's opening was decoded as a rising G-A-B-C-D
+when the real tune is D5 then G4-A4-B4-C5.
 
-  ```
-  steps = round((byte1 - clef_byte1) / STEP) + anchor_offset
-  midi  = walk C-major white keys from G4 by `steps`      # accidentals dropped
-  ```
+### byte0 bits[3:0] = note/rest symbol (confirmed)
+Bit3 (`0x08`) is the **rest flag**; the value is the note value on a doubling ladder:
 
-  - **Clef anchor offsets** (diatonic steps from G4, zoom-independent):
-    - **treble = +5** (anchor = E5) — from `MINUETG.MCS`, whose opening byte1 `34,50,66,82,98`
-      → **G4 A4 B4 C5 D5** (the tune's rising scale).
-    - **bass = −8** (anchor = F3, exactly what the F-clef points at) — from `SCALE.MCS`, an
-      edited-in full white-key scale whose notes cross seamlessly from the bass staff
-      (…B2 C3 D3 … **C4**) into the treble staff (**D4** E4 F4 …). Bass was previously ~2
-      octaves too high (it reused the treble math).
-  - **STEP = pixels per diatonic step is a per-song ZOOM.** 16 for most songs (MINUETG,
-    DIXIE), but MCS zooms out for wide-range pieces — `SCALE.MCS` spans ~6 octaves and uses
-    **8**. `parse(diatonic_step=…)` takes it; default 16. Not yet auto-detected: the obvious
-    odd/even-grid test misfires because normal songs carry ~8px byte1 jitter (some notes sit a
-    half-step off the 16-grid). Finding the zoom (likely a header field) is an open item.
+| nibble | 1 | 2 | 3 | 4 | 5 | | 8 | 9 | 10 | 11 | 12 |
+|--------|---|---|---|---|---|-|---|---|----|----|----|
+| value  | 16th | 8th | quarter | half | whole | | 16th rest | 8th rest | quarter rest | half rest | whole rest |
 
-  Implemented + tested in [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
-- **byte0 = duration + rest flag + render bits** (CONFIRMED via emulator ground truth):
-  - **bits[3:0] = note/rest SYMBOL.** Bit 3 (`0x08`) is the **rest flag**; the low value is
-    the note value on a doubling ladder:
+Duration in sixteenth-ticks = `2**(v-1)` (notes) / `2**(v-8)` (rests). Ground truth:
+MIN2's note→rest edit changed `0x82 → 0x89`. Nibbles 0, 6, 7 (and 13, 14, 15) are
+uncommon and still provisional — likely dotted values. Nibbles 6/13 also appear as the
+clef glyphs, and 15 as the time signature, in the clef record only.
 
-    | nibble | 1 | 2 | 3 | 4 | 5 | | 8 | 9 | 10 | 11 | 12 |
-    |--------|---|---|---|---|---|-|---|---|----|----|----|
-    | value  | 16th | 8th | quarter | half | whole | | 16th **rest** | 8th rest | quarter rest | half rest | whole rest |
+### byte0 bits[7:5] = vertical position, low 3 bits, INVERTED (confirmed)
+One staff step **up** decrements the class, mod 8 (SCALE3: note moved up one position,
+`0x21 → 0x01`, byte1 untouched). The frame is **global**: `class == (-pos) % 8` where
+`pos` counts diatonic steps from **C4 = class 0** (so B3=1, A3=2, …, D4=7, G4=4,
+D5=0…). This one frame fits every ground truth simultaneously:
+- MINUETG treble bars 1–4: classes `0,4,3,2,1 | 0,4,4 | 7,1,0,7,6 | 5,4,4` =
+  D5 G4 A4 B4 C5 | D5 G4 G4 | E5 C5 D5 E5 F(♯)5 | G5 G4 G4 — the actual Minuet.
+- DIXIE's melody: `4,6 | 0,0,0,7,6,5,4,4,4,6` = G E | C C C D E F G G G E —
+  "Oh I wish I was in the land of cotton", rhythm and all.
+- SCALE's 40-note scale counts down `0,7,6,…,1` continuously across measures **and
+  across the bass→treble staff hop** (consistent with a C2..E7 program range).
 
-    Duration in sixteenth-ticks = `2**(nibble-1)` for a note, `2**(nibble-8)` for a rest.
-    Ground truth: MINUETG opens **quarter + 4 eighths** (nibbles `3,2,2,2,2` — matches the
-    on-screen notation in MartyPC), and editing that first eighth into an eighth rest changed
-    `byte0 0x82 → 0x89` (nibble `2 → 9`) with `byte1 0x32 → 0x39` (pitch → a fixed rest-glyph
-    staff position). Corpus: notes 1–5 = 17/29/22/5/4 %, rests 8–12 present at ~11 % overall —
-    a textbook duration distribution. Implemented in `decode_duration()`.
-    Nibbles **0, 6, 7** (notes) and **13, 14, 15** (rests) are uncommon (~13 %) and not yet
-    pinned — likely dotted/ornamented; mapped provisionally to their measure-completion mode.
-  - **bits[7:5] = stem/beam render length, NOT musical.** It moves *linearly with pitch*
-    within a beam group (MINUETG's rising G-A-B-C-D run → 4,3,2,1 as noteheads climb toward
-    the beam). A drawing artifact; ignored for timing.
+### The octave is NOT stored (proven) — resolution rule still open
+SCALE stores D4, E5 and F6 as **byte-identical `0x81` entries on the same staff** — with
+3 class bits there is nothing left to distinguish octaves, so MCS must reconstruct the
+coarse vertical from context on load. SCALE4 agrees: moving a note up by 8 positions
+(one full class wrap) left byte0 unchanged and only relocated the entry into the other
+staff's section.
 
-### Records are MEASURES (CONFIRMED)
-Each `FF FF (count,prev)` record is one **bar**. With the duration ladder above, MINUETG's
-treble records each sum to **12 sixteenths = 3/4** (quarter + 4 eighths, or 3 quarters, …).
-This is what validated the ladder, and it means a record's note+rest durations should total
-the time signature — a strong consistency check for future decoding.
+Our reader resolves each note to the class candidate nearest its predecessor (first note:
+nearest a per-clef anchor), **ties broken downward** — from D5, class 4 must give G4
+(4 down), not A5 (4 up). That decodes stepwise music and leaps up to a fifth correctly,
+which covers the corpus's overwhelming majority. It provably canNOT be MCS's actual rule,
+though: MINUETG bar 4 opens with a real G5→G4 drop (7 steps) that nearest-candidate
+mis-resolves, yet MCS reloads it fine — and no memoryless previous-note rule can decode
+both SCALE's +1 ladders and that drop, since both store a class delta of 1. Whatever MCS
+uses (per-staff scroll state? two-pass layout?) lives in MCSDISK.EXE's loader —
+disassembling it is the definitive next step. Practical effect meanwhile: passages after
+a >fifth leap can ride 8 steps high/low until stepwise motion re-centers; a per-clef
+range clamp keeps the drift bounded.
 
-### Still to tweak (first-pass gaps)
-- **Per-song zoom (STEP) auto-detection** — 16 vs 8 pixels/step; currently a `parse()` arg
-  defaulting to 16. Likely a header field (0x00–0x0C); find it so wide songs decode unaided.
-- **Dotted/ornament nibbles 0,6,7** (and rest mirrors 13,14,15) — provisional; pin them with
-  more emulator edits (e.g. save a known dotted note and diff).
-- **Accidentals** — dropped (e.g. MINUETG's F♯ reads as F); the middle byte0 bits are suspect.
-  Also explains some ~8px byte1 jitter that blocks naive zoom detection.
-- **Key signature** — probably in the header (0x00–0x0C); would supply default accidentals.
+### byte0 bit[4] = unknown flag (~22% of notes)
+Set on scattered notes (e.g. DIXIE `0x30|…` entries), never in SCALE, not on MINUETG's
+F♯s (so probably not a plain accidental unless key signatures supply those). Candidate
+meanings: accidental, tie, staccato/articulation. Pin with an edit-and-diff (add one
+sharp / one tie to a saved song).
 
-## What we know (from research, 2026-07)
+## Experiment log (MartyPC edit-and-diff)
+| File | Edit vs baseline | Diff | Lesson |
+|------|------------------|------|--------|
+| MIN2 | 8th note → 8th rest | `0x82→0x89`, byte1 `0x32→0x39` | bit3 = rest flag; rest glyph x shifts |
+| SCALE2 | last note of m.1 one slot RIGHT | byte1 +8; byte0 `0x21→0x01` | byte1 = horizontal. (byte0 change = the note also slipped one position UP — same signature as SCALE3; reload SCALE2 and check: predicted G3 where F3 was.) |
+| SCALE3 | same note one position UP | byte0 `0x21→0x01` only | class bits = vertical, −1 per step up, byte1 untouched |
+| SCALE4 | same note up 8 positions (placed as "an octave") | entry moved bass→treble section; counts, prev-links, header sizes 0x09/0x0B all updated; byte0 unchanged | octave not stored per note; staff sections + header sizes confirmed. (A true 7-step octave would have set byte0 `0x41`.) |
 
-- *Will Harvey's Music Construction Set*, designed by Will Harvey, published by Electronic
-  Arts. Original 1983 Apple II; **IBM-PC ports in 1984 and 1987**.
-- The 1984 IBM release **boots from a non-standard single-sided double-density 5.25" disk**
-  — "readable in DOS, but only the song files will be seen." Save/load happens through a
-  DOS/BASIC-like prompt. So songs are individual files on a semi-DOS disk.
-- Sound backends (1984 booter): PC speaker or cassette, in **4-note** (CPU-bound, no
-  scroll) or **1-note-with-scroll** modes. The 1987 version added IBM Music Feature Card
-  (240 voice patches). Implies the on-disk song stores up to ~4 simultaneous voices.
-- Capacity anecdote: ~**700 notes** max per song.
-- File extension for the DOS version: **not confirmed** (.SNG / .MUS both guessed, neither
-  verified).
+## Still open
+- **Octave-resolution rule for leaps > a fifth** — disassemble MCSDISK.EXE's song
+  loader (it's a plain DOS EXE; find the class-bit extraction and the y computation).
+- **bit4** (~22% of notes) — accidental / tie / articulation?
+- **Accidentals & key signature** — MINUETG's F♯ carries no per-note mark we've
+  identified; key sig probably in the header or the clef record.
+- **Dotted nibbles 0, 6, 7** (and 13, 14, 15) — pin with a dotted-note edit.
+- **Header 0x00–0x08** — scroll bytes (ladder of 3), tempo word.
+- **Writer + round-trip test** ([`mcs_convert/mcs/writer.py`](../mcs_convert/mcs/writer.py)):
+  now unblocked for everything except leap octaves.
 
-Sources:
+## Background (research, 2026-07)
+*Will Harvey's Music Construction Set*, designed by Will Harvey, published by Electronic
+Arts (Apple II 1983; IBM-PC 1984 booter, 1987 re-release). The 1984 IBM release boots
+from its own 360K disk; Demonlord's rip supplies `MCSDISK.EXE` (saves to 360K floppies —
+what our test disk uses) and `MCS.EXE` (hard-disk version). Sound: PC speaker, 4-note
+CPU-bound mode or 1-note with scrolling. ~700 notes max per song.
+
 - Wikipedia: https://en.wikipedia.org/wiki/Music_Construction_Set
-- Nerdly Pleasures (PC sound support): http://nerdlypleasures.blogspot.com/2015/02/electronic-arts-music-construction-set.html
-- Internet Archive disk images (1984): https://archive.org/details/msdos_Will_Harveys_Music_Construction_Set_1984
-- Internet Archive (1987): https://archive.org/details/EAMusicConstructionSet1987
+- Nerdly Pleasures: http://nerdlypleasures.blogspot.com/2015/02/electronic-arts-music-construction-set.html
+- Internet Archive (1984): https://archive.org/details/msdos_Will_Harveys_Music_Construction_Set_1984
 
 ## Progress
-
-- [x] **Get sample song files** — 80 songs from the 1984 IA rip (`samples/ia_1984/`).
-- [x] **Dissect gross structure** — file-length field, `FF FF (count,prev)` record chain,
-      two-staff grand-staff layout, clef-as-first-record, `(byte0=dur, byte1=pitch)` entry.
-- [x] **Decode byte1 → pitch** — 16 units/diatonic step, clef-relative, validated against
-      MINUETG's known opening. Reader + tests landed. Accidentals still dropped.
-- [x] **Decode byte0 duration + rests** — low nibble = note/rest value on a doubling ladder,
-      bit3 = rest flag (confirmed by a MartyPC edit-and-diff). bits[7:5] = stem render (ignored).
-      Records confirmed to be measures. Dotted nibbles 0,6,7 still provisional.
-- [ ] **Bass-clef anchor + key signature** — fix bass octaves; find the key sig for defaults.
-- [ ] **Decode the header** (0x00–0x0C): confirm tempo, time/key signature, the two staff
-      region offsets at 0x09/0x0B.
-- [ ] **Validate by editing** — open a song in DOSBox MCS, change ONE known note/duration,
-      re-save, diff the bytes to nail each field exactly. (Highest-signal next step.)
-- [ ] **Implement** [`mcs_convert/mcs/writer.py`](../mcs_convert/mcs/writer.py) + a round-trip
-      test (parse a sample → re-emit → byte-identical).
-
-## Open questions
-- byte1 → semitone: what pixel/units-per-step, and where's the accidental bit? Rendering a
-  known song (DOSBox) or the edit-one-note diff will settle it fastest.
-- byte0: exact duration table and whether horizontal position is stored or derived.
-- Header 0x00–0x0C: which word is tempo, and do 0x09/0x0B point at the two staves?
-- Is there ever more than 2 staves, or >1 voice per staff? (700-note cap noted in READ.TXT.)
-- 1987 IMFC version format may differ; we target **1984** as canonical.
+- [x] Sample corpus (80 songs) + structural dissection (records, staves, clef records).
+- [x] Self-booting MartyPC test disk for controlled edit-and-diff experiments.
+- [x] byte0 low nibble: durations + rest flag (records = measures).
+- [x] byte1 = horizontal position; chords (shared x); late-entry measures.
+- [x] byte0[7:5] = vertical class (global frame, C4 ≡ 0, inverted); header staff sizes.
+- [x] Octave reconstruction good to a fifth; MINUETG/DIXIE decode to their real tunes.
+- [ ] Exact octave rule (disassembly), bit4, accidentals/key sig, dotted values, tempo.
+- [ ] Writer + byte-identical round-trip.
