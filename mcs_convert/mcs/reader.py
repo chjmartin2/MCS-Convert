@@ -30,10 +30,17 @@ from ..model import NoteEvent, Song, Track
 
 CLEF_TREBLE_B0 = 0x06
 CLEF_BASS_B0 = 0x0D
-DIATONIC_STEP = 16          # byte1 units per diatonic staff step
 G4_MIDI = 67
-# byte1 of the clef anchor minus byte1 of the G4 note (empirical: MINUETG clef 114, G4 34).
-TREBLE_G4_OFFSET = 80
+# byte1 is a vertical PIXEL position; DIATONIC_STEP is the pixels per diatonic staff step.
+# NOTE: this is a per-song zoom — 16 for most songs (calibrated on MINUETG), but MCS zooms
+# out for wide-range pieces (SCALE.MCS uses 8). Not yet auto-detected; see docs/mcs-format.md.
+DIATONIC_STEP = 16
+# Pitch of each clef's stored anchor (byte1 == clef's own byte1), in diatonic steps from G4:
+#   treble anchor = E5 (+5), from MINUETG ground truth (clef 114, its G4 at byte1 34).
+#   bass   anchor = F3 (-8) — what the F-clef points at — from SCALE.MCS, whose continuous
+#   white-key scale crosses cleanly from the bass staff (…C4) into the treble staff (D4…).
+TREBLE_ANCHOR_STEPS = 5
+BASS_ANCHOR_STEPS = -8
 
 # byte0 layout (decoded over the ~80-song corpus + emulator ground truth; see
 # docs/mcs-format.md):
@@ -119,14 +126,24 @@ def split_staves(recs: List[Record]) -> List[List[Record]]:
     return staves
 
 
-def treble_pitch(byte1: int, clef_byte1: int) -> int:
-    """Decode a treble-staff note's byte1 to a MIDI note (naturals only, first pass)."""
-    steps = round((byte1 - clef_byte1 + TREBLE_G4_OFFSET) / DIATONIC_STEP)
+def treble_pitch(byte1: int, clef_byte1: int, step: int = DIATONIC_STEP) -> int:
+    """Decode a treble-staff note's byte1 to a MIDI note (naturals only; accidentals dropped)."""
+    steps = round((byte1 - clef_byte1) / step) + TREBLE_ANCHOR_STEPS
     return _white_key(steps)
 
 
-def parse(path: str) -> Song:
-    """Parse an .MCS/.MCD file into a Song (pitch decoded; durations placeholder)."""
+def bass_pitch(byte1: int, clef_byte1: int, step: int = DIATONIC_STEP) -> int:
+    """Decode a bass-staff note's byte1 to a MIDI note (naturals only; accidentals dropped)."""
+    steps = round((byte1 - clef_byte1) / step) + BASS_ANCHOR_STEPS
+    return _white_key(steps)
+
+
+def parse(path: str, diatonic_step: int = DIATONIC_STEP) -> Song:
+    """Parse an .MCS/.MCD file into a Song (pitch + duration + rests decoded).
+
+    diatonic_step is the byte1 pixels-per-staff-step (the per-song vertical zoom); 16 fits
+    most songs, but wide-range pieces are zoomed out (SCALE.MCS uses 8). See docs/mcs-format.md.
+    """
     with open(path, "rb") as fh:
         d = fh.read()
     song = Song(title="", source=f"mcs:{path}")
@@ -143,8 +160,8 @@ def parse(path: str) -> Song:
                 is_rest, dur = decode_duration(byte0)
                 # For a rest, byte1 is a glyph position, not a pitch — don't sound it.
                 midi = 0 if is_rest else (
-                    treble_pitch(byte1, clef_b1) if clef_b0 == CLEF_TREBLE_B0
-                    else treble_pitch(byte1, clef_b1))   # bass anchor TBD; same math for now
+                    treble_pitch(byte1, clef_b1, diatonic_step) if clef_b0 == CLEF_TREBLE_B0
+                    else bass_pitch(byte1, clef_b1, diatonic_step))
                 track.add(NoteEvent(start_tick=tick, duration_ticks=dur,
                                     midi_note=midi, is_rest=is_rest))
                 tick += dur

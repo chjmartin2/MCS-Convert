@@ -6,6 +6,7 @@ G4 A4 B4 C5 D5. These are the actual byte1 values from MINUETG.MCS (clef anchor 
 
 from mcs_convert.mcs.reader import (
     treble_pitch,
+    bass_pitch,
     decode_duration,
     _white_key,
     parse,
@@ -58,6 +59,26 @@ def test_parse_emits_durations_rests_and_start_ticks(tmp_path):
     assert [n.is_rest for n in notes] == [False, True, False, False, False]
     assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10]
     assert notes[1].midi_note == 0                                   # rest doesn't carry a pitch
+
+
+def test_clef_anchors():
+    # A note sitting exactly at the clef's own byte1 anchor:
+    #   treble anchor = E5 (+5 steps above G4), bass anchor = F3 (what the F-clef points at).
+    assert treble_pitch(114, 114) == 76   # E5
+    assert bass_pitch(116, 116) == 53      # F3
+    # one diatonic step (16 px) up from each anchor
+    assert treble_pitch(114 + 16, 114) == 77   # F5
+    assert bass_pitch(116 + 16, 116) == 55      # G3
+
+
+def test_bass_scale_continues_treble_at_step8():
+    # SCALE.MCS ground truth: with the wide-song zoom (8 px/step) the bass staff climbs a clean
+    # white-key scale up to C4, one step below where the treble staff picks up (D4).
+    clef = 116
+    bass = [bass_pitch(b1, clef, 8) for b1 in (115, 123, 131, 139, 147)]  # …A3 B3 C4
+    assert bass[-1] == 60                        # C4
+    assert bass == sorted(bass)                  # strictly ascending
+    assert treble_pitch(50, 114, 8) == 62        # SCALE treble's first note = D4
 
 
 def test_white_key_ladder():

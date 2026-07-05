@@ -51,18 +51,28 @@ BARG opens `(2,0)` with a second entry; to confirm.)
 Notes appear in **time order** as stored (early doubt about pitch-sorting was wrong —
 those songs simply had scalar/arpeggiated passages).
 
-- **byte1 = pitch.** Exactly **16 units per diatonic staff step**, higher value = higher
-  pitch. Pinned to ground truth: `MINUETG.MCS` (Bach Minuet in G) opens byte1
-  `34,50,66,82,98` → **G4 A4 B4 C5 D5**, the tune's rising-scale opening. Decode:
+- **byte1 = a vertical PIXEL position**, higher value = higher pitch, normalized against the
+  clef's own byte1 anchor. Decode:
 
   ```
-  steps_above_G4 = round((byte1 - clef_byte1 + 80) / 16)   # 80 = G4 offset below the
-  midi = walk C-major white keys from G4 by steps_above_G4  #      treble clef's anchor
+  steps = round((byte1 - clef_byte1) / STEP) + anchor_offset
+  midi  = walk C-major white keys from G4 by `steps`      # accidentals dropped
   ```
 
-  The clef's own byte1 is the per-song vertical anchor (114 in MINUETG, 106 elsewhere),
-  so pitch is normalized relative to it. Implemented + tested in
-  [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
+  - **Clef anchor offsets** (diatonic steps from G4, zoom-independent):
+    - **treble = +5** (anchor = E5) — from `MINUETG.MCS`, whose opening byte1 `34,50,66,82,98`
+      → **G4 A4 B4 C5 D5** (the tune's rising scale).
+    - **bass = −8** (anchor = F3, exactly what the F-clef points at) — from `SCALE.MCS`, an
+      edited-in full white-key scale whose notes cross seamlessly from the bass staff
+      (…B2 C3 D3 … **C4**) into the treble staff (**D4** E4 F4 …). Bass was previously ~2
+      octaves too high (it reused the treble math).
+  - **STEP = pixels per diatonic step is a per-song ZOOM.** 16 for most songs (MINUETG,
+    DIXIE), but MCS zooms out for wide-range pieces — `SCALE.MCS` spans ~6 octaves and uses
+    **8**. `parse(diatonic_step=…)` takes it; default 16. Not yet auto-detected: the obvious
+    odd/even-grid test misfires because normal songs carry ~8px byte1 jitter (some notes sit a
+    half-step off the 16-grid). Finding the zoom (likely a header field) is an open item.
+
+  Implemented + tested in [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
 - **byte0 = duration + rest flag + render bits** (CONFIRMED via emulator ground truth):
   - **bits[3:0] = note/rest SYMBOL.** Bit 3 (`0x08`) is the **rest flag**; the low value is
     the note value on a doubling ladder:
@@ -90,11 +100,12 @@ This is what validated the ladder, and it means a record's note+rest durations s
 the time signature — a strong consistency check for future decoding.
 
 ### Still to tweak (first-pass gaps)
+- **Per-song zoom (STEP) auto-detection** — 16 vs 8 pixels/step; currently a `parse()` arg
+  defaulting to 16. Likely a header field (0x00–0x0C); find it so wide songs decode unaided.
 - **Dotted/ornament nibbles 0,6,7** (and rest mirrors 13,14,15) — provisional; pin them with
   more emulator edits (e.g. save a known dotted note and diff).
 - **Accidentals** — dropped (e.g. MINUETG's F♯ reads as F); the middle byte0 bits are suspect.
-- **Bass-clef anchor** — bass staff currently reuses the treble offset, so bass octaves are
-  wrong; needs its own calibration constant.
+  Also explains some ~8px byte1 jitter that blocks naive zoom detection.
 - **Key signature** — probably in the header (0x00–0x0C); would supply default accidentals.
 
 ## What we know (from research, 2026-07)
