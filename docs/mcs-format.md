@@ -38,7 +38,11 @@ The reader surfaces three display values; a fourth (volume) provably isn't in th
 - **Time signature** — **not stored**; the engine just plays measures back to back, so
   meter is emergent. We report the modal measure length in sixteenth-ticks
   (12→3/4, 16→4/4, 8→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
-  handful of pickup/irregular songs. MINUETG → 3/4 ✓.
+  handful of pickup/irregular songs. MINUETG → 3/4 ✓. Two timing conventions matter
+  when laying measures on a grid: a measure holding a **lone whole rest means "rest
+  the whole measure"** whatever the meter (BUMBLE's 2/4 bass opens with four), and the
+  grid must be the **modal** measure length, not the maximum — one long finale bar
+  otherwise inserts silence into every measure of the song.
 - **Key signature** — from the accidental glyphs in the clef record (see below).
   MINUETG's single sharp → **G major** ✓.
 - **Volume** — **there is none.** The note word is fully accounted for (x, v, symbol);

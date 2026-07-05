@@ -261,6 +261,38 @@ def test_metadata_four_four_c_major(tmp_path):
     assert song.tempo_level == 1
 
 
+def test_whole_rest_fills_the_measure(tmp_path):
+    # In a 2/4 song (8-tick measures), a measure holding a lone whole rest means
+    # "rest this measure" (8 ticks), not a literal 16 — BUMBLE's bass opens this way.
+    body = (EMPTY_TREBLE + bytes([
+        0xFF, 0xFF, 1, 0, 0x0D, 0x74,
+        0xFF, 0xFF, 1, 1, 0x0C, 90,                      # lone whole rest
+        0xFF, 0xFF, 4, 1, 0x22, 30, 0x22, 60, 0x22, 90, 0x22, 120,   # 4 eighths = 2/4
+        0xFF, 0xFF, 4, 4, 0x22, 30, 0x22, 60, 0x22, 90, 0x22, 120,
+        0xFF, 0xFF, 0, 4,
+        0xFF, 0xFF, 0, 0,
+    ]))
+    notes = _song(body, tmp_path).tracks[1].notes
+    assert notes[0].is_rest and notes[0].duration_ticks == 8
+    assert notes[1].start_tick == 8                       # music starts at measure 2
+
+
+def test_grid_is_modal_not_max(tmp_path):
+    # One long final measure (a 16-tick held note) must not stretch every 8-tick
+    # measure of a 2/4 song — the old max() grid put 16 ticks of silence in each bar.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,
+        0xFF, 0xFF, 4, 1, 0x22, 30, 0x22, 60, 0x22, 90, 0x22, 120,
+        0xFF, 0xFF, 4, 4, 0x22, 30, 0x22, 60, 0x22, 90, 0x22, 120,
+        0xFF, 0xFF, 1, 4, 0x25, 30,                      # finale: a whole note
+        0xFF, 0xFF, 0, 1,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    assert [n.start_tick for n in notes] == [0, 2, 4, 6, 8, 10, 12, 14, 16]
+    assert notes[-1].duration_ticks == 16                 # the long bar keeps its length
+
+
 def test_scale_measure_alignment(tmp_path):
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}

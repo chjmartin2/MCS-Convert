@@ -282,16 +282,37 @@ def parse(path: str) -> Song:
         name = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
         decoded.append((name, _decode_measures(staff)))
 
-    spans = [_span(m) for _, ms in decoded for m in ms if m]
-    measure_len = max(spans, default=16)
+    def _fills_measure(slots: List[_Slot]) -> bool:
+        # Notation convention: a lone whole rest means "rest the whole measure",
+        # whatever the meter (BUMBLE's 2/4 bass opens with four of them).
+        return len(slots) == 1 and slots[0].is_rest and slots[0].duration == 16
+
+    # The measure grid is the MODAL span (the meter), not the maximum — one long
+    # final measure must not stretch every bar of the song (ties break upward so a
+    # 4/4 song with many short pickup bars still reads 16).
+    spans = [_span(m) for _, ms in decoded for m in ms if m and not _fills_measure(m)]
+    if spans:
+        measure_len = max(set(spans), key=lambda v: (spans.count(v), v))
+    else:
+        measure_len = 16
+    for _, ms in decoded:
+        for m in ms:
+            if _fills_measure(m):
+                m[0].duration = measure_len
+
+    # Per-measure durations: the grid, stretched only by genuinely longer measures.
+    n_meas = max((len(ms) for _, ms in decoded), default=0)
+    m_dur = [max([measure_len] + [_span(ms[mi]) for _, ms in decoded if mi < len(ms)])
+             for mi in range(n_meas)]
+    m_start = [0]
+    for dur in m_dur:
+        m_start.append(m_start[-1] + dur)
 
     # --- display metadata --------------------------------------------------
     if len(d) >= 0x07:
         song.tempo_raw = _u16(d, 0x05)
         song.tempo_level = max(0, (song.tempo_raw - TEMPO_BASE) // TEMPO_STEP)
-    if spans:
-        modal = max(set(spans), key=spans.count)   # the meter is the typical measure length
-        song.time_signature = _time_signature(modal)
+    song.time_signature = _time_signature(measure_len)
     if staves:
         treble = next((s for s in staves if s.clef == CLEF_TREBLE), staves[0])
         song.key_signature = _key_name(treble.keysig)
@@ -299,8 +320,8 @@ def parse(path: str) -> Song:
     for idx, (name, measures) in enumerate(decoded):
         track = Track(name=name)
         for mi, slots in enumerate(measures):
-            tick = mi * measure_len
-            deficit = measure_len - _span(slots)
+            tick = m_start[mi]
+            deficit = m_dur[mi] - _span(slots)
             if slots and deficit > 0:
                 other_first = min(
                     (ms[mi][0].slot_x for j, (_, ms) in enumerate(decoded)
