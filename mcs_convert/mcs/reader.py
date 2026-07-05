@@ -180,13 +180,13 @@ def split_staves(recs: List[Record]) -> List[List[Record]]:
 @dataclass
 class _Staff:
     clef: int
-    v_base: int                    # staff 1 notes live at v 1..20, staff 2 at 21..41
+    v_base: int                    # treble notes live at v 1..20, bass at v 21..41
     keysig: List[int]              # semitone*2 offset per staff degree (0..6)
     octava: int                    # +24 if the clef record carries an 8va glyph
     records: List[Record]
 
     def window(self) -> bytes:
-        return _TREBLE_WINDOW if self.clef == CLEF_TREBLE else _BASS_WINDOW
+        return _TREBLE_WINDOW if self.v_base == 1 else _BASS_WINDOW
 
     def midi(self, v: int, acc2: int) -> int:
         """MIDI note for vertical position v with accidental offset (2x semitones)."""
@@ -197,8 +197,11 @@ class _Staff:
         return (win[idx] + acc2 + self.octava) // 2 + MIDI_ANCHOR
 
 
-def _read_staff(recs: List[Record], v_base: int) -> _Staff:
-    clef = CLEF_TREBLE if v_base == 1 else CLEF_BASS
+def _read_staff(recs: List[Record]) -> _Staff:
+    """Decode a staff's clef record and pick its pitch window. The window follows where
+    the notes actually sit (v 1..20 = treble, v 21..41 = bass) rather than staff order,
+    so multi-staff songs and a bass line printed first both land in the right octave."""
+    clef = CLEF_TREBLE
     keysig = [0] * 7
     octava = 0
     if recs and recs[0].entries:
@@ -211,6 +214,12 @@ def _read_staff(recs: List[Record], v_base: int) -> _Staff:
                 keysig[(vertical(b0, b1) - 1) % 7] = acc
             elif sym == SYM_OCTAVA:
                 octava = 24
+    note_vs = [vertical(b0, b1) for rec in recs[1:] for b0, b1 in rec.entries
+               if _note_value(symbol(b0))[0] == "note"]
+    if note_vs:
+        v_base = 21 if sum(v >= 21 for v in note_vs) * 2 >= len(note_vs) else 1
+    else:
+        v_base = 21 if clef == CLEF_BASS else 1
     return _Staff(clef, v_base, keysig, octava, recs[1:])
 
 
@@ -276,10 +285,13 @@ def parse(path: str) -> Song:
     staff_recs = split_staves(parse_records(d))
     decoded: List[Tuple[str, List[List[_Slot]]]] = []
     staves: List[_Staff] = []
-    for si, recs in enumerate(staff_recs[:2]):
-        staff = _read_staff(recs, 1 if si == 0 else 21)
+    name_counts: Dict[str, int] = {}
+    for si, recs in enumerate(staff_recs):           # all staves (a few songs have 3-4)
+        staff = _read_staff(recs)
         staves.append(staff)
-        name = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
+        base = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
+        name_counts[base] = name_counts.get(base, 0) + 1
+        name = base if name_counts[base] == 1 else f"{base} {name_counts[base]}"
         decoded.append((name, _decode_measures(staff)))
 
     def _fills_measure(slots: List[_Slot]) -> bool:

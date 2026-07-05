@@ -98,6 +98,68 @@ def extract_file_from_image(img: bytes, name_8_3: str) -> bytes:
     raise KeyError(f"{name_8_3} not found in boot template image")
 
 
+def add_file_to_image(img: bytes, name_8_3: str, data: bytes) -> bytes:
+    """Inject one file into an existing FAT12 image (allocates free clusters + a root
+    entry, updates both FATs). Used to drop a generated test song onto the MCS disk so
+    it can be loaded in MartyPC. Replaces any existing file of the same name."""
+    out = bytearray(img)
+    spc = out[13]
+    reserved = struct.unpack_from("<H", out, 14)[0]
+    nfats = out[16]
+    root_ent = struct.unpack_from("<H", out, 17)[0]
+    spf = struct.unpack_from("<H", out, 22)[0]
+    total = struct.unpack_from("<H", out, 19)[0]
+    root_start = reserved + nfats * spf
+    root_secs = (root_ent * 32 + BPS - 1) // BPS
+    data_start = root_start + root_secs
+    nclusters = (total - data_start) // spc
+    bpc = BPS * spc
+    fat = bytearray(out[reserved * BPS:(reserved + spf) * BPS])
+    want = _pack_83(name_8_3)
+
+    # free any existing file of this name, and find a directory slot
+    roff = root_start * BPS
+    slot = None
+    for i in range(root_ent):
+        e = out[roff + i * 32: roff + i * 32 + 32]
+        if e[0:11] == want and not (e[11] & 0x08):
+            clus = struct.unpack_from("<H", e, 26)[0]
+            while 2 <= clus < 0xFF0:
+                nxt = _read_fat12_entry(fat, clus)
+                _set_fat12(fat, clus, 0)
+                clus = nxt
+            out[roff + i * 32] = 0xE5
+        if slot is None and e[0] in (0x00, 0xE5):
+            slot = i
+    if slot is None:
+        raise ValueError("root directory full")
+
+    need = max(1, (len(data) + bpc - 1) // bpc)
+    free = [c for c in range(2, nclusters + 2) if _read_fat12_entry(fat, c) == 0]
+    if len(free) < need:
+        raise ValueError(f"not enough free space for {name_8_3} ({len(data)} bytes)")
+    chain = free[:need]
+    for k, c in enumerate(chain):
+        _set_fat12(fat, c, 0xFFF if k == need - 1 else chain[k + 1])
+        base = (data_start + (c - 2) * spc) * BPS
+        chunk = data[k * bpc:(k + 1) * bpc]
+        out[base:base + len(chunk)] = chunk
+
+    e = bytearray(32)
+    e[0:11] = want
+    e[11] = 0x20                                    # archive
+    struct.pack_into("<H", e, 22, _DOS_TIME)
+    struct.pack_into("<H", e, 24, _DOS_DATE)
+    struct.pack_into("<H", e, 26, chain[0])
+    struct.pack_into("<I", e, 28, len(data))
+    out[roff + slot * 32: roff + slot * 32 + 32] = e
+
+    for f in range(nfats):                          # write both FAT copies
+        off = (reserved + f * spf) * BPS
+        out[off:off + len(fat)] = fat
+    return bytes(out)
+
+
 # --- FAT12 writer -----------------------------------------------------------
 def _pack_83(name: str) -> bytes:
     base, _, ext = name.upper().partition(".")

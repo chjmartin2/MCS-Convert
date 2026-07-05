@@ -129,11 +129,39 @@ override 0x0C); the per-position override table is cleared at each measure.
 Two interim pitch models (byte1-as-pitch; 3-bit class + contextual octave) each fit
 the data available at the time and were wrong — the disassembly ended the guessing.
 
-## Remaining minor unknowns
+## Writing & round-trip (validation)
+[`mcs_convert/mcs/writer.py`](../mcs_convert/mcs/writer.py) is the inverse of the reader
+and the format's strongest self-check:
+- **`serialize_records` reproduces all 80 corpus songs byte-for-byte** (`rewrite(path)`
+  == the original file). Every field of the record model is therefore confirmed exact.
+- `build_file` assembles a valid header (tempo, the two section sizes = each staff's
+  serialized length **minus its `(0,0)` separator**, total length, the `0x0F` pad byte)
+  and staff bodies from note entries.
+- [`tools/make_test_mcs.py`](../tools/make_test_mcs.py) emits **MCSTEST.MCS**, one song
+  exercising every element the reader claims — all five note durations, their beamed
+  forms, all five rests, the whole-rest-fills-measure convention, mid-measure sharp/
+  flat/natural, a key signature, a dotted note, chords, an empty measure, both clefs,
+  and an 8va staff. It is injected onto the MartyPC boot disk (`add_file_to_image`) so
+  the real program can render it and confirm our encoding matches MCS's own.
+
+## Multi-staff
+Two corpus songs (GOOD.MCS, PRETTY6.MCS) have 3–4 staves; the reader decodes them all
+(no longer capped at 2). Each staff's pitch window is chosen by where its notes actually
+sit (v 1–20 → treble, v 21–41 → bass) rather than by staff order.
+
+## Remaining unknowns (playback-immaterial)
 - Symbols 0x00 (252×, 37 distinct verticals — note-like but no duration fits), 0x13
-  (425×, dispatches to a skip stub), and 0x1A–0x1E (rare, timing-control handlers at
-  image 0x224b). 0x14 never occurs. None are common enough to matter for playback, but
-  0x00 is the one worth another controlled edit if a decoded song still sounds thin.
+  (425×, dispatches to a skip stub), and 0x1A–0x1E (rare, timing-control handlers).
+  0x14 never occurs. None appear in enough songs to affect playback; MCSTEST.MCS +
+  MartyPC is the way to pin them with a controlled edit if a song ever sounds thin.
+- **Note-symbol dispatch could not be isolated by emulation.** The image exceeds 64 KB,
+  so the note engine's true segment base is not the image base; a Unicorn harness over
+  the isolated `0x22ac` dispatch resolves the on-screen *drawing* handlers, not the
+  playback duration path, and the latter needs the full runtime (segments, PIT timer,
+  video) reconstructed. The behaviour is instead validated end-to-end by the round-trip
+  above and by the decoded music being correct.
+- **Absolute tempo** remains a calibration (relative steps faithful, level 1 = 120 BPM);
+  the true rate is in the PIT timing loop, not yet reduced.
 - Header bytes 0x07–0x08; the exact view semantics of the five scroll bytes.
 - Playback nuances we approximate: MCS's own inter-staff sync within a measure
   (we front-pad underfilled measures by x slot, which matches SCALE).
