@@ -20,6 +20,9 @@ Note entry = 16-bit little-endian word (byte0, byte1):
                  high half of the vertical.
   bits [4:0]   = symbol:
                  0x01..0x05  note: 16th, 8th, quarter, half, whole (2**(n-1) ticks)
+                 0x15..0x19  the same five notes, *beamed* (value = symbol - 0x14). The
+                             engine dispatches these to the identical duration handlers;
+                             fast beamed runs (BUMBLE.MCD) are stored entirely this way.
                  0x06 / 0x0D treble / bass clef glyph
                  0x08..0x0C  rest of the same ladder (n-7)
                  0x0E / 0x0F / 0x10  natural / sharp / flat glyph. In the clef record
@@ -60,6 +63,22 @@ _BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  #
 MIDI_ANCHOR = 44          # ladder 0 = G#2: G4's PIT divisor 3044 = 392.00 Hz exactly
 
 _NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
+
+# A note can be stored "beamed" — symbols 0x15..0x19 are the same five note values as
+# 0x01..0x05 with 0x14 added (the engine's dispatch routes them to the identical
+# duration handlers; confirmed by BUMBLE.MCD, whose beamed-16th runs otherwise vanish).
+_BEAM_OFFSET = 0x14
+
+
+def _note_value(sym: int) -> tuple[str, int]:
+    """Classify a symbol: ('note'|'rest'|'', value) where value indexes _NOTE_TICKS."""
+    if _BEAM_OFFSET + 1 <= sym <= _BEAM_OFFSET + 5:      # 0x15..0x19 = beamed note
+        return "note", sym - _BEAM_OFFSET
+    if 1 <= sym <= 5:
+        return "note", sym
+    if 8 <= sym <= 12:
+        return "rest", sym - 7
+    return "", 0
 
 # Tempo: the 0x05 header word is 0x3AF9 + 3*level; the engine feeds `level` into its
 # note-timing multiply (image 0x1535). The corpus uses levels 0..3 only.
@@ -105,12 +124,10 @@ def x_slot(byte1: int) -> int:
 
 def decode_duration(byte0: int) -> tuple[bool, int]:
     """(is_rest, ticks) for a note/rest symbol. One tick = one sixteenth."""
-    sym = symbol(byte0)
-    if 1 <= sym <= 5:
-        return False, _NOTE_TICKS[sym]
-    if 8 <= sym <= 12:
-        return True, _NOTE_TICKS[sym - 7]
-    raise ValueError(f"symbol 0x{sym:02x} is not a note or rest")
+    kind, value = _note_value(symbol(byte0))
+    if not kind:
+        raise ValueError(f"symbol 0x{symbol(byte0):02x} is not a note or rest")
+    return kind == "rest", _NOTE_TICKS[value]
 
 
 def _u16(d: bytes, off: int) -> int:
@@ -225,7 +242,7 @@ def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
                         s.duration += s.duration // 2
                         break
                 continue
-            if 1 <= sym <= 5 or 8 <= sym <= 12:
+            if _note_value(sym)[0]:                       # note (incl. beamed) or rest
                 is_rest, dur = decode_duration(b0)
                 if is_rest:
                     slots.append(_Slot(x_slot(b1), dur, True, []))

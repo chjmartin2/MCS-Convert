@@ -49,6 +49,34 @@ def test_decode_duration_note_ladder():
     assert decode_duration(0x82) == (False, 2)
 
 
+def test_decode_duration_beamed_notes():
+    # 0x15..0x19 are the same five note values as 0x01..0x05, beamed (value = sym - 0x14).
+    # These carry the bulk of fast runs (BUMBLE.MCD) and were previously dropped.
+    assert decode_duration(0x15) == (False, 1)    # beamed 16th
+    assert decode_duration(0x16) == (False, 2)    # beamed 8th
+    assert decode_duration(0x17) == (False, 4)    # beamed quarter
+    assert decode_duration(0x18) == (False, 8)    # beamed half
+    assert decode_duration(0x19) == (False, 16)   # beamed whole
+    assert decode_duration(0xF5) == (False, 1)    # vertical bits don't affect duration
+
+
+def test_beamed_run_is_sounded(tmp_path):
+    # Eight beamed 16ths (symbol 0x15) fill a 2/4 measure; every one must sound. This is
+    # the shape that made BUMBLE.MCD lose most of its melody before beamed notes decoded.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,
+        0xFF, 0xFF, 8, 1,
+        0x15, 8, 0x15, 16, 0x15, 24, 0x15, 32,
+        0x15, 40, 0x15, 48, 0x15, 56, 0x15, 64,
+        0xFF, 0xFF, 0, 8,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    assert len(notes) == 8
+    assert all(not n.is_rest and n.duration_ticks == 1 for n in notes)
+    assert [n.start_tick for n in notes] == list(range(8))
+
+
 def test_decode_duration_rest_ladder():
     # rests are note symbol + 7 (MIN2 ground truth: 8th note 0x82 -> 8th rest 0x89)
     assert decode_duration(0x08) == (True, 1)

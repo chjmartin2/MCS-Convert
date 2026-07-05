@@ -93,6 +93,7 @@ Absolute anchor: pitch value → the engine's 68-entry chromatic PIT-divisor tab
 | sym | meaning |
 |-----|---------|
 | 0x01–0x05 | note: 16th, 8th, quarter, half, whole → `2^(n−1)` sixteenth-ticks |
+| 0x15–0x19 | the same five notes, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump table at image 0x22b3, entries aliasing 0x01–0x05). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. |
 | 0x06 / 0x0D | treble / bass clef glyph |
 | 0x08–0x0C | rest, same ladder (= note sym + 7; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
@@ -125,8 +126,10 @@ Two interim pitch models (byte1-as-pitch; 3-bit class + contextual octave) each 
 the data available at the time and were wrong — the disassembly ended the guessing.
 
 ## Remaining minor unknowns
-- Symbols 0x00, 0x07, 0x13–0x1E: unassigned/rare (0x16/0x17 unseen in the corpus).
-  The seven duration-flag handlers at image 0x237f suggest a couple of spare values.
+- Symbols 0x00 (252×, 37 distinct verticals — note-like but no duration fits), 0x13
+  (425×, dispatches to a skip stub), and 0x1A–0x1E (rare, timing-control handlers at
+  image 0x224b). 0x14 never occurs. None are common enough to matter for playback, but
+  0x00 is the one worth another controlled edit if a decoded song still sounds thin.
 - Header bytes 0x07–0x08; the exact view semantics of the five scroll bytes.
 - Playback nuances we approximate: MCS's own inter-staff sync within a measure
   (we front-pad underfilled measures by x slot, which matches SCALE).
