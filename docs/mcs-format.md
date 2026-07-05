@@ -63,30 +63,36 @@ those songs simply had scalar/arpeggiated passages).
   The clef's own byte1 is the per-song vertical anchor (114 in MINUETG, 106 elsewhere),
   so pitch is normalized relative to it. Implemented + tested in
   [`mcs_convert/mcs/reader.py`](../mcs_convert/mcs/reader.py).
-- **byte0 = duration + render/attribute bits** (duration CONFIRMED; other bits partial).
-  Decoded over the ~80-song corpus:
-  - **bits[1:0] = note value**, longest→shortest: **0=half, 1=quarter, 2=eighth, 3=sixteenth**.
-    Corpus frequencies 9 / 25 / 35 / 31 % (long notes rare, eighths/sixteenths common). Pinned
-    to ground truth: DAISY's "Dai-sy" reads `0` (long) then `1` (short); JINGLE/MINUETG beamed
-    runs read `2`/`3`. Implemented in `note_duration()` — reader now emits real durations.
+- **byte0 = duration + rest flag + render bits** (CONFIRMED via emulator ground truth):
+  - **bits[3:0] = note/rest SYMBOL.** Bit 3 (`0x08`) is the **rest flag**; the low value is
+    the note value on a doubling ladder:
+
+    | nibble | 1 | 2 | 3 | 4 | 5 | | 8 | 9 | 10 | 11 | 12 |
+    |--------|---|---|---|---|---|-|---|---|----|----|----|
+    | value  | 16th | 8th | quarter | half | whole | | 16th **rest** | 8th rest | quarter rest | half rest | whole rest |
+
+    Duration in sixteenth-ticks = `2**(nibble-1)` for a note, `2**(nibble-8)` for a rest.
+    Ground truth: MINUETG opens **quarter + 4 eighths** (nibbles `3,2,2,2,2` — matches the
+    on-screen notation in MartyPC), and editing that first eighth into an eighth rest changed
+    `byte0 0x82 → 0x89` (nibble `2 → 9`) with `byte1 0x32 → 0x39` (pitch → a fixed rest-glyph
+    staff position). Corpus: notes 1–5 = 17/29/22/5/4 %, rests 8–12 present at ~11 % overall —
+    a textbook duration distribution. Implemented in `decode_duration()`.
+    Nibbles **0, 6, 7** (notes) and **13, 14, 15** (rests) are uncommon (~13 %) and not yet
+    pinned — likely dotted/ornamented; mapped provisionally to their measure-completion mode.
   - **bits[7:5] = stem/beam render length, NOT musical.** It moves *linearly with pitch*
     within a beam group (MINUETG's rising G-A-B-C-D run → 4,3,2,1 as noteheads climb toward
     the beam). A drawing artifact; ignored for timing.
-  - **bits[4:2] = flag bits** (dot / accidental / beam?) — mostly 0, not yet decoded.
 
-### Rests are NOT in the note stream (negative result)
-Rests do **not** appear as note entries. Test: bin every entry by its byte0 low-5-bits field
-and look at the spread of byte1 (pitch) in each bin — a rest glyph sits at a *fixed* staff
-line, so a rest code would show a near-constant byte1. Every byte0 value instead spans the
-full pitch range (stdev ~40–60 across the corpus), i.e. there is no "rest" byte0 code and no
-rest pitch sentinel (byte1 is never 0; range 16–246). So rests must live elsewhere — likely
-implied by horizontal note spacing (an x-position we haven't isolated) or a record-level
-field. **Highest-signal next step: the DOSBox edit-one-note diff** — insert a single rest in
-MCS, re-save, diff the bytes. Until then the melody plays gap-free.
+### Records are MEASURES (CONFIRMED)
+Each `FF FF (count,prev)` record is one **bar**. With the duration ladder above, MINUETG's
+treble records each sum to **12 sixteenths = 3/4** (quarter + 4 eighths, or 3 quarters, …).
+This is what validated the ladder, and it means a record's note+rest durations should total
+the time signature — a strong consistency check for future decoding.
 
 ### Still to tweak (first-pass gaps)
-- **Rests** — see above; not yet located.
-- **Accidentals** — dropped (e.g. MINUETG's F♯ reads as F); byte0 bits[4:2] are the suspect.
+- **Dotted/ornament nibbles 0,6,7** (and rest mirrors 13,14,15) — provisional; pin them with
+  more emulator edits (e.g. save a known dotted note and diff).
+- **Accidentals** — dropped (e.g. MINUETG's F♯ reads as F); the middle byte0 bits are suspect.
 - **Bass-clef anchor** — bass staff currently reuses the treble offset, so bass octaves are
   wrong; needs its own calibration constant.
 - **Key signature** — probably in the header (0x00–0x0C); would supply default accidentals.
@@ -118,10 +124,9 @@ Sources:
       two-staff grand-staff layout, clef-as-first-record, `(byte0=dur, byte1=pitch)` entry.
 - [x] **Decode byte1 → pitch** — 16 units/diatonic step, clef-relative, validated against
       MINUETG's known opening. Reader + tests landed. Accidentals still dropped.
-- [x] **Decode byte0 duration** — bits[1:0] = half/quarter/eighth/sixteenth (reader emits real
-      durations). bits[7:5] identified as stem-render (ignored). Dot/accidental bits[4:2] TODO.
-- [ ] **Locate rests** — confirmed *not* in the note stream (see negative result above);
-      likely horizontal spacing or a record field. DOSBox edit-one-rest diff is the next probe.
+- [x] **Decode byte0 duration + rests** — low nibble = note/rest value on a doubling ladder,
+      bit3 = rest flag (confirmed by a MartyPC edit-and-diff). bits[7:5] = stem render (ignored).
+      Records confirmed to be measures. Dotted nibbles 0,6,7 still provisional.
 - [ ] **Bass-clef anchor + key signature** — fix bass octaves; find the key sig for defaults.
 - [ ] **Decode the header** (0x00–0x0C): confirm tempo, time/key signature, the two staff
       region offsets at 0x09/0x0B.

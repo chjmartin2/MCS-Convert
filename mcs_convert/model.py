@@ -17,12 +17,13 @@ from typing import List, Optional
 
 @dataclass
 class NoteEvent:
-    """A single sounded note on one track."""
+    """A single sounded note (or a rest) on one track."""
 
     start_tick: int
     duration_ticks: int
-    midi_note: int          # 0-127
+    midi_note: int          # 0-127 (ignored when is_rest)
     velocity: int = 100     # 0-127, derived from channel volume where available
+    is_rest: bool = False   # a timed silence; occupies duration but sounds nothing
 
     @property
     def end_tick(self) -> int:

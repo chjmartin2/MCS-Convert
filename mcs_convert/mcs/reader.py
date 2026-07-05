@@ -1,10 +1,9 @@
 """Parse a Music Construction Set (IBM-PC 1984) song into our neutral Song model.
 
 This is the inverse of the (still-blocked) writer and doubles as living documentation of
-the format decoded in docs/mcs-format.md. Pitch decoding is solid; note *durations* now come
-from byte0's low 2 bits (half/quarter/eighth/sixteenth). Accidentals and rests are still
-undecoded (see docs) — rests are NOT stored as note entries, so the melody currently plays
-gap-free.
+the format decoded in docs/mcs-format.md. Pitch decoding is solid; note *durations* and
+*rests* now come from byte0's low nibble (note value + rest flag). Accidentals are still
+dropped.
 
 Structure (confirmed):
   0x00..0x0C  header (tempo/view/staff-offsets — partially decoded)
@@ -36,22 +35,31 @@ G4_MIDI = 67
 # byte1 of the clef anchor minus byte1 of the G4 note (empirical: MINUETG clef 114, G4 34).
 TREBLE_G4_OFFSET = 80
 
-# byte0 layout (decoded empirically over the ~80-song corpus; see docs/mcs-format.md):
+# byte0 layout (decoded over the ~80-song corpus + emulator ground truth; see
+# docs/mcs-format.md):
 #   bits[7:5] = stem/beam render length — varies *linearly with pitch* inside a beam group
 #               (a drawing artifact, not musical), so we ignore it for timing.
-#   bits[1:0] = note-value code, longest-to-shortest: 0=half 1=quarter 2=eighth 3=sixteenth.
-#               Confirmed by ground truth: DAISY's "Dai-sy" reads code 0 (long) then 1 (short),
-#               and beamed runs in JINGLE/MINUETG read code 2/3. Corpus frequencies (9/25/35/31%)
-#               match: long notes rare, eighths/sixteenths common.
-#   bits[4:2] = flag bits (dot/accidental/beam?) — not yet decoded; ignored for now.
-DURATION_MASK = 0x03
-# Ticks per note value. One tick = one sixteenth here; the synth/GUI scale ticks to seconds.
-_DURATION_TICKS = {0: 8, 1: 4, 2: 2, 3: 1}   # half, quarter, eighth, sixteenth
+#   bits[3:0] = note/rest SYMBOL. bit3 (0x08) is the REST flag; the low value picks the value:
+#                 notes 1..5 = 16th, 8th, quarter, half, whole
+#                 rests 8..12 = 16th, 8th, quarter, half, whole rest
+#               Duration (in sixteenth-ticks) is 2**(v-1) for a note (v=nibble) and
+#               2**(v-8) for a rest.
+#   Ground truth: MINUETG's opening reads quarter + 4 eighths (nibbles 3,2,2,2,2), and an
+#   8th note edited to an 8th rest in an emulator changed byte0 0x82 -> 0x89 (nibble 2 -> 9).
+#   Records turn out to be whole *measures*: MINUETG's sum to 12 sixteenths = 3/4.
+#   Nibbles 0,6,7 (and rest mirrors 13,14,15) are uncommon (~13%) and not yet pinned —
+#   likely dotted/ornamented; mapped provisionally below to their measure-completion mode.
+REST_FLAG = 0x08
+_NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16, 6: 2, 7: 4, 0: 4}   # 6,7,0 provisional
+_REST_TICKS = {8: 1, 9: 2, 10: 4, 11: 8, 12: 16, 13: 8, 14: 2, 15: 4}   # 13,14,15 provisional
 
 
-def note_duration(byte0: int) -> int:
-    """Duration in ticks (sixteenth = 1) from a note entry's byte0."""
-    return _DURATION_TICKS[byte0 & DURATION_MASK]
+def decode_duration(byte0: int) -> tuple[bool, int]:
+    """(is_rest, duration_ticks) for a note entry's byte0. One tick = one sixteenth."""
+    nib = byte0 & 0x0F
+    if nib & REST_FLAG:
+        return True, _REST_TICKS[nib]
+    return False, _NOTE_TICKS[nib]
 
 # Semitone offsets of the white keys within an octave: C D E F G A B.
 _WHITE = [0, 2, 4, 5, 7, 9, 11]
@@ -131,11 +139,14 @@ def parse(path: str) -> Song:
         tick = 0
         for rec in staff[1:]:               # skip the clef record
             for byte0, byte1 in rec.entries:
-                # byte1 -> pitch (accidentals still dropped); byte0 -> duration (see above).
-                midi = treble_pitch(byte1, clef_b1) if clef_b0 == CLEF_TREBLE_B0 \
-                    else treble_pitch(byte1, clef_b1)  # bass anchor TBD; same math for now
-                dur = note_duration(byte0)
-                track.add(NoteEvent(start_tick=tick, duration_ticks=dur, midi_note=midi))
+                # byte0 -> duration + rest flag; byte1 -> pitch (accidentals still dropped).
+                is_rest, dur = decode_duration(byte0)
+                # For a rest, byte1 is a glyph position, not a pitch — don't sound it.
+                midi = 0 if is_rest else (
+                    treble_pitch(byte1, clef_b1) if clef_b0 == CLEF_TREBLE_B0
+                    else treble_pitch(byte1, clef_b1))   # bass anchor TBD; same math for now
+                track.add(NoteEvent(start_tick=tick, duration_ticks=dur,
+                                    midi_note=midi, is_rest=is_rest))
                 tick += dur
         song.add_track(track)
     return song

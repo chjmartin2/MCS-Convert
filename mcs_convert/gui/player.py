@@ -6,9 +6,9 @@ reverse-engineering: when a song plays back recognizably, we've decoded it corre
 
 Run:  python -m mcs_convert.gui.player [SONG.MCS]      (or:  mcs-convert play SONG.MCS)
 
-Known first-pass limitations (see docs/mcs-format.md): rests aren't decoded yet (the melody
-plays gap-free), bass-clef octaves are uncalibrated, and accidentals are dropped. Note
-durations (half/quarter/eighth/sixteenth) now come from byte0.
+Note durations (half/quarter/eighth/sixteenth) and rests now come from byte0. Known
+remaining gaps (see docs/mcs-format.md): bass-clef octaves are uncalibrated and accidentals
+are dropped.
 """
 
 from __future__ import annotations
@@ -118,14 +118,21 @@ class PlayerApp:
         bass = by_name.get("Bass")
         tnotes = treble.notes if treble else []
         bnotes = bass.notes if bass else []
+
+        def label(notes, i):
+            if i >= len(notes):
+                return ""
+            n = notes[i]
+            return "— rest" if n.is_rest else midi_to_name(n.midi_note)
+
         for i in range(max(len(tnotes), len(bnotes))):
-            tn = midi_to_name(tnotes[i].midi_note) if i < len(tnotes) else ""
-            bn = midi_to_name(bnotes[i].midi_note) if i < len(bnotes) else ""
-            self.tree.insert("", "end", values=(i + 1, tn, bn))
+            self.tree.insert("", "end",
+                             values=(i + 1, label(tnotes, i), label(bnotes, i)))
         total = sum(len(t.notes) for t in self.song.tracks)
+        rests = sum(1 for tr in self.song.tracks for n in tr.notes if n.is_rest)
         self.status.configure(
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
-                 f"{total} notes.  (rests not yet decoded; bass octave uncalibrated)")
+                 f"{total} notes ({rests} rests).  (bass octave uncalibrated)")
 
     def play(self) -> None:
         if not self.song:

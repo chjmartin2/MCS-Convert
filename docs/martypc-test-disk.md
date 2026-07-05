@@ -35,9 +35,12 @@ quickly (that's what MartyPC is for).
 2. Boot. FreeDOS starts and prints the on-disk help, leaving you at `A:\>`.
 3. Type **`MCSDISK`** and press Enter. Wait out "Measuring computer speed…".
 
-## The rest-decoding experiment (why we built this)
-We confirmed durations from byte0 but [couldn't locate rests](mcs-format.md) — they aren't in
-the note stream. The way to settle it is a controlled edit diff:
+## The rest-decoding experiment (why we built this) — SOLVED
+This disk cracked rests. Editing MINUETG's first eighth note into an eighth rest and diffing
+the saved file changed exactly two bytes: `byte0 0x82 → 0x89` (the rest flag, bit 3) and
+`byte1 0x32 → 0x39` (pitch → rest-glyph position). That pinned the byte0 low-nibble note/rest
+ladder in [mcs-format.md](mcs-format.md). To pin the remaining dotted nibbles (0,6,7), repeat
+the same controlled-edit recipe:
 
 1. In MCS: `LOAD MINUETG` (or any short song).
 2. Note the exact spot, then **insert or extend one rest** — one deliberate, known change.
