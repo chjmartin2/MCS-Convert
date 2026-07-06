@@ -44,6 +44,15 @@ _SCOPE_LINE = "#00ff41"      # phosphor green
 _SCOPE_DIM = "#0c3d1e"       # midline / frame green
 
 
+def _dos_name(name: str) -> str:
+    """A DOS 8.3-compliant basename: uppercase, alphanumerics and underscore
+    only (spaces dropped, other punctuation folded to _), max 8 chars — so the
+    file is loadable if it ends up on a real MCS disk."""
+    cleaned = "".join(c if c.isalnum() else ("" if c in " ." else "_")
+                      for c in name.upper())
+    return (cleaned.strip("_") or "IMPORTED")[:8]
+
+
 class PlayerApp:
     def __init__(self, root: tk.Tk, initial: str | None = None) -> None:
         self.root = root
@@ -210,7 +219,7 @@ class PlayerApp:
         except Exception as exc:  # noqa: BLE001 - show any import error to the user
             messagebox.showerror("Cannot import", f"{os.path.basename(src)}:\n{exc}")
             return
-        default = os.path.splitext(os.path.basename(src))[0].upper()[:8] + ".MCS"
+        default = _dos_name(os.path.splitext(os.path.basename(src))[0]) + ".MCS"
         out = filedialog.asksaveasfilename(
             title="Save converted song as", defaultextension=".mcs",
             initialdir=os.path.dirname(src), initialfile=default,
