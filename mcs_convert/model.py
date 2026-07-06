@@ -38,6 +38,7 @@ class Track:
 
     name: str
     notes: List[NoteEvent] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)   # importer hints (e.g. noise usage)
 
     def add(self, note: NoteEvent) -> None:
         self.notes.append(note)

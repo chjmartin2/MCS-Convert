@@ -34,7 +34,9 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 
 from ..audio import WaveOutPlayer, pcm16, render_song, tempo_bpm, wav_bytes
-from ..mcs.reader import parse
+from ..mcs.reader import parse, tick_seconds_for
+from ..model import NoteEvent, Song, Track
+from ..pitch import midi_to_name
 from ..tracker import tracker_rows, tracker_text
 
 _BG = "#12141a"
@@ -42,6 +44,34 @@ _FG = "#d7dae0"
 _ACCENT = "#7fd1b9"
 _SCOPE_LINE = "#00ff41"      # phosphor green
 _SCOPE_DIM = "#0c3d1e"       # midline / frame green
+
+
+def channel_stats(track: Track) -> dict:
+    """Percussion-likelihood stats for one imported channel. Three signals:
+    noise commands per note (AY drums live on the noise generator), pitch
+    repetitiveness (drums hammer 1-3 'pitches' forever), and shortness (drums
+    are wall-to-wall short hits). The score is advisory — ears decide."""
+    notes = [n for n in track.notes if not n.is_rest]
+    if not notes:
+        return {"count": 0, "range": "—", "noise": 0.0, "repet": 0.0,
+                "score": 1.0, "verdict": "empty"}
+    midis = [n.midi_note for n in notes]
+    noise = min(1.0, track.meta.get("noise_cmds", 0) / len(notes))
+    # consecutive same-pitch hits: a kick/snare hammers one "pitch", a melody
+    # moves (global pitch reuse saturates on any long tonal piece, so it's local)
+    repet = (sum(1 for a, b in zip(midis, midis[1:]) if a == b) /
+             max(1, len(midis) - 1))
+    short = sum(1 for n in notes if n.duration_ticks <= 2) / len(notes)
+    score = 0.5 * noise + 0.3 * repet + 0.2 * short
+    if score > 0.55:
+        verdict = "percussion"
+    elif score > 0.40:
+        verdict = "rhythm?"
+    else:
+        verdict = "bass" if sum(midis) / len(midis) < 55 else "melody"
+    return {"count": len(notes),
+            "range": f"{midi_to_name(min(midis))}..{midi_to_name(max(midis))}",
+            "noise": noise, "repet": repet, "score": score, "verdict": verdict}
 
 
 def _dos_name(name: str) -> str:
@@ -206,8 +236,9 @@ class PlayerApp:
             self.load(path)
 
     def import_dialog(self) -> None:
-        """Convert a chiptune module to .MCS and open it. Currently: Vortex
-        Tracker .pt3 (AY-3-8910); more importers dispatch on the extension."""
+        """Import a chiptune module: parse it, open the channel-preview dialog
+        (solo audition, filtering, octave/tempo), then convert and load.
+        Currently: Vortex Tracker .pt3; importers dispatch on the extension."""
         src = filedialog.askopenfilename(
             title="Import a chiptune module",
             filetypes=[("Vortex Tracker modules", "*.pt3 *.PT3"),
@@ -215,10 +246,24 @@ class PlayerApp:
         if not src:
             return
         try:
-            data = self._convert(src)
+            song, byte0 = self._load_module(src)
         except Exception as exc:  # noqa: BLE001 - show any import error to the user
             messagebox.showerror("Cannot import", f"{os.path.basename(src)}:\n{exc}")
             return
+        ImportPreview(self, src, song, byte0)
+
+    @staticmethod
+    def _load_module(src: str):
+        """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension."""
+        ext = src.lower().rsplit(".", 1)[-1]
+        if ext == "pt3":
+            from ..pt3 import parse_pt3
+            with open(src, "rb") as fh:
+                return parse_pt3(fh.read())
+        raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
+
+    def save_and_load(self, data: bytes, src: str) -> None:
+        """Save converted .MCS bytes (8.3-named by default) and open them."""
         default = _dos_name(os.path.splitext(os.path.basename(src))[0]) + ".MCS"
         out = filedialog.asksaveasfilename(
             title="Save converted song as", defaultextension=".mcs",
@@ -231,19 +276,6 @@ class PlayerApp:
         self.load(out)
         self.status.configure(text=f"Imported {os.path.basename(src)} → "
                                    f"{os.path.basename(out)}.")
-
-    @staticmethod
-    def _convert(src: str) -> bytes:
-        """Module file -> .MCS bytes, dispatched on the extension."""
-        from ..mcs.encode import encode_song
-
-        ext = src.lower().rsplit(".", 1)[-1]
-        if ext == "pt3":
-            from ..pt3 import parse_pt3
-            with open(src, "rb") as fh:
-                song, byte0 = parse_pt3(fh.read())
-            return encode_song(song, tempo_byte0=byte0)
-        raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
 
     def load(self, path: str) -> None:
         try:
@@ -537,6 +569,134 @@ class PlayerApp:
         self.stop_btn.configure(state="disabled")
         self.pause_btn.configure(state="disabled", text="⏸ Pause")
         self._draw_scope(None)       # flatline the scopes
+
+
+class ImportPreview(tk.Toplevel):
+    """Channel preview for a module import: per-channel stats and verdicts,
+    solo/selection audition through the synth, per-channel octave shift, and
+    an MCS tempo picker — so the drums stay on the ZX Spectrum where they
+    belong. Statistics suggest; ears decide."""
+
+    _PREVIEW_SECONDS = 15
+
+    def __init__(self, app: PlayerApp, src: str, song: Song, byte0: int) -> None:
+        super().__init__(app.root)
+        self.app, self.src, self.song = app, src, song
+        self.title(f"Import Preview — {os.path.basename(src)}")
+        self.configure(bg=_BG)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        total = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
+        secs = total * tick_seconds_for(byte0)
+        tk.Label(self, text=f"{song.title or os.path.basename(src)} — "
+                            f"{total // 32} bars, ~{int(secs) // 60}:{int(secs) % 60:02d}",
+                 bg=_BG, fg=_FG).grid(row=0, column=0, columnspan=8,
+                                      sticky="w", padx=10, pady=(10, 6))
+
+        hdr = ("", "channel", "notes", "range", "noise", "repet.", "verdict", "")
+        for c, text in enumerate(hdr):
+            tk.Label(self, text=text, bg=_BG, fg=_ACCENT,
+                     font=("TkDefaultFont", 8)).grid(row=1, column=c, padx=6)
+
+        self.include = []                       # BooleanVar per channel
+        self.octave = []                        # StringVar per channel: +2..-2
+        for i, tr in enumerate(song.tracks):
+            st = channel_stats(tr)
+            keep = tk.BooleanVar(value=st["verdict"] not in ("percussion", "empty"))
+            self.include.append(keep)
+            row = 2 + i
+            tk.Checkbutton(self, variable=keep, bg=_BG, activebackground=_BG,
+                           selectcolor="#2a2e3a").grid(row=row, column=0)
+            tk.Label(self, text=tr.name, bg=_BG, fg=_FG).grid(row=row, column=1)
+            tk.Label(self, text=st["count"], bg=_BG, fg=_FG).grid(row=row, column=2)
+            tk.Label(self, text=st["range"], bg=_BG, fg=_FG).grid(row=row, column=3)
+            tk.Label(self, text=f"{st['noise']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=4)
+            tk.Label(self, text=f"{st['repet']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=5)
+            color = "#e08f8f" if st["verdict"] == "percussion" else _ACCENT
+            tk.Label(self, text=st["verdict"], bg=_BG, fg=color).grid(row=row, column=6)
+            tk.Button(self, text="▶ solo", command=lambda i=i: self._audition([i])
+                      ).grid(row=row, column=7, padx=(4, 2))
+            var = tk.StringVar(value="0")
+            self.octave.append(var)
+            ttk.Combobox(self, textvariable=var, width=3, state="readonly",
+                         values=("+2", "+1", "0", "-1", "-2")).grid(
+                row=row, column=8, padx=(2, 10))
+        tk.Label(self, text="8va", bg=_BG, fg=_ACCENT,
+                 font=("TkDefaultFont", 8)).grid(row=1, column=8)
+
+        # MCS tempo: ten discrete speeds; default = the row-rate suggestion.
+        bar = tk.Frame(self, bg=_BG)
+        bar.grid(row=7, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 2))
+        tk.Label(bar, text="Tempo", bg=_BG, fg=_ACCENT).pack(side="left")
+        self._tempos = [0x77 + 3 * s for s in range(10)]
+        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM" for b in self._tempos]
+        self.tempo = tk.StringVar(value=labels[self._tempos.index(byte0)])
+        ttk.Combobox(bar, textvariable=self.tempo, width=11, state="readonly",
+                     values=labels).pack(side="left", padx=(6, 16))
+        tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
+            [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
+        tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
+            side="left", padx=(4, 0))
+
+        btns = tk.Frame(self, bg=_BG)
+        btns.grid(row=8, column=0, columnspan=9, sticky="e", padx=10, pady=(6, 10))
+        tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
+        tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
+
+    # -- selection -> Song ------------------------------------------------------
+    def _tempo_byte0(self) -> int:
+        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM" for b in self._tempos]
+        return self._tempos[labels.index(self.tempo.get())]
+
+    def selected_song(self, indices=None) -> Song:
+        """The checked (or given) channels, octave shifts applied."""
+        if indices is None:
+            indices = [i for i, v in enumerate(self.include) if v.get()]
+        out = Song(title=self.song.title, source=self.song.source)
+        for i in indices:
+            tr = self.song.tracks[i]
+            shift = 12 * int(self.octave[i].get())
+            nt = Track(name=tr.name, meta=dict(tr.meta))
+            for n in tr.notes:
+                nt.add(NoteEvent(start_tick=n.start_tick,
+                                 duration_ticks=n.duration_ticks,
+                                 midi_note=n.midi_note + (0 if n.is_rest else shift),
+                                 is_rest=n.is_rest, tied=n.tied))
+            out.add_track(nt)
+        return out
+
+    def encode_selection(self) -> bytes:
+        from ..mcs.encode import encode_song
+        return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0())
+
+    # -- actions ----------------------------------------------------------------
+    def _audition(self, indices) -> None:
+        """Play the first seconds of the given channels through the synth."""
+        if not indices:
+            return
+        sel = self.selected_song(indices)
+        step = tick_seconds_for(self._tempo_byte0())
+        master, _, sr = render_song(sel, step_seconds=step, waveform="pcspeaker")
+        pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
+        if pcm:
+            self.app.player.play(pcm, sr,
+                                 volume=self.app.volume.get() / 100.0)
+
+    def _do_import(self) -> None:
+        self.app.player.stop()
+        if not any(v.get() for v in self.include):
+            messagebox.showwarning("Nothing selected",
+                                   "Every channel is unchecked — nothing to import.",
+                                   parent=self)
+            return
+        data = self.encode_selection()
+        self.destroy()
+        self.app.save_and_load(data, self.src)
+
+    def _close(self) -> None:
+        self.app.player.stop()
+        self.destroy()
 
 
 def main(argv=None) -> int:

@@ -60,6 +60,7 @@ class _Channel:
         self.ornament = 0
         self.notes: List[Tuple[int, int]] = []   # (row, note_index) onsets
         self.offs: List[int] = []                # rows where the channel went silent
+        self.noise_cmds = 0          # $20-$3F noise sets seen (percussion signal)
 
     def note_on(self, row: int, index: int, orn_base: int) -> None:
         self.notes.append((row, index + orn_base))
@@ -90,6 +91,7 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
             pos += 4                                # env period(2) + delay + sample
             continue
         if 0x20 <= b <= 0x3F:                        # noise value
+            ch.noise_cmds += 1
             continue
         if 0x40 <= b <= 0x4F:                        # set ornament
             ch.ornament = b & 0x0F
@@ -202,6 +204,7 @@ def parse_pt3(data: bytes) -> Tuple[Song, int]:
             dur = max(1, (end - row) * ticks_per_row)
             track.add(NoteEvent(start_tick=row * ticks_per_row,
                                 duration_ticks=dur, midi_note=midi))
+        track.meta["noise_cmds"] = ch.noise_cmds
         if track.notes:
             song.add_track(track)
     if speed_changes:

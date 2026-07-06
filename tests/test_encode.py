@@ -86,8 +86,9 @@ def test_maplerag_reencodes_losslessly(tmp_path):
 
 # ---- PT3 importer -----------------------------------------------------------------
 
-def _build_pt3(delay=3):
-    """A minimal 1-pattern module: A plays C-4/E-4/G-4/off, B a held C-3, C silent."""
+def _build_pt3(delay=3, drums=False):
+    """A minimal 1-pattern module: A plays C-4/E-4/G-4/off, B a held C-3, C is
+    silent — or, with drums=True, C hammers one low note with noise commands."""
     hdr = bytearray(0xC9)
     hdr[0:13] = b"ProTracker 3."
     hdr[0x0D] = ord("6")
@@ -114,7 +115,11 @@ def _build_pt3(delay=3):
         0x68,                                      # C-3, held 8 rows (one line)
         0x00,
     ])
-    ch_c = bytes([0xB1, 8, 0xD0, 0x00])
+    if drums:                                      # noise-set + repeated C-1 hits
+        ch_c = bytes([0xB1, 2,
+                      0x25, 0x50, 0x25, 0x50, 0x25, 0x50, 0x25, 0x50, 0x00])
+    else:
+        ch_c = bytes([0xB1, 8, 0xD0, 0x00])
 
     base = 0xC9 + len(order)
     pat_table = base
@@ -147,6 +152,24 @@ def test_pt3_converts_to_playable_mcs(tmp_path):
     p.write_bytes(encode_song(song, tempo_byte0=byte0))
     got = parse_mcs(str(p))
     assert _sounding(got) == _sounding(song)
+
+
+def test_noise_commands_are_counted_per_channel():
+    song, _ = parse_pt3(_build_pt3(drums=True))
+    by_name = {t.name: t for t in song.tracks}
+    assert by_name["AY C"].meta["noise_cmds"] == 4
+    assert by_name["AY A"].meta["noise_cmds"] == 0
+
+
+def test_channel_stats_flag_percussion():
+    from mcs_convert.gui.player import channel_stats
+    song, _ = parse_pt3(_build_pt3(drums=True))
+    by_name = {t.name: t for t in song.tracks}
+    drums = channel_stats(by_name["AY C"])
+    melody = channel_stats(by_name["AY A"])
+    assert drums["verdict"] == "percussion"        # noisy + one repeated pitch
+    assert melody["verdict"] in ("melody", "bass")  # clean wandering line
+    assert drums["score"] > melody["score"]
 
 
 def test_vortex_tracker_magic_is_accepted():
