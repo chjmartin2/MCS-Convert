@@ -31,7 +31,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from ..audio import Player, synth_song, tempo_bpm, tempo_step_seconds, wav_bytes
+from ..audio import Player, synth_song, tempo_bpm, wav_bytes
 from ..mcs.reader import parse
 from ..pitch import midi_to_name
 
@@ -137,11 +137,7 @@ class PlayerApp:
 
         self.meta_vars["Time"].set(self.song.time_signature or "—")
         self.meta_vars["Key"].set(self.song.key_signature or "—")
-        if self.song.tempo_level is not None:
-            self.meta_vars["Tempo"].set(
-                f"{self.song.tempo_level}/3  (≈{round(tempo_bpm(self.song.tempo_level))} BPM)")
-        else:
-            self.meta_vars["Tempo"].set("—")
+        self.meta_vars["Tempo"].set(f"≈{round(tempo_bpm(self.song.tempo_tick_seconds))} BPM")
 
         total = sum(len(t.notes) for t in self.song.tracks)
         rests = sum(1 for tr in self.song.tracks for n in tr.notes if n.is_rest)
@@ -152,9 +148,9 @@ class PlayerApp:
     def play(self) -> None:
         if not self.song:
             return
-        # Timing comes from the file's own stored tempo; timbre is the PC-speaker square.
-        step = tempo_step_seconds(self.song.tempo_level)
-        pcm, sr = synth_song(self.song, step_seconds=step, waveform="square")
+        # Timing comes from the file's own tempo (header byte 0); timbre = PC-speaker square.
+        pcm, sr = synth_song(self.song, step_seconds=self.song.tempo_tick_seconds,
+                             waveform="square")
         if not pcm:
             self.status.configure(text="Nothing to play (no decoded notes).")
             return

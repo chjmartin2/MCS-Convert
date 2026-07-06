@@ -2,29 +2,24 @@ import io
 import sys
 import wave
 
-from mcs_convert.audio import (
-    Player,
-    midi_to_freq,
-    synth_song,
-    tempo_bpm,
-    tempo_step_seconds,
-    wav_bytes,
-)
+from mcs_convert.audio import Player, midi_to_freq, synth_song, tempo_bpm, wav_bytes
+from mcs_convert.mcs.reader import tick_seconds_for
 from mcs_convert.model import NoteEvent, Song, Track
 
 
-def test_tempo_level_1_measured_rate():
-    # Level 1 (the corpus default) is anchored to the measured real rate ~0.083 s per
-    # sixteenth (~180 BPM), from DOSBox-X captures of level-1 songs.
-    assert tempo_step_seconds(1) == 0.083
-    assert round(tempo_bpm(1)) == 181
-    assert tempo_step_seconds(None) == tempo_step_seconds(1)   # unknown -> default
+def test_tempo_from_header_byte0():
+    # Real tempo is set by header byte 0 (measured from DOSBox-X captures), not the 0x05
+    # word: 0.067 + 0.016*step, step = (byte0 - 0x77)//3.
+    assert tick_seconds_for(0x7a) == 0.083          # ENTERTAN (~180 BPM)
+    assert tick_seconds_for(0x80) == 0.115          # AXEL / YANKEE (~130 BPM)
+    assert tick_seconds_for(0x89) == 0.163          # DIXIE
+    assert round(tempo_bpm(tick_seconds_for(0x7a))) == 181
+    assert round(tempo_bpm(tick_seconds_for(0x80))) == 130
 
 
-def test_higher_tempo_level_plays_faster():
-    # Each level up is one engine "semitone" faster.
-    assert tempo_step_seconds(3) < tempo_step_seconds(1) < tempo_step_seconds(0)
-    assert tempo_bpm(3) > tempo_bpm(1) > tempo_bpm(0)
+def test_higher_byte0_plays_slower():
+    assert tick_seconds_for(0x77) < tick_seconds_for(0x80) < tick_seconds_for(0x92)
+    assert tempo_bpm(tick_seconds_for(0x77)) > tempo_bpm(tick_seconds_for(0x92))
 
 
 def _demo_song():

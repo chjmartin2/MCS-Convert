@@ -23,8 +23,9 @@ Ground-truth edits are made on the self-booting test disk
 ### Header (15 bytes)
 | Offset | Size | Field |
 |--------|------|-------|
-| 0x00–0x04 | 5 | vertical scroll/view bytes (ladder of 3: 0x77, 0x7A … 0x8C). **Display state only — pitch does not depend on them.** |
-| 0x05   | 2 | **tempo word**, stored as `0x3AF9 + 3·level`. `level` (0–3 across the corpus: 13/44/8/15 songs) is fed into the note-timing multiply at image 0x1535. Each level is one equal-tempered semitone (~5.9%) faster. |
+| **0x00** | **1** | **TEMPO** — byte 0 (0x77..0x92, steps of 3) sets the real playback speed. **CALIBRATED AGAINST AUDIO:** seconds per sixteenth-tick = `0.067 + 0.016·step`, `step = (byte0−0x77)//3`. Fits ENTERTAN 0x7a→83ms/181BPM, AXEL/YANKEE 0x80→115ms/130BPM, MINUETG 0x83→131ms, DIXIE 0x89→163ms/92BPM. (Both ENTERTAN and AXEL share 0x05 word 0x3AFC yet play at different speeds — byte 0 is what differs.) |
+| 0x01–0x04 | 4 | vertical scroll/view bytes; display state only, pitch-independent. |
+| 0x05   | 2 | word `0x3AF9 + 3·n`. Read by the engine but does **not** determine playback tempo (byte 0 does); role unclear — a CPU-speed calibration or fine adjust. |
 | 0x07   | 2 | ? (often 0; a few songs hold 16/18/20 — likely the clef+key-sig pixel width, not meter) |
 | 0x09   | 2 | byte size of the staff-1 section (confirmed by SCALE4: +2/−2 when a note moved between staves) |
 | 0x0B   | 2 | byte size of the staff-2 section |
@@ -32,10 +33,9 @@ Ground-truth edits are made on the self-booting test disk
 
 ### Derived metadata (tempo / time signature / key / volume)
 The reader surfaces three display values; a fourth (volume) provably isn't in the file.
-- **Tempo** — the 0x05 level (above). A coarse 4-step speed index, not a BPM. We
-  reproduce the *relative* steps from the engine's tempo table and anchor level 1 (the
-  default) to the **measured** real rate: DOSBox-X captures of level-1 songs run ~0.083 s
-  per sixteenth (~180 BPM quarter), not the 0.125 s (120 BPM) first guessed. The absolute
+- **Tempo** — from **header byte 0** (see the header table), measured against real audio.
+  Earlier attempts keyed tempo to the 0x05 word; that was wrong (two 0x3AFC songs,
+  ENTERTAN and AXEL, play at 83 vs 115 ms/tick — byte 0 is what differs). The absolute
   value is approximate (repeat structure blurs the total-duration estimate).
 - **Time signature** — **not stored**; the engine just plays measures back to back, so
   meter is emergent. We report the modal measure length in sixteenth-ticks

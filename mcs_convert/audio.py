@@ -25,26 +25,12 @@ def midi_to_freq(midi: int) -> float:
     return 440.0 * 2.0 ** ((midi - 69) / 12.0)
 
 
-# MCS's stored tempo is a discrete speed index (the 0x05 header word). The engine's
-# tempo table steps by one equal-tempered "semitone" (2^(1/12)) per level, so each level
-# up is ~5.9% faster. Level 1 (by far the most common) is anchored to the MEASURED real
-# rate: DOSBox-X captures of level-1 songs (ENTERTAN et al.) run ~0.083 s per sixteenth
-# (~180 BPM quarter), not the 0.125 s (120 BPM) first guessed. The absolute value is
-# approximate (repeat structure makes the total-duration estimate fuzzy); the relative
-# per-level steps come from the engine's tempo table. See docs/mcs-format.md.
-_SEMITONE = 2.0 ** (1.0 / 12.0)
-_STEP_AT_LEVEL_1 = 0.083          # seconds per sixteenth-tick at tempo level 1 (measured)
+def tempo_bpm(tick_seconds: float) -> float:
+    """Quarter-note BPM for a per-sixteenth-tick duration (4 sixteenths per quarter).
 
-
-def tempo_step_seconds(level: Optional[int]) -> float:
-    """Seconds per sixteenth-tick for an MCS stored tempo level (defaults to level 1)."""
-    lvl = 1 if level is None else level
-    return _STEP_AT_LEVEL_1 * _SEMITONE ** (1 - lvl)
-
-
-def tempo_bpm(level: Optional[int]) -> float:
-    """Approximate quarter-note BPM for a stored tempo level (4 sixteenths per quarter)."""
-    return 60.0 / (4.0 * tempo_step_seconds(level))
+    The real tempo is set by the file's header byte 0 (see reader.tick_seconds_for),
+    measured from DOSBox-X captures — NOT the 0x05 "level" word."""
+    return 60.0 / (4.0 * tick_seconds)
 
 
 def _wave(phase: np.ndarray, waveform: str) -> np.ndarray:

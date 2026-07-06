@@ -90,6 +90,17 @@ def _note_value(sym: int) -> tuple[str, int]:
 TEMPO_BASE = 0x3AF9
 TEMPO_STEP = 3
 
+# The REAL playback tempo is set by header byte 0 (0x77..0x92, in steps of 3), NOT the
+# 0x05 word. Measured from DOSBox-X captures: seconds per sixteenth-tick =
+# 0.067 + 0.016 * step, where step = (byte0 - 0x77) // 3. Fits ENTERTAN (0x7a -> 83ms),
+# AXEL/YANKEE (0x80 -> 115ms), MINUETG (0x83 -> 131ms), DIXIE (0x89 -> 163ms).
+_TEMPO_BASE_BYTE = 0x77
+
+
+def tick_seconds_for(byte0: int) -> float:
+    step = max(0, (byte0 - _TEMPO_BASE_BYTE) // 3)
+    return 0.067 + 0.016 * step
+
 # Key names by number of sharps / flats in the clef-record signature.
 _SHARP_KEYS = ["C", "G", "D", "A", "E", "B", "F#", "C#"]
 _FLAT_KEYS = ["C", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"]
@@ -329,6 +340,8 @@ def parse(path: str) -> Song:
     if len(d) >= 0x07:
         song.tempo_raw = _u16(d, 0x05)
         song.tempo_level = max(0, (song.tempo_raw - TEMPO_BASE) // TEMPO_STEP)
+    if d:
+        song.tempo_tick_seconds = tick_seconds_for(d[0])      # real tempo from byte 0
     song.time_signature = _time_signature(measure_len)
     if staves:
         treble = next((s for s in staves if s.clef == CLEF_TREBLE), staves[0])
