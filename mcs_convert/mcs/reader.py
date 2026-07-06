@@ -58,9 +58,14 @@ SYM_MARKER = 0x1F
 
 # The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
 # 2 x semitone per byte, one byte per staff position top-down, 0 = unusable.
-_TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # E7..G4
-_BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  # G5..B2,-
-MIDI_ANCHOR = 44          # ladder 0 = G#2: G4's PIT divisor 3044 = 392.00 Hz exactly
+_TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # top -> C6..
+_BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")
+# Anchor CALIBRATED AGAINST REAL AUDIO. DOSBox-X captures of MINUETG, DIXIE, YANKEE and
+# ENTERTAN (header byte0 spanning 0x7a..0x89) all play exactly 16 semitones below the
+# old ladder-from-PIT-table guess (anchor 44). The offset is uniform across songs -- it
+# is NOT the per-song transpose byte0 first looked like (that was an artifact of checking
+# only MINUETG's own unvalidated decode). 44 - 16 = 28. See docs/mcs-format.md.
+MIDI_ANCHOR = 28
 
 _NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
 

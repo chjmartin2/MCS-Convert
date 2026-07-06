@@ -35,7 +35,7 @@ def test_serialize_is_inverse_of_parse(tmp_path):
 
 def test_v_for_midi_roundtrips_through_reader():
     # Encoding a pitch then decoding it must return the same MIDI note.
-    for midi in (67, 72, 74, 76, 77, 79, 84):   # naturals across the treble window
+    for midi in (51, 56, 58, 60, 61, 63, 68):   # window pitches across the treble staff
         v = v_for_midi(midi, 1)
         b0, b1 = make_entry(3, v, 5)             # a quarter note
         # rebuild a one-note song and read it back
@@ -68,35 +68,36 @@ def test_build_file_headers_and_sizes():
 
 def test_full_encode_decode_loop():
     # Build a staff exercising notes, a beamed note, a rest, an accidental, a chord and
-    # a dot; parse it back and confirm every element survives the round-trip.
-    clef = [make_entry(CLEF_TREBLE, 16, 14), make_entry(SYM_SHARP, 7, 16)]  # key: G major
-    m_notes = [make_entry(3, v_for_midi(72, 1), 2),       # C5 quarter
-               make_entry(0x17, v_for_midi(74, 1), 6)]    # D5 beamed quarter
-    m_rest = [make_entry(10, 10, 2)]                       # quarter rest (fills nothing else)
-    m_acc = [make_entry(SYM_FLAT, v_for_midi(76, 1), 2),  # flat glyph...
-             make_entry(3, v_for_midi(76, 1), 4)]         # ...on E5 -> Eb5
-    m_chord = [make_entry(3, v_for_midi(72, 1), 2),       # C5 + E5 + G5 same x = chord
-               make_entry(3, v_for_midi(76, 1), 2),
-               make_entry(3, v_for_midi(79, 1), 2)]
-    m_key = [make_entry(3, v_for_midi(77, 1), 2)]         # F5 -> F#5 via key signature
+    # a dot; parse it back and confirm every element survives the round-trip. Pitches use
+    # the real -16 staff mapping; assertions check the round-trip and the +/-1 effects.
+    p1, p2, p3, p4, pf = 56, 58, 60, 63, 61              # window pitches on the treble staff
+    clef = [make_entry(CLEF_TREBLE, 16, 14), make_entry(SYM_SHARP, 7, 16)]  # 1-sharp key sig
+    m_notes = [make_entry(3, v_for_midi(p1, 1), 2),       # quarter note
+               make_entry(0x17, v_for_midi(p2, 1), 6)]    # beamed quarter (symbol 0x17)
+    m_rest = [make_entry(10, 10, 2)]                       # quarter rest
+    m_acc = [make_entry(SYM_FLAT, v_for_midi(p3, 1), 2),  # flat glyph...
+             make_entry(3, v_for_midi(p3, 1), 4)]         # ...on the note at p3 -> p3-1
+    m_chord = [make_entry(3, v_for_midi(p1, 1), 2),       # three notes, same x slot = chord
+               make_entry(3, v_for_midi(p3, 1), 2),
+               make_entry(3, v_for_midi(p4, 1), 2)]
+    m_key = [make_entry(3, v_for_midi(pf, 1), 2)]         # F-line note -> +1 via key sig
     song = parse_bytes(build_file([[clef, m_notes, m_rest, m_acc, m_chord, m_key]]))
     notes = song.tracks[0].notes
-    names = [("rest" if n.is_rest else midi_to_name(n.midi_note)) for n in notes]
-    assert names[:2] == ["C5", "D5"]                       # note + beamed note
+    assert [n.midi_note for n in notes[:2]] == [p1, p2]    # note + beamed note
     assert notes[1].duration_ticks == 4                    # beamed quarter = 4 ticks
-    assert names[2] == "rest"
-    assert names[3] == "D#5"                               # E5 + flat = Eb5 (== D#5)
-    assert names[4:7] == ["C5", "E5", "G5"]                # chord
+    assert notes[2].is_rest
+    assert notes[3].midi_note == p3 - 1                    # flat lowered the note a semitone
+    assert [n.midi_note for n in notes[4:7]] == [p1, p3, p4]        # chord
     assert notes[4].start_tick == notes[5].start_tick == notes[6].start_tick
-    assert names[7] == "F#5"                               # key signature sharped the F
-    assert song.key_signature == "G major"
+    assert notes[7].midi_note == pf + 1                    # key-sig sharp raised the F line
+    assert song.key_signature == "G major"                 # 1 sharp -> reported G major
 
 
 def test_8va_clef_glyph_raises_staff_an_octave():
     bass_clef = [make_entry(CLEF_BASS, 32, 14), make_entry(SYM_OCTAVA, 24, 22)]
-    note = make_entry(3, v_for_midi(48, 21), 2)            # C3 written
-    song = parse_bytes(build_file([[bass_clef, [note]]]))
-    assert song.tracks[0].notes[0].midi_note == 60         # sounds C4 (+octave)
+    written = v_for_midi(32, 21)                           # a note on the bass staff
+    song = parse_bytes(build_file([[bass_clef, [make_entry(3, written, 2)]]]))
+    assert song.tracks[0].notes[0].midi_note == 44         # sounds an octave (+12) up
 
 
 def test_reference_test_song_covers_every_element():
@@ -116,5 +117,5 @@ def test_reference_test_song_covers_every_element():
     # a chord: three notes sharing a start tick
     starts = [n.start_tick for n in treble.notes if not n.is_rest]
     assert any(starts.count(s) >= 3 for s in set(starts))
-    # 8va: the bass C3 (48) sounds an octave up
-    assert bass.notes[0].midi_note == 60
+    # 8va: the bass staff's first note (written at 32) sounds an octave (+12) up
+    assert bass.notes[0].midi_note == 44

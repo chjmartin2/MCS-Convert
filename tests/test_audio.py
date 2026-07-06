@@ -13,10 +13,11 @@ from mcs_convert.audio import (
 from mcs_convert.model import NoteEvent, Song, Track
 
 
-def test_tempo_level_1_is_120_bpm():
-    # Level 1 (the corpus default) anchors to a musical 120 BPM = 0.125 s per sixteenth.
-    assert tempo_step_seconds(1) == 0.125
-    assert round(tempo_bpm(1)) == 120
+def test_tempo_level_1_measured_rate():
+    # Level 1 (the corpus default) is anchored to the measured real rate ~0.083 s per
+    # sixteenth (~180 BPM), from DOSBox-X captures of level-1 songs.
+    assert tempo_step_seconds(1) == 0.083
+    assert round(tempo_bpm(1)) == 181
     assert tempo_step_seconds(None) == tempo_step_seconds(1)   # unknown -> default
 
 

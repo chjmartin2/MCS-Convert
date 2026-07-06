@@ -27,11 +27,13 @@ def midi_to_freq(midi: int) -> float:
 
 # MCS's stored tempo is a discrete speed index (the 0x05 header word). The engine's
 # tempo table steps by one equal-tempered "semitone" (2^(1/12)) per level, so each level
-# up is ~5.9% faster. We anchor level 1 (by far the most common) to a musical 120 BPM
-# (a quarter = 4 sixteenths = 0.5 s); the *relative* steps are faithful to the file, the
-# absolute anchor is a calibration (the true rate depends on the PIT ISR — see docs).
+# up is ~5.9% faster. Level 1 (by far the most common) is anchored to the MEASURED real
+# rate: DOSBox-X captures of level-1 songs (ENTERTAN et al.) run ~0.083 s per sixteenth
+# (~180 BPM quarter), not the 0.125 s (120 BPM) first guessed. The absolute value is
+# approximate (repeat structure makes the total-duration estimate fuzzy); the relative
+# per-level steps come from the engine's tempo table. See docs/mcs-format.md.
 _SEMITONE = 2.0 ** (1.0 / 12.0)
-_STEP_AT_LEVEL_1 = 0.125          # seconds per sixteenth-tick at tempo level 1
+_STEP_AT_LEVEL_1 = 0.083          # seconds per sixteenth-tick at tempo level 1 (measured)
 
 
 def tempo_step_seconds(level: Optional[int]) -> float:

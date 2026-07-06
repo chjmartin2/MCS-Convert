@@ -78,32 +78,36 @@ def build():
     # identically: treble clef glyph at v16/x14, key-signature F-sharp at v7/x16.
     treble_clef = [make_entry(CLEF_TREBLE, 16, 14),
                    make_entry(SYM_SHARP, 7, 16)]                     # key sig: F sharp
+    # Pitches are the staff MIDIs the real program plays (16 below concert pitch); they
+    # only need to land on valid staff positions -- the file demonstrates elements, not a
+    # tune. Named for their staff step: t_lo..t_hi ascend the treble staff.
+    a, b, c, d, e, f, g, h, i, j = 51, 55, 56, 58, 60, 61, 63, 65, 67, 68
     T = [
         treble_clef,
-        M(1).note(72, N1).done(),                                     # whole note C5
-        M(1).note(72, N2).note(76, N2).done(),                        # two half notes
-        M(1).note(67, N4).note(71, N4).note(74, N4).note(79, N4).done(),   # 4 quarters
-        M(1).note(72, N8).note(74, N8).note(76, N8).note(77, N8)
-             .note(79, N8).note(77, N8).note(76, N8).note(74, N8).done(),  # 8 eighths
-        M(1).note(72, N16).note(74, N16).note(76, N16).note(77, N16)
-             .note(79, N16).note(81, N16).note(83, N16).note(84, N16)
-             .note(83, N16).note(81, N16).note(79, N16).note(77, N16)
-             .note(76, N16).note(74, N16).note(72, N16).note(71, N16).done(),  # 16 x 16th
-        M(1).note(72, B16).note(74, B16).note(76, B16).note(77, B16)
-             .note(79, B16).note(81, B16).note(83, B16).note(84, B16)
-             .note(84, B8).note(83, B8).note(81, B8).note(79, B8).done(),  # beamed run
+        M(1).note(c, N1).done(),                                      # whole note
+        M(1).note(c, N2).note(e, N2).done(),                          # two half notes
+        M(1).note(a, N4).note(b, N4).note(d, N4).note(g, N4).done(),  # four quarters
+        M(1).note(c, N8).note(d, N8).note(e, N8).note(f, N8)
+             .note(g, N8).note(f, N8).note(e, N8).note(d, N8).done(), # eight eighths
+        M(1).note(c, N16).note(d, N16).note(e, N16).note(f, N16)
+             .note(g, N16).note(h, N16).note(i, N16).note(j, N16)
+             .note(i, N16).note(h, N16).note(g, N16).note(f, N16)
+             .note(e, N16).note(d, N16).note(c, N16).note(b, N16).done(),  # 16 sixteenths
+        M(1).note(c, B16).note(d, B16).note(e, B16).note(f, B16)
+             .note(g, B16).note(h, B16).note(i, B16).note(j, B16)
+             .note(j, B8).note(i, B8).note(h, B8).note(g, B8).done(), # beamed run
         M(1).rest(R1).done(),                                         # whole rest = whole bar
         M(1).rest(R2).rest(R2).done(),                               # two half rests
-        M(1).rest(R4).note(72, N4).rest(R4).note(76, N4).done(),    # quarter rests + notes
-        M(1).rest(R16).note(72, N16).rest(R16).note(74, N16)       # 16th rests + notes
-             .rest(R8).note(76, N8).rest(R8).note(77, N8)           # 8th rests + notes
+        M(1).rest(R4).note(c, N4).rest(R4).note(e, N4).done(),      # quarter rests + notes
+        M(1).rest(R16).note(c, N16).rest(R16).note(d, N16)         # 16th rests + notes
+             .rest(R8).note(e, N8).rest(R8).note(f, N8)             # 8th rests + notes
              .rest(R4).done(),                                      # + a quarter rest
-        M(1).accidental(72, SYM_SHARP).note(72, N4)                 # C#5 (sharp)
-             .accidental(76, SYM_FLAT).note(76, N4)                 # Eb5 (flat)
-             .accidental(77, SYM_NATURAL).note(77, N4)              # F natural (cancels key sig)
-             .note(79, N4).done(),
-        M(1).note(72, N2).dot().note(79, N4).done(),               # dotted half + quarter
-        M(1).chord([72, 76, 79], N2).chord([71, 74, 79], N2).done(),  # two triads (chords)
+        M(1).accidental(c, SYM_SHARP).note(c, N4)                   # note + sharp
+             .accidental(e, SYM_FLAT).note(e, N4)                   # note + flat
+             .accidental(f, SYM_NATURAL).note(f, N4)                # natural cancels key sig
+             .note(g, N4).done(),
+        M(1).note(c, N2).dot().note(g, N4).done(),                 # dotted half + quarter
+        M(1).chord([c, e, g], N2).chord([b, d, g], N2).done(),     # two chords (triads)
         [],                                                          # empty measure
     ]
 
@@ -112,11 +116,12 @@ def build():
     # like INVENT.MCD's (v near the top of the staff, out to the right).
     bass_clef = [make_entry(CLEF_BASS, 32, 14),
                  make_entry(SYM_OCTAVA, 24, 22)]                    # 8va for the staff
+    p, q, r, s = 32, 36, 39, 44                                     # ascending bass steps
     B = [
         bass_clef,
-        M(21).note(48, N4).note(52, N4).note(55, N4).note(60, N4).done(),  # C3 E3 G3 C4 (+8va)
-        M(21).note(60, N2).note(55, N2).done(),
-        M(21).note(48, N1).done(),
+        M(21).note(p, N4).note(q, N4).note(r, N4).note(s, N4).done(),
+        M(21).note(s, N2).note(r, N2).done(),
+        M(21).note(p, N1).done(),
     ]
     return build_file([T, B], tempo_level=1, word7=18)
 

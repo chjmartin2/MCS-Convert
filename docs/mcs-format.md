@@ -32,9 +32,11 @@ Ground-truth edits are made on the self-booting test disk
 
 ### Derived metadata (tempo / time signature / key / volume)
 The reader surfaces three display values; a fourth (volume) provably isn't in the file.
-- **Tempo** — the 0x05 level (above). It's a coarse 4-step speed index, not a BPM. We
-  reproduce the *relative* steps faithfully and anchor level 1 (the default) to 120 BPM;
-  the absolute anchor is a calibration (true rate depends on the PIT ISR).
+- **Tempo** — the 0x05 level (above). A coarse 4-step speed index, not a BPM. We
+  reproduce the *relative* steps from the engine's tempo table and anchor level 1 (the
+  default) to the **measured** real rate: DOSBox-X captures of level-1 songs run ~0.083 s
+  per sixteenth (~180 BPM quarter), not the 0.125 s (120 BPM) first guessed. The absolute
+  value is approximate (repeat structure blurs the total-duration estimate).
 - **Time signature** — **not stored**; the engine just plays measures back to back, so
   meter is emergent. We report the modal measure length in sixteenth-ticks
   (12→3/4, 16→4/4, 8→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
@@ -81,17 +83,22 @@ The engine xlats `v−1` through a 41-byte grand-staff ladder selected by the tw
 staves' clefs (four concatenated tables at MCSDISK image `0x5c88`; value = 2×semitone,
 0 = unusable):
 
-- **treble window** (20 positions): `70 6c 68 66 62 5e 5a 58 54 50 4e 4a 46 42 40 3c 38 36 32 2e` = **E7 down to G4**
-- **bass window** (20+1): `46 42 40 3c 38 36 32 2e 2a 28 24 20 1e 1a 16 12 10 0c 08 06 00` = **G5 down to B2**
+- **treble window** (20 positions): `70 6c 68 66 62 5e 5a 58 54 50 4e 4a 46 42 40 3c 38 36 32 2e`
+- **bass window** (20+1): `46 42 40 3c 38 36 32 2e 2a 28 24 20 1e 1a 16 12 10 0c 08 06 00`
 
-The windows are **fixed** — the header scroll bytes only choose which slice is on
-screen. The two staves overlap by exactly one octave (G4..G5), which is why a
-visually continuous scale across the staff hop (SCALE.MCS) actually dips an octave.
+The windows are **fixed** (the header scroll bytes only choose which slice is on screen)
+and overlap by an octave, which is why a visually continuous scale across the staff hop
+(SCALE.MCS) dips an octave.
 
-Absolute anchor: pitch value → the engine's 68-entry chromatic PIT-divisor table
-(image `0x5db9`); G4's divisor is 3044 → 1193182/3044 = **392.00 Hz exactly**, so
-`MIDI = value/2 + 44` (ladder zero = G♯2). A parallel ascending table (image
-`0x5e43`) holds the 4-voice mode's phase increments.
+**Absolute anchor — CALIBRATED AGAINST REAL AUDIO.** `MIDI = value/2 + 28`. The engine
+plays **16 semitones below concert pitch**: DOSBox-X captures of MINUETG, DIXIE, YANKEE
+and ENTERTAN (header byte0 spanning 0x7a–0x89) every note lands exactly 16 semitones
+below what the PIT-divisor reading (`MIDI = value/2 + 44`, from G4's 3044 → 392 Hz)
+predicted. So the PC-speaker period table is tuned a major-third-plus-octave low, and
+the offset is **uniform** — earlier I mistook it for a per-song transpose keyed on byte0,
+an artifact of only ever comparing against MINUETG's own unvalidated decode. byte0 does
+**not** affect pitch. (The pitch model was contour-validated for years; only a real-audio
+capture, which fixes the absolute octave, exposed the constant offset.)
 
 ### Symbols (byte0 & 0x1F)
 | sym | meaning |

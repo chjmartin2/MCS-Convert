@@ -106,7 +106,9 @@ def test_records_and_staves_with_empty_measures():
 # ---- MINUETG ground truth ---------------------------------------------------------
 
 def test_minuet_opening_two_bars(tmp_path):
-    # Treble bars 1-2, byte-for-byte: D5 G4 A4 B4 C5 | D5 G4 G4.
+    # MINUETG's opening two bars, byte-for-byte. The MIDI values are what the real
+    # program plays (validated against a DOSBox-X capture): MCS renders 16 semitones
+    # below concert pitch, so the rising figure comes out A#3 D#3 F3 G3 G#3 | A#3 D#3 D#3.
     body = bytes([
         0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,   # clef + key-sig sharp on the F line
         0xFF, 0xFF, 5, 2,
@@ -117,15 +119,15 @@ def test_minuet_opening_two_bars(tmp_path):
         0xFF, 0xFF, 0, 0,
     ])
     notes = _song(body, tmp_path).tracks[0].notes
-    assert [n.midi_note for n in notes] == [74, 67, 69, 71, 72, 74, 67, 67]
+    assert [n.midi_note for n in notes] == [58, 51, 53, 55, 56, 58, 51, 51]
     assert [n.duration_ticks for n in notes] == [4, 2, 2, 2, 2, 4, 4, 4]
     assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10, 12, 16, 20]
 
 
 def test_minuet_bar3_key_signature_and_bar4_leap(tmp_path):
-    # Bar 3: E5 C5 D5 E5 F#5 — the F# comes from the key-sig glyph (sharp at v=7,
-    # degree 6, i.e. the staff's F positions). Bar 4 opens with the G5 -> G4 drop
-    # that no proximity-based model could decode.
+    # The key-sig glyph raises the 5th note (sharp at v=7, degree 6 = the staff's F
+    # positions), and bar 4 opens with a downward leap no proximity model could decode.
+    # Pitches are the real -16 output; the +1 from the key sig is what matters here.
     body = bytes([
         0xFF, 0xFF, 2, 0, 0x06, 0x72, 0xEF, 0x80,
         0xFF, 0xFF, 5, 2,
@@ -136,8 +138,8 @@ def test_minuet_bar3_key_signature_and_bar4_leap(tmp_path):
         0xFF, 0xFF, 0, 0,
     ])
     notes = _song(body, tmp_path).tracks[0].notes
-    assert [n.midi_note for n in notes] == [76, 72, 74, 76, 78, 79, 67, 67]
-    #                                       E5  C5  D5  E5 F#5  G5  G4  G4
+    assert [n.midi_note for n in notes] == [60, 56, 58, 60, 62, 63, 51, 51]
+    assert notes[4].midi_note - notes[3].midi_note == 2       # key-sig sharp: +2 from the E
 
 
 def test_minuet_bass_chord_and_dot(tmp_path):
@@ -154,10 +156,10 @@ def test_minuet_bass_chord_and_dot(tmp_path):
     ]))
     notes = _song(body, tmp_path).tracks[1].notes
     assert [(n.midi_note, n.start_tick, n.duration_ticks) for n in notes] == [
-        (59, 0, 8),     # B3 half (chord)
-        (55, 0, 8),     # G3 half (chord, same slot)
-        (57, 8, 4),     # A3 quarter
-        (59, 12, 12),   # dotted half B3 fills bar 2
+        (43, 0, 8),     # chord note 1, half
+        (39, 0, 8),     # chord note 2, half (same slot)
+        (41, 8, 4),     # quarter
+        (43, 12, 12),   # dotted half fills bar 2 (8 + 4)
     ]
 
 
@@ -173,7 +175,7 @@ def test_rest_replaces_note_like_min2(tmp_path):
     assert [n.is_rest for n in notes] == [False, True, False, False, False]
     assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10]
     assert notes[1].midi_note == 0
-    assert [n.midi_note for n in notes if not n.is_rest] == [74, 69, 71, 72]
+    assert [n.midi_note for n in notes if not n.is_rest] == [58, 53, 55, 56]
 
 
 # ---- SCALE ground truth -----------------------------------------------------------
@@ -214,9 +216,10 @@ def test_scale_covers_the_fixed_windows(tmp_path):
     by_name = {t.name: t for t in song.tracks}
     treble = [n.midi_note for n in by_name["Treble"].notes]
     bass = [n.midi_note for n in by_name["Bass"].notes]
-    # Each staff sweeps its fixed window bottom-to-top: bass B2..G5, treble G4..E7.
-    assert bass[0] == 47 and bass[-1] == 79        # B2 .. G5
-    assert treble[0] == 67 and treble[-1] == 100   # G4 .. E7
+    # Each staff sweeps its fixed window bottom-to-top (real -16 output; each staff spans
+    # a fixed 20-position range and the two overlap by an octave).
+    assert bass[0] == 31 and bass[-1] == 63        # window bottom .. top, bass
+    assert treble[0] == 51 and treble[-1] == 84    # window bottom .. top, treble
     for midis in (treble, bass):
         assert len(midis) == 20
         assert all(b - a in (1, 2) for a, b in zip(midis, midis[1:]))
