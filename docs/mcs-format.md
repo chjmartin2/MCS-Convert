@@ -92,17 +92,24 @@ at image 0x22ac reads the table at **image 0x22b1**; handler = table word **+ 0x
 the staff. Every earlier wrong model traced to missing that **byte1's low 3 bits are
 the high half of v** — they masquerade as ±7px "jitter" in x.
 
-### Pitch: fixed per-clef windows
-The engine xlats `v−1` through a 41-byte grand-staff ladder selected by the two
-staves' clefs (four concatenated tables at MCSDISK image `0x5c88`; value = 2×semitone,
-0 = unusable):
+### Pitch: fixed per-clef windows — chosen by the CLEF, not the staff
+The engine xlats `v` through one of **four** 41-byte grand-staff ladders, one per clef
+combination: table = `ds:0x5c47 + 2·clef₁ + clef₂` with clef value 0 (G) / 0x29 (F)
+(pitch calc at 0x202f: `mov bx,[0x5bc5]; shl bx,1; add bx,[0x5bc7]; add bx,0x5c47`).
+The ds segment sits 0x40 past the image base, so the tables live at image
+`0x5c87`/`0x5cb0`/`0x5cd9`/`0x5d02` for G/G, G/F, F/G, F/F. Value = 2×semitone,
+0 = unusable. Their contents prove the mapping **follows the clef alone**:
 
-- **treble window** (20 positions): `70 6c 68 66 62 5e 5a 58 54 50 4e 4a 46 42 40 3c 38 36 32 2e`
-- **bass window** (20+1): `46 42 40 3c 38 36 32 2e 2a 28 24 20 1e 1a 16 12 10 0c 08 06 00`
+- **treble window** (20 positions, wherever a G clef sits): `70 6c 68 66 62 5e 5a 58 54 50 4e 4a 46 42 40 3c 38 36 32 2e` (E7 → G4)
+- **bass window** (20+1, wherever an F clef sits): `46 42 40 3c 38 36 32 2e 2a 28 24 20 1e 1a 16 12 10 0c 08 06 00` (G5 → B2)
 
-The windows are **fixed** (the header scroll bytes only choose which slice is on screen)
-and overlap by an octave, which is why a visually continuous scale across the staff hop
-(SCALE.MCS) dips an octave.
+So a bass clef on the TOP staff (THATSALL has one on both staves) reads the bass
+window, and a **mid-staff clef glyph simply swaps windows from that entry onward** —
+the clef handlers rewrite the ladder offset (`[0x5bc9]` = 0 / 0x29) mid-walk, and the
+barline handler does NOT reset it (unlike the 8va), so a change lasts until the next
+clef glyph. The windows are **fixed** (the header scroll bytes only choose which slice
+is on screen) and overlap by an octave, which is why a visually continuous scale across
+the staff hop (SCALE.MCS) dips an octave.
 
 **Absolute anchor.** `MIDI = value/2 + 44`, from the engine's PIT-divisor table (G4's
 divisor 3044 = 1193182/3044 = **392.00 Hz exactly**). This matches the **notation MCS
@@ -120,7 +127,7 @@ for note, exactly as the program displays it.
 |-----|---------|
 | 0x00–0x05 | note: **32nd**, 16th, 8th, quarter, half, whole → `2^n` thirty-second-ticks. `0x00` is the 32nd (the first note in the program's palette); it was originally dropped, which shortened every measure using it (ALLEGRO, DIE, …). One tick = one 32nd. |
 | 0x14–0x18 | the note values 32nd–half, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump-table entries aliasing 0x00–0x04). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. **0x19 is NOT a beamed whole** — see 0x13/0x19 below. |
-| 0x06 / 0x0D | treble / bass clef glyph |
+| 0x06 / 0x0D | treble / bass clef glyph. In the clef record it sets the staff's window; **mid-measure** (16 songs: CANON, SOCKHOP, THATSALL, …) it re-windows every following note until the next clef glyph (handlers 0x2429/0x2432 set the ladder offset to 0 / 0x29). |
 | 0x07–0x0C | rest, same ladder (= note sym + 7; `0x07` = 32nd rest; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
 | 0x11 | augmentation dot — the engine adds **half the note's own duration** to the sounding note (handler at image 0x245c) |
@@ -182,9 +189,11 @@ sit (v 1–20 → treble, v 21–41 → bass) rather than by staff order.
   previously listed here as "note-like but no duration fits"; they are now decoded, one
   tick = one 32nd. 0x1B occurs only inside SCALES.MCS's clef record (a staff-header glyph,
   not a note) and is ignored. 0x14 (beamed 32nd) never occurs.
-- **Mid-staff clef change** (`0x06`/`0x0D` inside a measure, 16 songs): shown as a tracker
-  event marker (`G`/`F`) but pitch **re-windowing is not yet applied** — notes after a
-  mid-staff clef change may read in the wrong octave in those songs.
+- **Solved:** mid-staff clef changes (`0x06`/`0x0D` inside a measure, 16 songs) now
+  re-window every following note, and the window is chosen by the clef rather than the
+  staff position (the four-ladder discovery above) — this fixed THATSALL (bass clef on
+  both staves) and the wrong-octave middle sections of CANON, SOCKHOP, etc. The `G`/`F`
+  tracker event markers remain as diagnostics.
 - **Solved:** symbols 0x1A/0x1C–0x1E dispatch straight to the walker's next-entry code
   (0x228b) — engine no-ops. None occur in the corpus anyway.
 - **Solved:** the note-symbol dispatch is now fully mapped statically. The 0x22ac

@@ -349,6 +349,38 @@ def test_8va_below_the_notes_still_raises(tmp_path):
     assert note.midi_note == 96 and note.octave == 1     # up, not down
 
 
+def test_bass_clef_on_top_staff_reads_bass_window(tmp_path):
+    # THATSALL puts a BASS clef on the TOP staff. The engine's four ladder tables
+    # (ds:0x5c47 + 2*clef1 + clef2) show the window follows the CLEF, not the staff
+    # position — v10 under a bass clef is E4, not the treble window's C6.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x0D, 0x72,               # bass clef record, top staff
+        0xFF, 0xFF, 1, 1, 0x43, 0x51,               # quarter @v10
+        0xFF, 0xFF, 0, 1,
+        0xFF, 0xFF, 0, 0,
+    ])
+    note = _song(body, tmp_path).tracks[0].notes[0]
+    assert note.midi_note == 64                          # E4 via the bass window
+
+
+def test_mid_staff_clef_change_rewindows(tmp_path):
+    # A clef glyph inside a measure swaps the pitch window from that point on, and it
+    # persists into later measures (unlike the 8va, the barline does not reset it).
+    # CANON/SOCKHOP and 14 other songs depend on this.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef record
+        0xFF, 0xFF, 3, 1,
+        0x43, 0x21,                                 # quarter @v10 x4  -> treble C6
+        0x0D, 0x40,                                 # bass clef glyph @x8
+        0x43, 0x61,                                 # same v10 @x12   -> now E4
+        0xFF, 0xFF, 1, 3, 0x43, 0x21,               # next measure, still bass -> E4
+        0xFF, 0xFF, 0, 1,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    assert [n.midi_note for n in notes] == [84, 64, 64]
+
+
 def test_tie_mark_flags_the_preceding_note(tmp_path):
     # A tie/slur glyph after a note flags it as carried into the next. 0x13 is the
     # above-the-notes form, 0x19 the below form — same effect, and 0x19 must not

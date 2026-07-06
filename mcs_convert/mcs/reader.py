@@ -45,12 +45,15 @@ Note entry = 16-bit little-endian word (byte0, byte1):
                  0x1F        the FF FF record marker seen as an entry: the engine's
                              measure-boundary handler (octave reset, accidental clear).
 
-  Pitch: the engine xlats v-1 through a fixed 41-byte grand-staff ladder chosen by
-  the two staves' clefs (tables at MCSDISK image 0x5c88..): value = 2 x semitone.
-  Accidentals add +/-2, the 8va adds +24, and the result indexes a 68-entry chromatic
-  period table whose entry for G4 is PIT divisor 3044 = 392.00 Hz exactly, anchoring
-  MIDI = value/2 + 44. Treble staff window = E7..G4, bass = G5..B2 (they overlap by
-  an octave; the windows are FIXED — the header scroll bytes are pure view state).
+  Pitch: the engine xlats v through one of FOUR fixed 41-byte grand-staff ladders,
+  picked by the two staves' clefs (ds:0x5c47 + 2*clef1 + clef2, clef 0=G / 0x29=F;
+  image bases 0x5c87/0x5cb0/0x5cd9/0x5d02): value = 2 x semitone. The tables show the
+  window follows the CLEF alone — G anywhere reads E7..G4, F anywhere reads G5..B2 —
+  so a bass clef on the top staff (THATSALL) and mid-staff clef changes (CANON,
+  SOCKHOP, 16 songs) just swap windows. Accidentals add +/-2, the 8va adds +24, and
+  the result indexes a 68-entry chromatic period table whose entry for G4 is PIT
+  divisor 3044 = 392.00 Hz exactly, anchoring MIDI = value/2 + 44. (The windows are
+  FIXED — the header scroll bytes are pure view state.)
 """
 
 from __future__ import annotations
@@ -70,8 +73,13 @@ SYM_TIE_BELOW = 0x19      # tie/slur drawn below its notes (same playback effect
 _TIE_SYMS = (SYM_TIE, SYM_TIE_BELOW)
 SYM_MARKER = 0x1F
 
-# The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
-# 2 x semitone per byte, one byte per staff position top-down, 0 = unusable.
+# The per-clef vertical windows, lifted verbatim from MCSDISK.EXE. The engine keeps FOUR
+# 41-entry ladders (ds:0x5c47 + 2*clef1 + clef2, clef value 0=G / 0x29=F; image +0x40 —
+# bases 0x5c87/0x5cb0/0x5cd9/0x5d02 for G/G, G/F, F/G, F/F), one per clef combination.
+# Their contents prove the window depends ONLY on the staff's clef, never on whether it
+# is the top or bottom staff: 2 x semitone per byte, per staff position top-down, 0 =
+# unusable. So a bass clef on the TOP staff (THATSALL) reads the bass window, and a
+# mid-staff clef glyph simply swaps windows from that point on.
 _TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # E7 down to G4
 _BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  # G5 down to B2
 # MIDI = value/2 + 44, from the engine's PIT-divisor table (G4's divisor 3044 = 392.00 Hz).
@@ -220,27 +228,28 @@ def split_staves(recs: List[Record]) -> List[List[Record]]:
 @dataclass
 class _Staff:
     clef: int
-    v_base: int                    # treble notes live at v 1..20, bass at v 21..41
+    v_base: int                    # staff POSITION: top staff v 1..20, bottom v 21..41
     keysig: List[int]              # semitone*2 offset per staff degree (0..6)
     octava: int                    # +24 if the clef record carries an 8va glyph
     records: List[Record]
 
-    def window(self) -> bytes:
-        return _TREBLE_WINDOW if self.v_base == 1 else _BASS_WINDOW
+    def midi(self, v: int, acc2: int, clef: int | None = None) -> int:
+        """MIDI note for vertical position v with accidental offset (2x semitones).
 
-    def midi(self, v: int, acc2: int) -> int:
-        """MIDI note for vertical position v with accidental offset (2x semitones)."""
+        The window is chosen by the CLEF alone (the engine's four ladder tables carry
+        the same values wherever the clef sits); v_base only rebases the position.
+        `clef` overrides the staff's opening clef after a mid-staff clef change."""
+        win = _TREBLE_WINDOW if (clef or self.clef) == CLEF_TREBLE else _BASS_WINDOW
         idx = v - self.v_base
-        win = self.window()
         if not (0 <= idx < len(win)) or win[idx] == 0:
             return 0
         return (win[idx] + acc2 + self.octava) // 2 + MIDI_ANCHOR
 
 
 def _read_staff(recs: List[Record]) -> _Staff:
-    """Decode a staff's clef record and pick its pitch window. The window follows where
-    the notes actually sit (v 1..20 = treble, v 21..41 = bass) rather than staff order,
-    so multi-staff songs and a bass line printed first both land in the right octave."""
+    """Decode a staff's clef record. v_base is POSITIONAL — which screen staff the notes
+    sit on (v 1..20 = top, v 21..41 = bottom) — while the pitch window itself follows
+    the CLEF (see _Staff.midi), so a bass clef on the top staff reads correctly."""
     clef = CLEF_TREBLE
     keysig = [0] * 7
     octava = 0
@@ -277,9 +286,12 @@ class _Slot:
 def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, str]]]:
     """Decode a staff into per-measure slot lists, plus (measure_index, label) event marks
     for the tracker: '8^' where a measure carries an 8va, and 'G'/'F' for a mid-staff
-    clef change (a clef change is diagnostic only; pitch re-windowing is not applied)."""
+    clef change (which swaps the pitch window from that glyph onward — the engine's clef
+    handler rewrites its ladder offset mid-walk, and unlike the 8va it is NOT reset at
+    the barline; it lasts until the next clef glyph)."""
     measures: List[List[_Slot]] = []
     marks: List[Tuple[int, str]] = []
+    cur_clef = staff.clef                      # persists across measures
     for mi, rec in enumerate(staff.records):
         slots: List[_Slot] = []
         measure_acc: Dict[int, int] = {}       # explicit accidentals, per position
@@ -293,6 +305,7 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
             v = vertical(b0, b1)
             if sym in (CLEF_TREBLE, CLEF_BASS):
                 marks.append((mi, "G" if sym == CLEF_TREBLE else "F"))
+                cur_clef = sym                 # re-window from this glyph on
                 continue
             if sym == SYM_OCTAVA:
                 if oc == 0:
@@ -323,7 +336,7 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 acc = measure_acc.get(v, staff.keysig[(v - 1) % 7])
                 if acc == 0x0C:
                     acc = 0
-                midi = staff.midi(v, acc)
+                midi = staff.midi(v, acc, cur_clef)
                 if midi:
                     midi += 12 * oc                       # under an 8va: +1 octave
                 if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
