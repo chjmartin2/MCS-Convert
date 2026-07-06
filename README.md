@@ -49,9 +49,17 @@ tracker export, and WAV export still work.
 
 ### Where do I get songs?
 
-Song files are copyrighted, so none are included. The original 1984 disk
-(with classics like *The Entertainer*, *Flight of the Bumblebee*, and
-Pachelbel's *Canon*) is preserved on archive.org — extract the `*.MCS` /
+A demo is included: [`demos/MAPLERAG.MCS`](demos/MAPLERAG.MCS) — Scott
+Joplin's **Maple Leaf Rag** (1899, public domain), A strain with repeat,
+arranged for MCS's four voices by [`demos/make_maple_leaf.py`](demos/make_maple_leaf.py)
+from the Mutopia Project's edition. It exercises the whole decoded format:
+a 4-flat key signature, mid-measure accidentals and cancellations, naturals
+against the key, ties across barlines, four-note chords, both clefs — and a
+finale where the echo phrase returns an octave up under an 8va.
+
+Beyond that, song files are copyrighted, so none are included. The original
+1984 disk (with classics like *The Entertainer*, *Flight of the Bumblebee*,
+and Pachelbel's *Canon*) is preserved on archive.org — extract the `*.MCS` /
 `*.MCD` files from the disk image and drop them in `samples/` (gitignored).
 
 ## The format, documented
