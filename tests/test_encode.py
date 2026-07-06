@@ -149,6 +149,17 @@ def test_pt3_converts_to_playable_mcs(tmp_path):
     assert _sounding(got) == _sounding(song)
 
 
+def test_vortex_tracker_magic_is_accepted():
+    # Vortex Tracker II writes its own signature over the same header layout
+    # ("Vortex Tracker II 1.0 module: ..." — seen in the wild); only the first
+    # 0x1E bytes differ from ProTracker's, and they're all cosmetic text.
+    mod = bytearray(_build_pt3())
+    vt2 = b"Vortex Tracker II 1.0 module: "
+    mod[:len(vt2)] = vt2
+    song, _ = parse_pt3(bytes(mod))
+    assert sum(len(t.notes) for t in song.tracks) == 4
+
+
 def test_row_tempo_mapping_stays_in_mcs_range():
     for delay in range(1, 16):
         ticks, byte0 = row_ticks_and_tempo(delay)

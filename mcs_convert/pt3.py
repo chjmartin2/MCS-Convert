@@ -27,7 +27,9 @@ from typing import List, Optional, Tuple
 
 from .model import NoteEvent, Song, Track
 
-_MAGIC = b"ProTracker 3."
+# Two signatures exist in the wild for the same header layout: ProTracker's own,
+# and Vortex Tracker II's (e.g. "Vortex Tracker II 1.0 module: ...").
+_MAGICS = (b"ProTracker 3.", b"Vortex Tracker II")
 
 # Inline parameter bytes consumed immediately after a command byte.
 _INLINE = {0x10: 1}                              # $10: sample number
@@ -145,8 +147,8 @@ def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
 
 def parse_pt3(data: bytes) -> Tuple[Song, int]:
     """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds."""
-    if data[:13] != _MAGIC:
-        raise PT3Error("not a ProTracker 3 module (bad magic)")
+    if not any(data.startswith(m) for m in _MAGICS):
+        raise PT3Error("not a ProTracker 3 / Vortex Tracker module (bad magic)")
     title = _cstr(data[0x1E:0x3E])
     author = _cstr(data[0x42:0x62])
     delay = data[0x64]
