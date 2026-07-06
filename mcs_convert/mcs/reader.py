@@ -274,11 +274,16 @@ def _read_staff(recs: List[Record]) -> _Staff:
 
 @dataclass
 class _Slot:
-    """One rhythmic position in a measure: a note, rest, or chord (same x slot)."""
+    """One rhythmic position in a measure: a note, rest, or chord (same x slot).
+
+    The engine feeds each of a staff's voices separately, so a mixed-duration chord
+    (THATSALL bar 3: a 16th stacked on an 8th) advances to the next slot when its
+    SHORTEST member ends while the longer ones keep ringing — `advance` is that gap,
+    and each note in `notes` carries its own full duration."""
     slot_x: int
-    duration: int
+    advance: int              # ticks until the staff's next slot (min of the notes)
     is_rest: bool
-    midis: List[int]
+    notes: List[List[int]]    # [midi, duration_ticks, v] per chord member
     tied: bool = False        # a 0x13/0x19 tie/slur mark follows this slot
     octave: int = 0           # 1 if the slot is under an 8va (the engine never shifts down)
 
@@ -322,10 +327,15 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: 2, SYM_FLAT: -2}[sym]
                 continue
             if sym == SYM_DOT:
-                # augmentation dot: engine adds half the note's own duration
+                # Augmentation dot: the engine dots ONE note — the voice sitting exactly
+                # at the glyph's v (handler 0x245c compares slot v verbatim; a chord gets
+                # one dot glyph per member, THATSALL m4). It also refuses to dot a 32nd.
                 for s in reversed(slots):
                     if not s.is_rest:
-                        s.duration += s.duration // 2
+                        for note in s.notes:
+                            if note[2] == v and note[1] >= 2:
+                                note[1] += note[1] // 2
+                        s.advance = min(n[1] for n in s.notes)
                         break
                 continue
             if _note_value(sym)[0]:                       # note (incl. beamed) or rest
@@ -340,17 +350,25 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 if midi:
                     midi += 12 * oc                       # under an 8va: +1 octave
                 if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
-                    slots[-1].midis.append(midi)          # chord: same 8-px slot
-                    slots[-1].duration = max(slots[-1].duration, dur)
+                    slots[-1].notes.append([midi, dur, v])  # chord: same 8-px slot
+                    slots[-1].advance = min(slots[-1].advance, dur)
                 else:
-                    slots.append(_Slot(x_slot(b1), dur, False, [midi], octave=oc))
+                    slots.append(_Slot(x_slot(b1), dur, False, [[midi, dur, v]],
+                                       octave=oc))
             # markers, unknown symbols: no time, no pitch
         measures.append(slots)
     return measures, marks
 
 
 def _span(slots: List[_Slot]) -> int:
-    return sum(s.duration for s in slots)
+    """Ticks until every voice of the measure has finished — the engine's barline gate.
+    Slots advance by their shortest member; a longer chord member rings past it."""
+    t = end = 0
+    for s in slots:
+        longest = max((n[1] for n in s.notes), default=s.advance)
+        end = max(end, t + longest)
+        t += s.advance
+    return max(end, t)
 
 
 def parse(path: str) -> Song:
@@ -379,7 +397,7 @@ def parse(path: str) -> Song:
     def _fills_measure(slots: List[_Slot]) -> bool:
         # Notation convention: a lone whole rest means "rest the whole measure",
         # whatever the meter (BUMBLE's 2/4 bass opens with four of them).
-        return len(slots) == 1 and slots[0].is_rest and slots[0].duration == 32
+        return len(slots) == 1 and slots[0].is_rest and slots[0].advance == 32
 
     # The measure grid is the MODAL span (the meter), not the maximum — one long
     # final measure must not stretch every bar of the song (ties break upward so a
@@ -392,7 +410,7 @@ def parse(path: str) -> Song:
     for _, ms in decoded:
         for m in ms:
             if _fills_measure(m):
-                m[0].duration = measure_len
+                m[0].advance = measure_len
 
     # Per-measure durations: the grid, stretched only by genuinely longer measures.
     n_meas = max((len(ms) for _, ms in decoded), default=0)
@@ -434,12 +452,12 @@ def parse(path: str) -> Song:
                     tick += deficit
             for s in slots:
                 if s.is_rest:
-                    track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
+                    track.add(NoteEvent(start_tick=tick, duration_ticks=s.advance,
                                         midi_note=0, is_rest=True, tied=s.tied))
                 else:
-                    for m in s.midis:
-                        track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
+                    for m, dur, _v in s.notes:
+                        track.add(NoteEvent(start_tick=tick, duration_ticks=dur,
                                             midi_note=m, tied=s.tied, octave=s.octave))
-                tick += s.duration
+                tick += s.advance
         song.add_track(track)
     return song

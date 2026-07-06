@@ -130,10 +130,18 @@ for note, exactly as the program displays it.
 | 0x06 / 0x0D | treble / bass clef glyph. In the clef record it sets the staff's window; **mid-measure** (16 songs: CANON, SOCKHOP, THATSALL, …) it re-windows every following note until the next clef glyph (handlers 0x2429/0x2432 set the ladder offset to 0 / 0x29). |
 | 0x07–0x0C | rest, same ladder (= note sym + 7; `0x07` = 32nd rest; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
-| 0x11 | augmentation dot — the engine adds **half the note's own duration** to the sounding note (handler at image 0x245c) |
+| 0x11 | augmentation dot — the engine adds **half the note's own duration** to the ONE note sitting exactly at the glyph's v (handler 0x245c compares the voice's slot verbatim, and refuses to dot a 32nd). A dotted chord carries one dot glyph per member (THATSALL m5) — applying every dot to every member compounds into nonsense durations. |
 | 0x12 | 8va — **always +1 octave, never down**. In the clef record it sets the staff's baseline (+0x18 at image 0x1629/0x16b3 → `[0x5bbe/f]`); **mid-measure (612×)** the handler at 0x24d7 is a bare `mov [0x5bc2],0x18` — an absolute SET of the working shift **from the glyph's stream position to the end of the measure**, where the barline handler restores the baseline. The glyph's vertical placement is cosmetic; the engine has **no 8vb** and no way to shift down mid-song. (ENTERTAN bars 5/9/13/… place the glyph mid-measure: the first notes stay put, the rest jump up.) |
 | 0x13 / 0x19 | tie/slur mark drawn **above** (0x13, 425×) or **below** (0x19, 222×) its notes — handlers 0x24e5/0x24df search down/up from the glyph's v for the sounding voice and flag its pitch slot. Flags the preceding note as carried into the next (same-pitch = tie, different-pitch = slur). Marked, not merged: the notes already occupy the right total time. Decoding 0x19 as a "beamed whole" inserted 222 phantom whole notes into CANON, ELSEWERE, BABYFACE, … |
 | 0x1F | the `FF FF` record marker seen as an entry — the engine's **measure-boundary handler** (image 0x22fd): waits for sounding voices, resets both staves' octave shifts to the clef-record baselines, clears the accidental/pitch-slot table, and skips the `(count,prev)` header word. This is what makes the 8va per-measure. |
+
+**Timing: voices are fed independently.** Each staff runs up to three voices with their
+own countdowns; the walker feeds the next entry to whichever voice frees first. So a
+mixed-duration chord (same x slot — THATSALL bar 3's 16th stacked on an 8th) advances to
+the next column when its SHORTEST member ends while the longer members keep ringing, and
+the barline waits for every voice to finish. Modelling a chord as one max-duration block
+overstretched measures (BABYFACE had 28 such bars) and knocked the two staves out of
+alignment via the measure grid.
 
 **Accidentals & key signature.** `0x0e` / `0x0f` / `0x10` = natural / sharp / flat.
 Glyphs in the *clef record* build the key signature: the glyph's staff degree

@@ -349,6 +349,48 @@ def test_8va_below_the_notes_still_raises(tmp_path):
     assert note.midi_note == 96 and note.octave == 1     # up, not down
 
 
+def test_mixed_duration_chord_advances_by_the_shortest(tmp_path):
+    # THATSALL bar 3: a 16th stacked on an 8th at one x, then a 16th rest. The engine
+    # feeds each voice separately — the next slot starts when the SHORTEST chord member
+    # ends, the 8th keeps ringing under it, and the measure does NOT stretch (the old
+    # max() rule made it 18/16 ticks, front-padding the other staff out of alignment).
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
+        0xFF, 0xFF, 3, 1,
+        0x41, 0x21,                                 # 16th @v10 x4  (C6, 2 ticks)
+        0x82, 0x21,                                 # 8th  @v12 x4  (A5, 4 ticks) chord
+        0xA8, 0x41,                                 # 16th rest @x8
+        0xFF, 0xFF, 0, 3,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    got = [(n.start_tick, n.duration_ticks, n.midi_note, n.is_rest) for n in notes]
+    assert got == [
+        (0, 2, 84, False),      # the 16th
+        (0, 4, 81, False),      # the 8th, ringing past the 16th
+        (2, 2, 0, True),        # the rest starts when the 16th ends, not the 8th
+    ]
+
+
+def test_chord_dots_target_their_own_note(tmp_path):
+    # THATSALL m5: a chord of two 8ths followed by TWO dot glyphs, one at each member's
+    # v. The engine dots the note sitting exactly at the glyph's v (handler 0x245c), so
+    # each member is dotted once (6 ticks) — not every dot on every note, which used to
+    # compound into a 9-tick "!9".
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
+        0xFF, 0xFF, 4, 1,
+        0x42, 0x21,                                 # 8th @v10 x4 (C6)
+        0x82, 0x21,                                 # 8th @v12 x4 (A5) — chord
+        0x51, 0x29,                                 # dot @v10 x5
+        0x91, 0x29,                                 # dot @v12 x5
+        0xFF, 0xFF, 0, 4,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    assert [(n.midi_note, n.duration_ticks) for n in notes] == [(84, 6), (81, 6)]
+
+
 def test_bass_clef_on_top_staff_reads_bass_window(tmp_path):
     # THATSALL puts a BASS clef on the TOP staff. The engine's four ladder tables
     # (ds:0x5c47 + 2*clef1 + clef2) show the window follows the CLEF, not the staff
