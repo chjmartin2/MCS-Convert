@@ -26,7 +26,14 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
   phosphor green on black, resizable.
 - **Export** — decoded playback as WAV, or the full tracker grid as text.
 
-### Quick start (Windows)
+### Just want to listen? (Windows, no Python)
+
+Download **`MCS-Player.exe`** from the
+[latest release](https://github.com/chjmartin2/MCS-Convert/releases/latest)
+and double-click it. (SmartScreen will warn about an unrecognized app — the
+exe isn't code-signed; choose *More info → Run anyway*.)
+
+### Quick start from source (Windows)
 
 ```powershell
 git clone https://github.com/chjmartin2/MCS-Convert.git
@@ -91,6 +98,13 @@ tests/              58 tests, including engine ground-truth checks
 ```powershell
 pip install -e ".[dev]"
 pytest
+```
+
+The standalone player exe attached to releases is built with:
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --windowed --name MCS-Player --distpath dist --workpath build --specpath build play.py
 ```
 
 ## License
