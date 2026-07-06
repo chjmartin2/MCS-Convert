@@ -35,7 +35,7 @@ def test_serialize_is_inverse_of_parse(tmp_path):
 
 def test_v_for_midi_roundtrips_through_reader():
     # Encoding a pitch then decoding it must return the same MIDI note.
-    for midi in (51, 56, 58, 60, 61, 63, 68):   # window pitches across the treble staff
+    for midi in (67, 72, 74, 76, 77, 79, 84):   # naturals across the treble window
         v = v_for_midi(midi, 1)
         b0, b1 = make_entry(3, v, 5)             # a quarter note
         # rebuild a one-note song and read it back
@@ -68,15 +68,14 @@ def test_build_file_headers_and_sizes():
 
 def test_full_encode_decode_loop():
     # Build a staff exercising notes, a beamed note, a rest, an accidental, a chord and
-    # a dot; parse it back and confirm every element survives the round-trip. Pitches use
-    # the real -16 staff mapping; assertions check the round-trip and the +/-1 effects.
-    p1, p2, p3, p4, pf = 56, 58, 60, 63, 61              # window pitches on the treble staff
+    # a dot; parse it back and confirm every element survives the round-trip.
+    p1, p2, p3, p4, pf = 72, 74, 76, 79, 77              # naturals on the treble staff
     clef = [make_entry(CLEF_TREBLE, 16, 14), make_entry(SYM_SHARP, 7, 16)]  # 1-sharp key sig
     m_notes = [make_entry(3, v_for_midi(p1, 1), 2),       # quarter note
                make_entry(0x17, v_for_midi(p2, 1), 6)]    # beamed quarter (symbol 0x17)
     m_rest = [make_entry(10, 10, 2)]                       # quarter rest
-    m_acc = [make_entry(SYM_SHARP, v_for_midi(p3, 1), 2),  # body 0x0f glyph LOWERS (inverted
-             make_entry(3, v_for_midi(p3, 1), 4)]          # vs the key sig): note p3 -> p3-1
+    m_acc = [make_entry(SYM_FLAT, v_for_midi(p3, 1), 2),   # flat glyph lowers the note...
+             make_entry(3, v_for_midi(p3, 1), 4)]          # ...at p3 -> p3-1
     m_chord = [make_entry(3, v_for_midi(p1, 1), 2),       # three notes, same x slot = chord
                make_entry(3, v_for_midi(p3, 1), 2),
                make_entry(3, v_for_midi(p4, 1), 2)]
@@ -95,9 +94,9 @@ def test_full_encode_decode_loop():
 
 def test_8va_clef_glyph_raises_staff_an_octave():
     bass_clef = [make_entry(CLEF_BASS, 32, 14), make_entry(SYM_OCTAVA, 24, 22)]
-    written = v_for_midi(32, 21)                           # a note on the bass staff
+    written = v_for_midi(48, 21)                           # C3 on the bass staff
     song = parse_bytes(build_file([[bass_clef, [make_entry(3, written, 2)]]]))
-    assert song.tracks[0].notes[0].midi_note == 44         # sounds an octave (+12) up
+    assert song.tracks[0].notes[0].midi_note == 60         # sounds C4, an octave (+12) up
 
 
 def test_reference_test_song_covers_every_element():
@@ -117,5 +116,5 @@ def test_reference_test_song_covers_every_element():
     # a chord: three notes sharing a start tick
     starts = [n.start_tick for n in treble.notes if not n.is_rest]
     assert any(starts.count(s) >= 3 for s in set(starts))
-    # 8va: the bass staff's first note (written at 32) sounds an octave (+12) up
-    assert bass.notes[0].midi_note == 44
+    # 8va: the bass staff's first note (written C3) sounds an octave (+12) up
+    assert bass.notes[0].midi_note == 60

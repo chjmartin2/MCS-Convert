@@ -58,14 +58,13 @@ SYM_MARKER = 0x1F
 
 # The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
 # 2 x semitone per byte, one byte per staff position top-down, 0 = unusable.
-_TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # top -> C6..
-_BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")
-# Anchor CALIBRATED AGAINST REAL AUDIO. DOSBox-X captures of MINUETG, DIXIE, YANKEE and
-# ENTERTAN (header byte0 spanning 0x7a..0x89) all play exactly 16 semitones below the
-# old ladder-from-PIT-table guess (anchor 44). The offset is uniform across songs -- it
-# is NOT the per-song transpose byte0 first looked like (that was an artifact of checking
-# only MINUETG's own unvalidated decode). 44 - 16 = 28. See docs/mcs-format.md.
-MIDI_ANCHOR = 28
+_TREBLE_WINDOW = bytes.fromhex("706c686662 5e5a5854504e4a4642403c 3836322e")  # E7 down to G4
+_BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  # G5 down to B2
+# MIDI = value/2 + 44, from the engine's PIT-divisor table (G4's divisor 3044 = 392.00 Hz).
+# This matches the NOTATION MCS shows on screen: ENTERTAN reads D..E..C.. in C major, exactly
+# as the program draws it. (An earlier "anchor 28 / -16" change was WRONG -- it chased pitches
+# mis-read off the 1-bit polyphonic audio, whose octave/voice detection is unreliable.)
+MIDI_ANCHOR = 44
 
 _NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
 
@@ -257,11 +256,9 @@ def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
             sym = symbol(b0)
             v = vertical(b0, b1)
             if sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
-                # Mid-measure accidentals are INVERTED relative to the clef-record key
-                # signature: the 0x0f glyph LOWERS a body note but RAISES in the key sig,
-                # and 0x10 the reverse. Validated against real audio (ENTERTAN's main
-                # theme: 0x0f on A#4 plays A4, a descent, not B4). 0x0C = forced natural.
-                measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: -2, SYM_FLAT: 2}[sym]
+                # Mid-measure accidental at this position (0x0C = forced natural). The
+                # Entertainer's main theme is the chromatic D-D#-E, so 0x0f (sharp) raises.
+                measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: 2, SYM_FLAT: -2}[sym]
                 continue
             if sym == SYM_DOT:
                 # augmentation dot: engine adds half the note's own duration

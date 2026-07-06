@@ -101,15 +101,16 @@ The windows are **fixed** (the header scroll bytes only choose which slice is on
 and overlap by an octave, which is why a visually continuous scale across the staff hop
 (SCALE.MCS) dips an octave.
 
-**Absolute anchor — CALIBRATED AGAINST REAL AUDIO.** `MIDI = value/2 + 28`. The engine
-plays **16 semitones below concert pitch**: DOSBox-X captures of MINUETG, DIXIE, YANKEE
-and ENTERTAN (header byte0 spanning 0x7a–0x89) every note lands exactly 16 semitones
-below what the PIT-divisor reading (`MIDI = value/2 + 44`, from G4's 3044 → 392 Hz)
-predicted. So the PC-speaker period table is tuned a major-third-plus-octave low, and
-the offset is **uniform** — earlier I mistook it for a per-song transpose keyed on byte0,
-an artifact of only ever comparing against MINUETG's own unvalidated decode. byte0 does
-**not** affect pitch. (The pitch model was contour-validated for years; only a real-audio
-capture, which fixes the absolute octave, exposed the constant offset.)
+**Absolute anchor.** `MIDI = value/2 + 44`, from the engine's PIT-divisor table (G4's
+divisor 3044 = 1193182/3044 = **392.00 Hz exactly**). This matches the **notation MCS
+draws on screen** — the ground truth: e.g. ENTERTAN reads `D..E..C..` in C major, note
+for note, exactly as the program displays it.
+
+> **Cautionary note.** A previous revision changed this to `value/2 + 28` ("16 semitones
+> low"), chasing pitches read off DOSBox-X audio. That was **wrong**: the 4-voice output
+> is 1-bit and polyphonic, and pitch detection on it octave-errors and confuses voices
+> badly (a decoded A#5 was detected as C3). The on-screen notation, not the audio, is the
+> reliable reference for pitch — reverted to +44.
 
 ### Symbols (byte0 & 0x1F)
 | sym | meaning |
@@ -123,18 +124,18 @@ capture, which fixes the absolute octave, exposed the constant offset.)
 | 0x12 | in the clef record: 8va for the staff (+0x18 = +12 semitones) |
 | 0x1F | the `FF FF` record marker seen as an entry |
 
-**Accidentals & key signature.** Glyphs in the *clef record* build the key signature:
-the glyph's staff degree `(v−1) mod 7` gets ±1 semitone in **every octave** (the scan
-at image 0x1600 replicates it across three 7-slot tables per staff). MINUETG carries a
-`0x0f` on the F line — the G-major key signature — which is how its F♯ is stored with no
-per-note mark (real audio confirms: the key-sig note plays raised). Inside a measure, a
-glyph sets a **measure-scoped accidental at that exact position**, cleared each measure.
+**Accidentals & key signature.** `0x0e` / `0x0f` / `0x10` = natural / sharp / flat.
+Glyphs in the *clef record* build the key signature: the glyph's staff degree
+`(v−1) mod 7` gets ±1 semitone in **every octave** (the scan at image 0x1600 replicates
+it across three 7-slot tables per staff). MINUETG carries a `0x0f` (sharp) on the F line
+— the G-major key signature — which is how its F♯ is stored with no per-note mark. Inside
+a measure the same glyphs set a **measure-scoped accidental at that exact position** and
+mean the same thing (sharp raises, flat lowers): ENTERTAN's main theme is the chromatic
+D-D#-E, the D# from a body `0x0f`. The per-position override table is cleared each measure.
 
-**Mid-measure accidentals are INVERTED relative to the key signature** — validated
-against real audio. The `0x0f` glyph *raises* as a key signature but *lowers* as a body
-accidental, and `0x10` the reverse. (ENTERTAN's main theme: a body `0x0f` on A#4 plays
-**A4**, a descent — captured as 433 Hz, twice — while MINUETG's clef `0x0f` plays its
-note **raised**.) The reader therefore uses opposite sign tables for the two paths.
+> A previous revision "inverted" the body accidentals (0x0f lowers) to chase a
+> mis-detected audio pitch; that was part of the same bad-audio mistake as the anchor and
+> has been reverted — sharp raises, flat lowers, in both the clef record and the body.
 
 **Chords**: entries in the same 8-px x slot share a stem and sound together
 (MINUETG's bass opens with a {G3,B3} half chord + A3 quarter = exactly 3/4).

@@ -78,10 +78,8 @@ def build():
     # identically: treble clef glyph at v16/x14, key-signature F-sharp at v7/x16.
     treble_clef = [make_entry(CLEF_TREBLE, 16, 14),
                    make_entry(SYM_SHARP, 7, 16)]                     # key sig: F sharp
-    # Pitches are the staff MIDIs the real program plays (16 below concert pitch); they
-    # only need to land on valid staff positions -- the file demonstrates elements, not a
-    # tune. Named for their staff step: t_lo..t_hi ascend the treble staff.
-    a, b, c, d, e, f, g, h, i, j = 51, 55, 56, 58, 60, 61, 63, 65, 67, 68
+    # Naturals ascending the treble staff (the file demonstrates elements, not a tune).
+    a, b, c, d, e, f, g, h, i, j = 67, 71, 72, 74, 76, 77, 79, 81, 83, 84
     T = [
         treble_clef,
         M(1).note(c, N1).done(),                                      # whole note
@@ -116,7 +114,7 @@ def build():
     # like INVENT.MCD's (v near the top of the staff, out to the right).
     bass_clef = [make_entry(CLEF_BASS, 32, 14),
                  make_entry(SYM_OCTAVA, 24, 22)]                    # 8va for the staff
-    p, q, r, s = 32, 36, 39, 44                                     # ascending bass steps
+    p, q, r, s = 48, 52, 55, 60                                     # ascending bass steps
     B = [
         bass_clef,
         M(21).note(p, N4).note(q, N4).note(r, N4).note(s, N4).done(),
