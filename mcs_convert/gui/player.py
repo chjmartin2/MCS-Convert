@@ -76,6 +76,8 @@ class PlayerApp:
         row1 = tk.Frame(self.root, bg=_BG)
         row1.pack(fill="x", padx=8, pady=(6, 2))
         tk.Button(row1, text="Open…", command=self.open_dialog).pack(side="left")
+        tk.Button(row1, text="⬆ Import…", command=self.import_dialog).pack(
+            side="left", padx=(4, 0))
         self.play_btn = tk.Button(row1, text="▶ Play", command=self.play, state="disabled")
         self.play_btn.pack(side="left", padx=(8, 0))
         self.pause_btn = tk.Button(row1, text="⏸ Pause", width=9,
@@ -193,6 +195,46 @@ class PlayerApp:
             filetypes=[("MCS/MCD songs", "*.mcs *.mcd *.MCS *.MCD"), ("All files", "*.*")])
         if path:
             self.load(path)
+
+    def import_dialog(self) -> None:
+        """Convert a chiptune module to .MCS and open it. Currently: Vortex
+        Tracker .pt3 (AY-3-8910); more importers dispatch on the extension."""
+        src = filedialog.askopenfilename(
+            title="Import a chiptune module",
+            filetypes=[("Vortex Tracker modules", "*.pt3 *.PT3"),
+                       ("All files", "*.*")])
+        if not src:
+            return
+        try:
+            data = self._convert(src)
+        except Exception as exc:  # noqa: BLE001 - show any import error to the user
+            messagebox.showerror("Cannot import", f"{os.path.basename(src)}:\n{exc}")
+            return
+        default = os.path.splitext(os.path.basename(src))[0].upper()[:8] + ".MCS"
+        out = filedialog.asksaveasfilename(
+            title="Save converted song as", defaultextension=".mcs",
+            initialdir=os.path.dirname(src), initialfile=default,
+            filetypes=[("MCS songs", "*.mcs *.MCS")])
+        if not out:
+            return
+        with open(out, "wb") as fh:
+            fh.write(data)
+        self.load(out)
+        self.status.configure(text=f"Imported {os.path.basename(src)} → "
+                                   f"{os.path.basename(out)}.")
+
+    @staticmethod
+    def _convert(src: str) -> bytes:
+        """Module file -> .MCS bytes, dispatched on the extension."""
+        from ..mcs.encode import encode_song
+
+        ext = src.lower().rsplit(".", 1)[-1]
+        if ext == "pt3":
+            from ..pt3 import parse_pt3
+            with open(src, "rb") as fh:
+                song, byte0 = parse_pt3(fh.read())
+            return encode_song(song, tempo_byte0=byte0)
+        raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
 
     def load(self, path: str) -> None:
         try:
