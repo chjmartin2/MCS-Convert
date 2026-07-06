@@ -31,8 +31,6 @@ from .model import NoteEvent, Song, Track
 # and Vortex Tracker II's (e.g. "Vortex Tracker II 1.0 module: ...").
 _MAGICS = (b"ProTracker 3.", b"Vortex Tracker II")
 
-# Inline parameter bytes consumed immediately after a command byte.
-_INLINE = {0x10: 1}                              # $10: sample number
 # Effect parameter bytes consumed AFTER the line-ending byte, by on-disk code.
 _FX_PARAMS = {0x01: 3, 0x02: 5, 0x03: 1, 0x04: 1, 0x05: 2, 0x08: 3, 0x09: 1}
 
@@ -58,15 +56,38 @@ class _Channel:
         self.row = 0                 # absolute row position
         self.skip = 1                # rows per line-event
         self.ornament = 0
-        self.notes: List[Tuple[int, int]] = []   # (row, note_index) onsets
+        self.sample = 1              # current PT3 sample (instrument table)
+        self.last_noise = None       # last noise period set on this channel
+        self.notes: List[Tuple] = []             # (row, note_index, sample, noise)
         self.offs: List[int] = []                # rows where the channel went silent
         self.noise_cmds = 0          # $20-$3F noise sets seen (percussion signal)
 
     def note_on(self, row: int, index: int, orn_base: int) -> None:
-        self.notes.append((row, index + orn_base))
+        self.notes.append((row, index + orn_base, self.sample, self.last_noise))
 
     def note_off(self, row: int) -> None:
         self.offs.append(row)
+
+
+def _sample_is_drum(data: bytes, idx: int) -> bool:
+    """True when PT3 sample `idx` drives the noise generator with the tone off
+    for most of its frames — the AY percussion recipe. Frame byte 1: bit 4 set
+    = tone disabled, bit 7 set = noise disabled (they OR into the AY mixer;
+    verified against deater's pt3_lib.c, `(b1>>1) & 0x48`)."""
+    if not 0 <= idx < 32:
+        return False
+    addr = _u16(data, 0x69 + idx * 2)
+    if not 0 < addr < len(data) - 2:
+        return False
+    length = data[addr + 1]
+    if length == 0:
+        return False
+    tone_on = noise_on = 0
+    for k in range(min(length, (len(data) - addr - 2) // 4)):
+        b1 = data[addr + 2 + k * 4 + 1]
+        tone_on += 0 if b1 & 0x10 else 1
+        noise_on += 0 if b1 & 0x80 else 1
+    return noise_on * 2 >= length and tone_on * 2 < length
 
 
 def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
@@ -85,12 +106,15 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
             pending_fx.append(b)
             continue
         if b == 0x10:
-            pos += 1                                # sample number
+            ch.sample = data[pos] // 2
+            pos += 1
             continue
-        if 0x11 <= b <= 0x1F:
-            pos += 4                                # env period(2) + delay + sample
+        if 0x11 <= b <= 0x1F:                        # env period(2)+delay? +sample
+            ch.sample = data[pos + 3] // 2
+            pos += 4
             continue
-        if 0x20 <= b <= 0x3F:                        # noise value
+        if 0x20 <= b <= 0x3F:                        # noise period 0-31
+            ch.last_noise = (b & 0x0F) + (16 if b >= 0x30 else 0)
             ch.noise_cmds += 1
             continue
         if 0x40 <= b <= 0x4F:                        # set ornament
@@ -108,10 +132,12 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
         if 0xC1 <= b <= 0xCF:                        # volume
             continue
         if 0xD1 <= b <= 0xEF:                        # set sample
+            ch.sample = b - 0xD0
             continue
         if 0xF0 <= b <= 0xFF:                        # init ornament + sample
             ch.ornament = b & 0x0F
-            pos += 1                                # sample*2
+            ch.sample = data[pos] // 2
+            pos += 1
             continue
         # --- line enders: a note, note-off, or empty line ---------------------
         if 0x50 <= b <= 0xAF:
@@ -193,18 +219,33 @@ def parse_pt3(data: bytes) -> Tuple[Song, int]:
 
     song = Song(title=title or "PT3 module", source=f"pt3:{author}" if author else "pt3")
     total_rows = max(c.row for c in chans)
+    drum_sample = [_sample_is_drum(data, s) for s in range(32)]
     for name, ch in zip("ABC", chans):
         track = Track(name=f"AY {name}")
+        drums = 0
         events = sorted(ch.notes)
         offs = sorted(ch.offs)
-        for i, (row, idx) in enumerate(events):
+        for i, (row, idx, sample, noise) in enumerate(events):
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
+            if 0 <= sample < 32 and drum_sample[sample]:
+                # AY percussion: noise generator with the tone muted. MCS has no
+                # noise, so fake it the PC-speaker way — a 1-tick click at the
+                # register extremes: dark noise (high period) or a low trigger
+                # note = kick thud at C3, bright noise = hat tick at E7 (the
+                # highest note MCS can play).
+                drums += 1
+                kick = (noise is not None and noise > 12) or idx < 24
+                track.add(NoteEvent(start_tick=row * ticks_per_row,
+                                    duration_ticks=1,
+                                    midi_note=48 if kick else 100))
+                continue
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
             dur = max(1, (end - row) * ticks_per_row)
             track.add(NoteEvent(start_tick=row * ticks_per_row,
                                 duration_ticks=dur, midi_note=midi))
         track.meta["noise_cmds"] = ch.noise_cmds
+        track.meta["drum_notes"] = drums
         if track.notes:
             song.add_track(track)
     if speed_changes:

@@ -56,14 +56,15 @@ def channel_stats(track: Track) -> dict:
         return {"count": 0, "range": "—", "noise": 0.0, "repet": 0.0,
                 "score": 1.0, "verdict": "empty"}
     midis = [n.midi_note for n in notes]
-    noise = min(1.0, track.meta.get("noise_cmds", 0) / len(notes))
+    drum_ratio = track.meta.get("drum_notes", 0) / len(notes)
+    noise = min(1.0, max(track.meta.get("noise_cmds", 0) / len(notes), drum_ratio))
     # consecutive same-pitch hits: a kick/snare hammers one "pitch", a melody
     # moves (global pitch reuse saturates on any long tonal piece, so it's local)
     repet = (sum(1 for a, b in zip(midis, midis[1:]) if a == b) /
              max(1, len(midis) - 1))
     short = sum(1 for n in notes if n.duration_ticks <= 2) / len(notes)
     score = 0.5 * noise + 0.3 * repet + 0.2 * short
-    if score > 0.55:
+    if drum_ratio > 0.5 or score > 0.55:
         verdict = "percussion"
     elif score > 0.40:
         verdict = "rhythm?"
@@ -603,7 +604,10 @@ class ImportPreview(tk.Toplevel):
         self.octave = []                        # StringVar per channel: +2..-2
         for i, tr in enumerate(song.tracks):
             st = channel_stats(tr)
-            keep = tk.BooleanVar(value=st["verdict"] not in ("percussion", "empty"))
+            # percussion stays checked: the importer renders AY drums as short
+            # clicks at the register extremes, so they're worth keeping — solo
+            # the channel and uncheck it if the clicks don't earn their voice
+            keep = tk.BooleanVar(value=st["verdict"] != "empty")
             self.include.append(keep)
             row = 2 + i
             tk.Checkbutton(self, variable=keep, bg=_BG, activebackground=_BG,
@@ -613,8 +617,11 @@ class ImportPreview(tk.Toplevel):
             tk.Label(self, text=st["range"], bg=_BG, fg=_FG).grid(row=row, column=3)
             tk.Label(self, text=f"{st['noise']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=4)
             tk.Label(self, text=f"{st['repet']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=5)
-            color = "#e08f8f" if st["verdict"] == "percussion" else _ACCENT
-            tk.Label(self, text=st["verdict"], bg=_BG, fg=color).grid(row=row, column=6)
+            verdict = st["verdict"]
+            if verdict == "percussion":
+                verdict = "percussion→clicks"
+            color = "#e0b060" if st["verdict"] == "percussion" else _ACCENT
+            tk.Label(self, text=verdict, bg=_BG, fg=color).grid(row=row, column=6)
             tk.Button(self, text="▶ solo", command=lambda i=i: self._audition([i])
                       ).grid(row=row, column=7, padx=(4, 2))
             var = tk.StringVar(value="0")

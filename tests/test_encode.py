@@ -86,9 +86,11 @@ def test_maplerag_reencodes_losslessly(tmp_path):
 
 # ---- PT3 importer -----------------------------------------------------------------
 
-def _build_pt3(delay=3, drums=False):
+def _build_pt3(delay=3, drums=False, drum_sample=False):
     """A minimal 1-pattern module: A plays C-4/E-4/G-4/off, B a held C-3, C is
-    silent — or, with drums=True, C hammers one low note with noise commands."""
+    silent — or, with drums=True, C hammers one low note with noise commands;
+    with drum_sample=True, C selects a noise-only sample (tone muted) and hits
+    C-4 then C-1 — the sample-table percussion recipe."""
     hdr = bytearray(0xC9)
     hdr[0:13] = b"ProTracker 3."
     hdr[0x0D] = ord("6")
@@ -98,7 +100,6 @@ def _build_pt3(delay=3, drums=False):
     hdr[0x64] = delay
     hdr[0x65] = 2                                  # patterns + 1
     hdr[0x66] = 0
-    body = bytearray()
     order = bytes([0, 0xFF])                       # play pattern 0 once
 
     # channel streams (addresses filled after layout)
@@ -115,7 +116,9 @@ def _build_pt3(delay=3, drums=False):
         0x68,                                      # C-3, held 8 rows (one line)
         0x00,
     ])
-    if drums:                                      # noise-set + repeated C-1 hits
+    if drum_sample:                                # sample 2 + noise, C-4 then C-1
+        ch_c = bytes([0xB1, 2, 0xD2, 0x25, 0x74, 0x50, 0xC0, 0xD0, 0x00])
+    elif drums:                                    # noise-set + repeated C-1 hits
         ch_c = bytes([0xB1, 2,
                       0x25, 0x50, 0x25, 0x50, 0x25, 0x50, 0x25, 0x50, 0x00])
     else:
@@ -126,10 +129,15 @@ def _build_pt3(delay=3, drums=False):
     a_addr = pat_table + 6
     b_addr = a_addr + len(ch_a)
     c_addr = b_addr + len(ch_b)
+    sam_addr = c_addr + len(ch_c)
     struct.pack_into("<H", hdr, 0x67, pat_table)
-    body += struct.pack("<HHH", a_addr, b_addr, c_addr)
-    body += ch_a + ch_b + ch_c
-    return bytes(hdr) + order + bytes(body)
+    body = struct.pack("<HHH", a_addr, b_addr, c_addr) + ch_a + ch_b + ch_c
+    if drum_sample:
+        # sample 2: loop 0, one frame, byte1 = 0x1F (tone OFF via bit4, noise
+        # ON via clear bit7, full amplitude)
+        struct.pack_into("<H", hdr, 0x69 + 2 * 2, sam_addr)
+        body += bytes([0, 1, 0x00, 0x1F, 0x00, 0x00])
+    return bytes(hdr) + order + body
 
 
 def test_pt3_note_extraction():
@@ -170,6 +178,23 @@ def test_channel_stats_flag_percussion():
     assert drums["verdict"] == "percussion"        # noisy + one repeated pitch
     assert melody["verdict"] in ("melody", "bass")  # clean wandering line
     assert drums["score"] > melody["score"]
+
+
+def test_noise_only_samples_become_clicks():
+    # A channel playing a noise-only sample (tone mixer muted in the sample
+    # table) is AY percussion; MCS has no noise, so each hit becomes a 1-tick
+    # click — E7 (the ceiling) for bright hits, C3 for kicks (low trigger note
+    # or dark noise period).
+    song, _ = parse_pt3(_build_pt3(drum_sample=True))
+    c = {t.name: t for t in song.tracks}["AY C"]
+    assert c.meta["drum_notes"] == 2
+    hits = [(n.start_tick, n.duration_ticks, n.midi_note) for n in c.notes]
+    ticks = hits[1][0] // 2
+    assert hits == [(0, 1, 100),               # C-4 hit, noise 5 -> hat tick at E7
+                    (2 * ticks, 1, 48)]        # C-1 hit -> kick thud at C3
+    # the melodic channels are untouched
+    a = {t.name: t for t in song.tracks}["AY A"]
+    assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60
 
 
 def test_vortex_tracker_magic_is_accepted():
