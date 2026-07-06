@@ -67,6 +67,9 @@ class PlayerApp:
         self.play_btn.pack(side="left", padx=(8, 0))
         self.stop_btn = tk.Button(bar, text="■ Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
+        self.export_btn = tk.Button(bar, text="⬇ Export WAV…", command=self.export_wav,
+                                    state="disabled")
+        self.export_btn.pack(side="left", padx=(12, 0))
 
     def _build_meta(self) -> None:
         # Read-only song metadata extracted from the file. Playback follows these; there
@@ -114,8 +117,10 @@ class PlayerApp:
         except Exception as exc:  # noqa: BLE001 - surface any parse error to the user
             messagebox.showerror("Cannot open file", f"{os.path.basename(path)}:\n{exc}")
             return
+        self.path = path
         self._populate(path)
         self.play_btn.configure(state="normal")
+        self.export_btn.configure(state="normal")
 
     def _populate(self, path: str) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -145,17 +150,43 @@ class PlayerApp:
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
                  f"{total} notes ({rests} rests).")
 
-    def play(self) -> None:
-        if not self.song:
-            return
+    def _render(self):
+        """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None."""
         # Timing comes from the file's own tempo (header byte 0); timbre = PC-speaker square.
         pcm, sr = synth_song(self.song, step_seconds=self.song.tempo_tick_seconds,
                              waveform="square")
-        if not pcm:
+        return wav_bytes(pcm, sr) if pcm else None
+
+    def play(self) -> None:
+        if not self.song:
+            return
+        wav = self._render()
+        if wav is None:
             self.status.configure(text="Nothing to play (no decoded notes).")
             return
-        self.player.play(wav_bytes(pcm, sr))
+        self.player.play(wav)
         self.stop_btn.configure(state="normal")
+
+    def export_wav(self) -> None:
+        if not self.song:
+            return
+        wav = self._render()
+        if wav is None:
+            self.status.configure(text="Nothing to export (no decoded notes).")
+            return
+        default = os.path.splitext(os.path.basename(getattr(self, "path", "song")))[0] + ".wav"
+        out = filedialog.asksaveasfilename(
+            title="Export decoded playback as WAV", defaultextension=".wav",
+            initialfile=default, filetypes=[("WAV audio", "*.wav")])
+        if not out:
+            return
+        try:
+            with open(out, "wb") as fh:
+                fh.write(wav)
+        except OSError as exc:
+            messagebox.showerror("Cannot write WAV", str(exc))
+            return
+        self.status.configure(text=f"Exported {len(wav)} bytes → {os.path.basename(out)}")
 
     def stop(self) -> None:
         self.player.stop()
