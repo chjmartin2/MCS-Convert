@@ -115,10 +115,15 @@ capture, which fixes the absolute octave, exposed the constant offset.)
 **Accidentals & key signature.** Glyphs in the *clef record* build the key signature:
 the glyph's staff degree `(v−1) mod 7` gets ±1 semitone in **every octave** (the scan
 at image 0x1600 replicates it across three 7-slot tables per staff). MINUETG carries a
-sharp on each staff's F line — the G-major key signature — which is how its F♯ is
-stored with no per-note mark. Inside a measure, a glyph sets a **measure-scoped
-accidental at that exact position**, overriding the key signature (natural = forced
-override 0x0C); the per-position override table is cleared at each measure.
+`0x0f` on the F line — the G-major key signature — which is how its F♯ is stored with no
+per-note mark (real audio confirms: the key-sig note plays raised). Inside a measure, a
+glyph sets a **measure-scoped accidental at that exact position**, cleared each measure.
+
+**Mid-measure accidentals are INVERTED relative to the key signature** — validated
+against real audio. The `0x0f` glyph *raises* as a key signature but *lowers* as a body
+accidental, and `0x10` the reverse. (ENTERTAN's main theme: a body `0x0f` on A#4 plays
+**A4**, a descent — captured as 433 Hz, twice — while MINUETG's clef `0x0f` plays its
+note **raised**.) The reader therefore uses opposite sign tables for the two paths.
 
 **Chords**: entries in the same 8-px x slot share a stem and sound together
 (MINUETG's bass opens with a {G3,B3} half chord + A3 quarter = exactly 3/4).

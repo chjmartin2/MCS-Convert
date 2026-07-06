@@ -257,8 +257,11 @@ def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
             sym = symbol(b0)
             v = vertical(b0, b1)
             if sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
-                # 0x0C is the engine's "forced natural" marker (beats the key sig)
-                measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: 2, SYM_FLAT: -2}[sym]
+                # Mid-measure accidentals are INVERTED relative to the clef-record key
+                # signature: the 0x0f glyph LOWERS a body note but RAISES in the key sig,
+                # and 0x10 the reverse. Validated against real audio (ENTERTAN's main
+                # theme: 0x0f on A#4 plays A4, a descent, not B4). 0x0C = forced natural.
+                measure_acc[v] = {SYM_NATURAL: 0x0C, SYM_SHARP: -2, SYM_FLAT: 2}[sym]
                 continue
             if sym == SYM_DOT:
                 # augmentation dot: engine adds half the note's own duration

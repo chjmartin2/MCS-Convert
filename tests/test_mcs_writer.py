@@ -75,8 +75,8 @@ def test_full_encode_decode_loop():
     m_notes = [make_entry(3, v_for_midi(p1, 1), 2),       # quarter note
                make_entry(0x17, v_for_midi(p2, 1), 6)]    # beamed quarter (symbol 0x17)
     m_rest = [make_entry(10, 10, 2)]                       # quarter rest
-    m_acc = [make_entry(SYM_FLAT, v_for_midi(p3, 1), 2),  # flat glyph...
-             make_entry(3, v_for_midi(p3, 1), 4)]         # ...on the note at p3 -> p3-1
+    m_acc = [make_entry(SYM_SHARP, v_for_midi(p3, 1), 2),  # body 0x0f glyph LOWERS (inverted
+             make_entry(3, v_for_midi(p3, 1), 4)]          # vs the key sig): note p3 -> p3-1
     m_chord = [make_entry(3, v_for_midi(p1, 1), 2),       # three notes, same x slot = chord
                make_entry(3, v_for_midi(p3, 1), 2),
                make_entry(3, v_for_midi(p4, 1), 2)]
