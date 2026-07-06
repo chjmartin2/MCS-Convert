@@ -1,8 +1,8 @@
 # MCS-Convert
 
 A player, viewer, and fully reverse-engineered format spec for **Will Harvey's
-Music Construction Set** (IBM-PC, 1984) — plus the beginnings of a chiptune
-(NSF) → MCS converter.
+Music Construction Set** (IBM-PC, 1984) — the first pieces of a fully
+functional tracker editor and converter for various music formats.
 
 MCS was one of the first music notation programs for home computers. Its
 `.MCS`/`.MCD` song format was never documented — until now. This project
@@ -62,10 +62,12 @@ engine-exact: what this player shows and plays is what MCS 1984 plays.
 
 ## The bigger project
 
-The original goal (in progress): convert **NES chiptunes (`.nsf`)** into MCS
-songs, so 1984's Music Construction Set can play 1985's soundtracks. The NSF
-side (6502 + APU emulation → note events) is partially built; the MCS writer
-and the neutral note-event model in the middle are done. See
+The goal (in progress): a fully functional **tracker editor and converter**
+for various music formats, built around the neutral note-event model at the
+project's core. The MCS reader/writer and the player are the first pieces;
+editing and more formats come next. Work has started on importing **NES
+chiptunes (`.nsf`)** — the 6502 + APU emulation that turns a player rip into
+note events is partially built. See
 [docs/architecture.md](docs/architecture.md).
 
 ## Layout

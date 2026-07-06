@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mcs-convert"
 version = "0.1.0"
-description = "Player, viewer, and reverse-engineered format spec for Will Harvey's Music Construction Set (IBM-PC, 1984), plus a chiptune (NSF) converter in progress"
+description = "Player, viewer, and reverse-engineered format spec for Will Harvey's Music Construction Set (IBM-PC, 1984) - toward a full tracker editor and converter for various music formats"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
