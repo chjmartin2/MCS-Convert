@@ -1,20 +1,18 @@
-"""Tiny software synth: render a Song to PCM and play it (Windows, winsound).
+"""Tiny software synth: render a Song to PCM and play it (Windows, winmm waveOut).
 
 Deliberately simple — a chiptune-flavoured square/triangle synth good enough to *hear*
 whether the decoded notes are right. Not a faithful PC-speaker/Tandy emulation.
 
-Playback writes a short-lived temp WAV and plays it async via winsound (so Stop works — see
-Player). Non-Windows hosts can still synthesize and get WAV bytes; only live playback is
-Windows-only for now.
+Playback goes through winmm's waveOut API (WaveOutPlayer): live volume, pause/resume,
+and sample-accurate position, which drives the GUI playhead. Non-Windows hosts can
+still synthesize and get WAV bytes; only live playback is Windows-only for now.
 """
 
 from __future__ import annotations
 
 import io
-import os
-import tempfile
 import wave
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -211,38 +209,127 @@ def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
-class Player:
-    """Async, stoppable WAV playback backed by winsound (Windows).
+_WINMM_STRUCTS = None
 
-    Plays via ``SND_FILENAME | SND_ASYNC`` from a temp file rather than ``SND_MEMORY``:
-    Windows rejects async-from-memory outright, and ``SND_PURGE`` can't reliably interrupt
-    a *synchronous* in-memory sound running on a worker thread — so a memory-based player
-    can't honour Stop. Async-from-file is the pattern winsound actually supports stopping.
+
+def _winmm_structs():
+    """WAVEFORMATEX / WAVEHDR / MMTIME ctypes structures, built once on first use
+    (kept out of module import so non-Windows hosts can still import this module)."""
+    global _WINMM_STRUCTS
+    if _WINMM_STRUCTS is None:
+        import ctypes
+
+        class WAVEFORMATEX(ctypes.Structure):
+            _fields_ = [("wFormatTag", ctypes.c_ushort), ("nChannels", ctypes.c_ushort),
+                        ("nSamplesPerSec", ctypes.c_uint), ("nAvgBytesPerSec", ctypes.c_uint),
+                        ("nBlockAlign", ctypes.c_ushort), ("wBitsPerSample", ctypes.c_ushort),
+                        ("cbSize", ctypes.c_ushort)]
+
+        class WAVEHDR(ctypes.Structure):
+            _fields_ = [("lpData", ctypes.c_void_p), ("dwBufferLength", ctypes.c_uint),
+                        ("dwBytesRecorded", ctypes.c_uint), ("dwUser", ctypes.c_void_p),
+                        ("dwFlags", ctypes.c_uint), ("dwLoops", ctypes.c_uint),
+                        ("lpNext", ctypes.c_void_p), ("reserved", ctypes.c_void_p)]
+
+        class MMTIME(ctypes.Structure):
+            _fields_ = [("wType", ctypes.c_uint), ("u", ctypes.c_uint),
+                        ("pad", ctypes.c_uint)]
+
+        _WINMM_STRUCTS = (WAVEFORMATEX, WAVEHDR, MMTIME)
+    return _WINMM_STRUCTS
+
+
+class WaveOutPlayer:
+    """PCM playback through winmm's waveOut API (ctypes, Windows).
+
+    The old winsound player could only fire-and-forget a WAV file. waveOut gives the
+    GUI a real transport: live volume (waveOutSetVolume), pause/resume, stop, and
+    sample-accurate position (waveOutGetPosition) — the position is what drives the
+    playhead and lets playback pick up exactly where it paused.
     """
 
+    _WHDR_DONE = 0x01
+    _TIME_MS, _TIME_SAMPLES, _TIME_BYTES = 0x1, 0x2, 0x4
+
     def __init__(self) -> None:
-        self._path: str | None = None   # temp WAV backing the current playback
+        self._h = None          # HWAVEOUT handle
+        self._hdr = None        # WAVEHDR — must outlive the driver's use of it
+        self._buf = None        # PCM buffer — ditto
+        self._sr = 22050
+        self.paused = False
 
-    def play(self, wav: bytes) -> None:
-        import winsound
+    def play(self, pcm: bytes, sample_rate: int, volume: float | None = None) -> None:
+        import ctypes
 
-        self.stop()  # halt anything playing and clean up its temp file
-        fd, path = tempfile.mkstemp(prefix="mcs_", suffix=".wav")
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(wav)
-        self._path = path
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        self.stop()
+        WAVEFORMATEX, WAVEHDR, _ = _winmm_structs()
+        winmm = ctypes.windll.winmm
+        fmt = WAVEFORMATEX(1, 1, sample_rate, sample_rate * 2, 2, 16, 0)  # PCM mono 16-bit
+        h = ctypes.c_void_p()
+        if winmm.waveOutOpen(ctypes.byref(h), -1, ctypes.byref(fmt), 0, 0, 0):  # WAVE_MAPPER
+            raise RuntimeError("waveOutOpen failed — no audio output device?")
+        self._h, self._sr = h, sample_rate
+        if volume is not None:
+            self.set_volume(volume)
+        self._buf = ctypes.create_string_buffer(pcm, len(pcm))
+        hdr = WAVEHDR()
+        hdr.lpData = ctypes.cast(self._buf, ctypes.c_void_p)
+        hdr.dwBufferLength = len(pcm)
+        self._hdr = hdr
+        winmm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(hdr))
+        winmm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(hdr))
+        self.paused = False
+
+    def pause(self) -> None:
+        if self._h is not None and not self.paused:
+            import ctypes
+            ctypes.windll.winmm.waveOutPause(self._h)
+            self.paused = True
+
+    def resume(self) -> None:
+        if self._h is not None and self.paused:
+            import ctypes
+            ctypes.windll.winmm.waveOutRestart(self._h)
+            self.paused = False
+
+    def set_volume(self, volume: float) -> None:
+        """0.0..1.0, applied immediately (per-app wave volume, both channels)."""
+        if self._h is None:
+            return
+        import ctypes
+        word = max(0, min(0xFFFF, int(volume * 0xFFFF)))
+        ctypes.windll.winmm.waveOutSetVolume(self._h, (word << 16) | word)
+
+    def position_seconds(self) -> float:
+        """Seconds of audio actually played (frozen while paused)."""
+        if self._h is None:
+            return 0.0
+        import ctypes
+        _, _, MMTIME = _winmm_structs()
+        t = MMTIME()
+        t.wType = self._TIME_SAMPLES
+        ctypes.windll.winmm.waveOutGetPosition(self._h, ctypes.byref(t), ctypes.sizeof(t))
+        if t.wType == self._TIME_SAMPLES:
+            return t.u / self._sr
+        if t.wType == self._TIME_BYTES:                 # driver fallback
+            return t.u / (self._sr * 2)
+        if t.wType == self._TIME_MS:
+            return t.u / 1000.0
+        return 0.0
+
+    def is_done(self) -> bool:
+        """True once the driver has finished the submitted buffer."""
+        return self._hdr is not None and bool(self._hdr.dwFlags & self._WHDR_DONE)
 
     def stop(self) -> None:
-        import winsound
-
-        winsound.PlaySound(None, winsound.SND_PURGE)  # stops the async sound, frees the file
-        self._cleanup()
-
-    def _cleanup(self) -> None:
-        if self._path:
-            try:
-                os.remove(self._path)
-            except OSError:
-                pass  # file may still be held briefly, or already gone; harmless to skip
-            self._path = None
+        if self._h is None:
+            return
+        import ctypes
+        winmm = ctypes.windll.winmm
+        winmm.waveOutReset(self._h)                     # returns the buffer immediately
+        if self._hdr is not None:
+            winmm.waveOutUnprepareHeader(self._h, ctypes.byref(self._hdr),
+                                         ctypes.sizeof(self._hdr))
+        winmm.waveOutClose(self._h)
+        self._h = self._hdr = self._buf = None
+        self.paused = False

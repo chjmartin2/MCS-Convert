@@ -28,13 +28,12 @@ if __package__ in (None, ""):
 
 import os
 import sys
-import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
-from ..audio import Player, pcm16, render_song, tempo_bpm, wav_bytes
+from ..audio import WaveOutPlayer, pcm16, render_song, tempo_bpm, wav_bytes
 from ..mcs.reader import parse
 from ..tracker import tracker_rows, tracker_text
 
@@ -48,19 +47,20 @@ _SCOPE_DIM = "#0c3d1e"       # midline / frame green
 class PlayerApp:
     def __init__(self, root: tk.Tk, initial: str | None = None) -> None:
         self.root = root
-        self.player = Player()
+        self.player = WaveOutPlayer()
         self.song = None
         self._rows = []             # cached tracker_rows for the loaded song
-        self._children = ()         # cached tree row ids, indexed by 16th-tick
+        self._children = ()         # cached tree row ids, one per 32nd-tick row
         self._follow_id = None      # pending root.after id for the playhead loop
-        self._play_start = None     # wall-clock time playback began
-        self._last_row = None       # row currently under the playhead
+        self._start_row = 0         # row playback began from (playhead = start + position)
+        self._last_row = None       # row under the playhead — Play starts from here
+        self._step = 0.1            # seconds per row (the song's tick length)
         self._scope_win = None      # oscilloscope Toplevel (None until opened)
-        self._scope_panels = []     # (canvas, line_item, w, h) — v1..v4 then master
+        self._scope_panels = []     # (canvas, trace_item) — v1..v4 then master
         self._scope_data = None     # (master, voices, sr) buffers from the last render
         root.title("MCS-Convert — Player")
         root.configure(bg=_BG)
-        root.geometry("560x640")
+        root.geometry("560x680")
 
         self._build_toolbar()
         self._build_meta()
@@ -72,40 +72,53 @@ class PlayerApp:
 
     # ---- layout ----------------------------------------------------------
     def _build_toolbar(self) -> None:
-        bar = tk.Frame(self.root, bg=_BG)
-        bar.pack(fill="x", padx=8, pady=6)
-
-        tk.Button(bar, text="Open…", command=self.open_dialog).pack(side="left")
-        self.play_btn = tk.Button(bar, text="▶ Play", command=self.play, state="disabled")
+        # Row 1: file + transport. Row 2: voice + a volume slider big enough to see.
+        row1 = tk.Frame(self.root, bg=_BG)
+        row1.pack(fill="x", padx=8, pady=(6, 2))
+        tk.Button(row1, text="Open…", command=self.open_dialog).pack(side="left")
+        self.play_btn = tk.Button(row1, text="▶ Play", command=self.play, state="disabled")
         self.play_btn.pack(side="left", padx=(8, 0))
-        self.stop_btn = tk.Button(bar, text="■ Stop", command=self.stop, state="disabled")
+        self.pause_btn = tk.Button(row1, text="⏸ Pause", width=9,
+                                   command=self.toggle_pause, state="disabled")
+        self.pause_btn.pack(side="left", padx=(4, 0))
+        self.stop_btn = tk.Button(row1, text="■ Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
-        self.export_btn = tk.Button(bar, text="⬇ WAV…", command=self.export_wav,
+        self.export_btn = tk.Button(row1, text="⬇ WAV…", command=self.export_wav,
                                     state="disabled")
         self.export_btn.pack(side="left", padx=(12, 0))
-        self.track_btn = tk.Button(bar, text="⬇ Tracker…", command=self.export_tracker,
+        self.track_btn = tk.Button(row1, text="⬇ Tracker…", command=self.export_tracker,
                                    state="disabled")
         self.track_btn.pack(side="left", padx=(4, 0))
-        tk.Button(bar, text="〰 Scope", command=self.open_scope).pack(side="left",
-                                                                     padx=(12, 0))
+        tk.Button(row1, text="〰 Scope", command=self.open_scope).pack(side="left",
+                                                                      padx=(12, 0))
 
+        row2 = tk.Frame(self.root, bg=_BG)
+        row2.pack(fill="x", padx=8, pady=(0, 4))
         # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
         # rendering (see audio._render_pcspeaker), for comparing against real hardware.
+        tk.Label(row2, text="Voice", bg=_BG, fg=_ACCENT).pack(side="left")
         self._voices = {"PC Speaker": "pcspeaker", "Square": "square",
                         "Triangle": "triangle", "Sine": "sine"}
         self.voice = tk.StringVar(value="PC Speaker")
-        ttk.Combobox(bar, textvariable=self.voice, width=11, state="readonly",
-                     values=list(self._voices)).pack(side="right")
+        ttk.Combobox(row2, textvariable=self.voice, width=11, state="readonly",
+                     values=list(self._voices)).pack(side="left", padx=(6, 0))
 
-        # Volume scales the rendered master (winsound has no live volume control, so it
-        # takes effect on the next Play). Linear: 50% slider = 50% amplitude on the scope.
+        # Volume is LIVE (waveOutSetVolume) — dragging it changes the playing audio.
+        tk.Label(row2, text="Volume", bg=_BG, fg=_ACCENT).pack(side="left", padx=(24, 6))
         self.volume = tk.DoubleVar(value=80.0)
-        tk.Scale(bar, from_=0, to=100, orient="horizontal", variable=self.volume,
-                 showvalue=False, length=90, bg=_BG, troughcolor="#2a2e3a", bd=0,
-                 highlightthickness=0, activebackground=_ACCENT,
-                 sliderrelief="flat").pack(side="right", padx=(0, 10))
-        tk.Label(bar, text="Vol", bg=_BG, fg=_ACCENT,
-                 font=("TkDefaultFont", 8)).pack(side="right", padx=(0, 4))
+        tk.Scale(row2, from_=0, to=100, orient="horizontal", variable=self.volume,
+                 command=self._on_volume, showvalue=False, length=200, bg=_BG,
+                 troughcolor="#2a2e3a", bd=0, highlightthickness=0,
+                 activebackground=_ACCENT, sliderrelief="flat").pack(side="left")
+        self.vol_label = tk.Label(row2, text="80%", bg=_BG, fg=_FG, width=4, anchor="w",
+                                  font=("TkDefaultFont", 10, "bold"))
+        self.vol_label.pack(side="left", padx=(6, 0))
+
+    def _on_volume(self, value: str) -> None:
+        """Slider callback: update the readout and the playing stream's volume live."""
+        v = float(value)
+        self.vol_label.configure(text=f"{round(v):d}%")
+        self.player.set_volume(v / 100.0)          # no-op when nothing is playing
 
     def _build_meta(self) -> None:
         # Read-only song metadata extracted from the file. Playback follows these; there
@@ -145,6 +158,28 @@ class PlayerApp:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+        # Click a row to set the playback position (seeks live if already playing).
+        self.tree.bind("<ButtonRelease-1>", self._on_row_click)
+
+    def _on_row_click(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if not iid or not self.song:
+            return
+        try:
+            row = self._children.index(iid)
+        except ValueError:
+            return
+        if self._playing:                                  # seek the running stream
+            was_paused = self.player.paused
+            if self._play_from(row) and was_paused:
+                self.player.pause()
+                self.pause_btn.configure(text="▶ Resume")
+        else:                                              # just park the position here
+            self._clear_playhead()
+            self.tree.item(self._children[row], tags=("playhead",))
+            self._last_row = row
+            bar = sum(1 for r in self._rows[:row + 1] if r[1])
+            self.status.configure(text=f"Position set to bar {bar} — Play starts here.")
 
     def _build_statusbar(self) -> None:
         self.status = tk.Label(self.root, text="Open an .MCS / .MCD song to begin.",
@@ -172,10 +207,13 @@ class PlayerApp:
         self.track_btn.configure(state="normal")
 
     def _populate(self, path: str) -> None:
-        self._stop_follow()                  # a new song invalidates the old playhead
+        self.player.stop()                   # a new song silences the old one
+        self._stop_follow()
         self._last_row = None
-        self._scope_data = None              # ...and the old scope buffers
+        self._scope_data = None              # ...and drops its scope buffers
         self._draw_scope(None)
+        self.pause_btn.configure(state="disabled", text="⏸ Pause")
+        self.stop_btn.configure(state="disabled")
         self.tree.delete(*self.tree.get_children())
         # 4-voice tracker: one row per 32nd-tick, sounding notes ranked highest -> lowest.
         rows = tracker_rows(self.song)
@@ -184,6 +222,7 @@ class PlayerApp:
             tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
             self.tree.insert("", "end", values=(lbl, evt, *cols),
                              tags=(tag,) if tag else ())
+        self._children = self.tree.get_children()   # row ids for playhead + click-seek
         self.tree.yview_moveto(0.0)          # always show the first row after a load
         self.tree.update_idletasks()         # force the grid to repaint now
 
@@ -201,57 +240,92 @@ class PlayerApp:
         rests = sum(1 for tr in self.song.tracks for n in tr.notes if n.is_rest)
         self.status.configure(
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
-                 f"{total} notes ({rests} rests).")
+                 f"{total} notes ({rests} rests). Click a row to set the play position.")
 
-    def _render(self, gain: float = 1.0):
-        """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None.
-        Also stashes the per-voice buffers that drive the oscilloscope (gain applied, so
-        the scope shows the amplitude actually being played)."""
+    def _render(self) -> bool:
+        """Synthesize the loaded song at its own tempo, stashing (master, voices, sr)
+        for playback, WAV export, and the oscilloscope. True if anything is audible."""
         # Timing comes from the file's own tempo (header byte 0); voice from the dropdown.
         master, voices, sr = render_song(self.song,
                                          step_seconds=self.song.tempo_tick_seconds,
                                          waveform=self._voices[self.voice.get()])
-        if gain != 1.0:
-            master = master * gain
-            voices = [v * gain for v in voices]
         self._scope_data = (master, voices, sr)
-        pcm = pcm16(master)
-        return wav_bytes(pcm, sr) if pcm else None
+        return bool(np.any(master))
 
     def play(self) -> None:
+        """Play from the position highlight (or the top if there isn't one)."""
         if not self.song:
             return
-        wav = self._render(gain=self.volume.get() / 100.0)
-        if wav is None:
-            self.status.configure(text="Nothing to play (no decoded notes, or volume 0).")
+        if not self._render():
+            self.status.configure(text="Nothing to play (no decoded notes).")
             return
-        self.player.play(wav)
+        start_row = self._last_row or 0
+        if start_row >= len(self._rows) - 1:               # highlight parked at the end
+            start_row = 0
+        if not self._play_from(start_row):
+            self.status.configure(text="Nothing to play (no decoded notes).")
+
+    def _play_from(self, row: int) -> bool:
+        """Start the waveOut stream at tracker row `row`. Returns False if silent."""
+        master, _, sr = self._scope_data
+        self._step = self.song.tempo_tick_seconds or 0.1   # seconds per row (one tick)
+        pcm = pcm16(master[int(row * self._step * sr):])
+        if not pcm:
+            return False
+        try:
+            self.player.play(pcm, sr, volume=self.volume.get() / 100.0)
+        except RuntimeError as exc:
+            messagebox.showerror("Cannot play", str(exc))
+            return False
+        self.pause_btn.configure(state="normal", text="⏸ Pause")
         self.stop_btn.configure(state="normal")
-        self._start_follow()
+        self._start_follow(row)
+        return True
+
+    def toggle_pause(self) -> None:
+        if self._follow_id is None:
+            return
+        if self.player.paused:
+            self.player.resume()
+            self.pause_btn.configure(text="⏸ Pause")
+        else:
+            self.player.pause()
+            self.pause_btn.configure(text="▶ Resume")
 
     # ---- playhead: scroll the grid in time with playback --------------------
-    def _start_follow(self) -> None:
+    @property
+    def _playing(self) -> bool:
+        return self._follow_id is not None
+
+    def _start_follow(self, start_row: int = 0) -> None:
         self._stop_follow()
         self._clear_playhead()
         self._children = self.tree.get_children()
-        self._step = self.song.tempo_tick_seconds or 0.1   # seconds per 16th-tick = one row
-        self._play_start = time.time()
+        self._start_row = start_row
         self._follow_playhead()
 
     def _follow_playhead(self) -> None:
-        if self._play_start is None or not self._children:
+        if not self._children:
             return
-        elapsed = time.time() - self._play_start
-        row = int(elapsed / self._step)
-        if row >= len(self._children):                     # played past the last row
-            self._stop_follow()
-            self.stop_btn.configure(state="disabled")
-            self._draw_scope(None)                         # flatline the scopes
+        pos = self.player.position_seconds()               # frozen while paused
+        row = self._start_row + int(pos / self._step)
+        if self.player.is_done() or row >= len(self._children):
+            self._finish_playback()
             return
         if row != self._last_row:
             self._move_playhead(row)
-        self._draw_scope(elapsed)
+        self._draw_scope(self._start_row * self._step + pos)
         self._follow_id = self.root.after(30, self._follow_playhead)
+
+    def _finish_playback(self) -> None:
+        """Natural end of the song: transport off, position back to the top."""
+        self.player.stop()
+        self._stop_follow()
+        self._clear_playhead()
+        self._last_row = None                              # next Play starts at the top
+        self.stop_btn.configure(state="disabled")
+        self.pause_btn.configure(state="disabled", text="⏸ Pause")
+        self._draw_scope(None)
 
     def _move_playhead(self, row: int) -> None:
         self._clear_playhead()                             # restore the row we're leaving
@@ -276,7 +350,6 @@ class PlayerApp:
         if self._follow_id is not None:
             self.root.after_cancel(self._follow_id)
             self._follow_id = None
-        self._play_start = None
 
     # ---- oscilloscope: four voice scopes + a master, fed by render_song ------
     def open_scope(self) -> None:
@@ -309,8 +382,7 @@ class PlayerApp:
                       highlightbackground=_SCOPE_DIM)
         m.grid(row=1, column=0, sticky="nsew", padx=11, pady=(2, 8))
         self._scope_panels.append(self._scope_panel(m, "master"))
-        self._draw_scope(None if self._play_start is None
-                         else time.time() - self._play_start)
+        self._draw_scope(None)               # live frames take over within 30 ms
 
     def _scope_panel(self, c: tk.Canvas, label: str):
         midline = c.create_line(0, 0, 0, 0, fill=_SCOPE_DIM)
@@ -333,7 +405,7 @@ class PlayerApp:
         so only idle canvases need their flat line restretched here."""
         w, h = self._scope_size(c)
         c.coords(midline, 2, h / 2, w - 2, h / 2)
-        if self._play_start is None:
+        if not self._playing:
             c.coords(trace, 2, h / 2, w - 2, h / 2)
 
     def _close_scope(self) -> None:
@@ -371,10 +443,11 @@ class PlayerApp:
     def export_wav(self) -> None:
         if not self.song:
             return
-        wav = self._render()
-        if wav is None:
+        if not self._render():
             self.status.configure(text="Nothing to export (no decoded notes).")
             return
+        master, _, sr = self._scope_data
+        wav = wav_bytes(pcm16(master), sr)                 # always full volume
         default = os.path.splitext(os.path.basename(getattr(self, "path", "song")))[0] + ".wav"
         out = filedialog.asksaveasfilename(
             title="Export decoded playback as WAV", defaultextension=".wav",
@@ -407,9 +480,11 @@ class PlayerApp:
         self.status.configure(text=f"Exported tracker → {os.path.basename(out)}")
 
     def stop(self) -> None:
+        """Stop playback. The playhead stays put — Play resumes from that row."""
         self.player.stop()
-        self._stop_follow()          # leave the playhead frozen where it stopped
+        self._stop_follow()
         self.stop_btn.configure(state="disabled")
+        self.pause_btn.configure(state="disabled", text="⏸ Pause")
         self._draw_scope(None)       # flatline the scopes
 
 

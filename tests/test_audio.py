@@ -2,8 +2,11 @@ import io
 import sys
 import wave
 
+import pytest
+
 from mcs_convert.audio import (
-    Player, _note_events, midi_to_freq, render_song, synth_song, tempo_bpm, wav_bytes,
+    WaveOutPlayer, _note_events, midi_to_freq, pcm16, render_song, synth_song,
+    tempo_bpm, wav_bytes,
 )
 from mcs_convert.mcs.reader import tick_seconds_for
 from mcs_convert.model import NoteEvent, Song, Track
@@ -122,35 +125,33 @@ def test_wav_bytes_roundtrip():
         assert w.getnframes() == len(pcm) // 2
 
 
-def test_player_plays_async_from_file_and_stop_purges(monkeypatch):
-    import os
+def test_waveout_transport_pause_resume_position():
+    # Real winmm transport (skipped without Windows or an output device). Plays a second
+    # of a quiet tone AT VOLUME 0, so the test is inaudible: position must advance,
+    # freeze across pause, advance after resume, and stop must release the device.
+    import time
 
-    pcm, sr = synth_song(_demo_song(), step_seconds=0.05)
-    wav = wav_bytes(pcm, sr)
+    import numpy as np
 
-    calls: list[tuple[object, int]] = []
-
-    class DummyWinSound:
-        SND_FILENAME = 0x20000
-        SND_ASYNC = 0x1
-        SND_PURGE = 0x40
-        def PlaySound(self, data, flags):
-            calls.append((data, flags))
-
-    monkeypatch.setitem(sys.modules, "winsound", DummyWinSound())
-
-    player = Player()
-    player.play(wav)
-
-    # Played asynchronously from a real file whose contents are our WAV bytes.
-    path, flags = calls[-1]
-    assert isinstance(path, str) and os.path.exists(path)
-    assert flags == DummyWinSound.SND_FILENAME | DummyWinSound.SND_ASYNC
-    with open(path, "rb") as fh:
-        assert fh.read() == wav
-
-    # Stop purges the async sound and removes the temp file.
+    if sys.platform != "win32":
+        pytest.skip("winmm waveOut is Windows-only")
+    sr = 22050
+    pcm = pcm16(np.full(sr, 0.01, dtype=np.float32))
+    player = WaveOutPlayer()
+    try:
+        player.play(pcm, sr, volume=0.0)
+    except RuntimeError:
+        pytest.skip("no audio output device")
+    time.sleep(0.15)
+    assert player.position_seconds() > 0
+    player.pause()
+    frozen = player.position_seconds()
+    time.sleep(0.10)
+    assert abs(player.position_seconds() - frozen) < 0.02   # clock frozen while paused
+    player.resume()
+    time.sleep(0.10)
+    assert player.position_seconds() > frozen               # moving again
+    assert not player.is_done()                             # 1s buffer still playing
+    player.set_volume(0.0)                                  # live volume: must not raise
     player.stop()
-    assert calls[-1] == (None, DummyWinSound.SND_PURGE)
-    assert not os.path.exists(path)
-    assert player._path is None
+    assert player._h is None and player._hdr is None
