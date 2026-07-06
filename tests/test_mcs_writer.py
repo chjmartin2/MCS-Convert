@@ -83,7 +83,7 @@ def test_full_encode_decode_loop():
     song = parse_bytes(build_file([[clef, m_notes, m_rest, m_acc, m_chord, m_key]]))
     notes = song.tracks[0].notes
     assert [n.midi_note for n in notes[:2]] == [p1, p2]    # note + beamed note
-    assert notes[1].duration_ticks == 4                    # beamed quarter = 4 ticks
+    assert notes[1].duration_ticks == 8                    # beamed quarter = 8 ticks (32nd base)
     assert notes[2].is_rest
     assert notes[3].midi_note == p3 - 1                    # flat lowered the note a semitone
     assert [n.midi_note for n in notes[4:7]] == [p1, p3, p4]        # chord
@@ -110,9 +110,9 @@ def test_reference_test_song_covers_every_element():
     treble = next(t for t in song.tracks if t.name == "Treble")
     bass = next(t for t in song.tracks if t.name == "Bass")
     durs = {n.duration_ticks for n in treble.notes if not n.is_rest}
-    assert {1, 2, 4, 8, 16} <= durs                        # every note duration present
+    assert {2, 4, 8, 16, 32} <= durs                       # 16th..whole present (32nd base)
     rest_durs = {n.duration_ticks for n in treble.notes if n.is_rest}
-    assert {1, 2, 4, 8, 16} <= rest_durs                   # every rest duration present
+    assert {2, 4, 8, 16, 32} <= rest_durs                  # every rest duration present
     # a chord: three notes sharing a start tick
     starts = [n.start_tick for n in treble.notes if not n.is_rest]
     assert any(starts.count(s) >= 3 for s in set(starts))

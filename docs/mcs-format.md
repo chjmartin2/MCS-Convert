@@ -38,8 +38,8 @@ The reader surfaces three display values; a fourth (volume) provably isn't in th
   ENTERTAN and AXEL, play at 83 vs 115 ms/tick — byte 0 is what differs). The absolute
   value is approximate (repeat structure blurs the total-duration estimate).
 - **Time signature** — **not stored**; the engine just plays measures back to back, so
-  meter is emergent. We report the modal measure length in sixteenth-ticks
-  (12→3/4, 16→4/4, 8→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
+  meter is emergent. We report the modal measure length in thirty-second-ticks
+  (24→3/4, 32→4/4, 16→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
   handful of pickup/irregular songs. MINUETG → 3/4 ✓. Two timing conventions matter
   when laying measures on a grid: a measure holding a **lone whole rest means "rest
   the whole measure"** whatever the meter (BUMBLE's 2/4 bass opens with four), and the
@@ -115,10 +115,10 @@ for note, exactly as the program displays it.
 ### Symbols (byte0 & 0x1F)
 | sym | meaning |
 |-----|---------|
-| 0x01–0x05 | note: 16th, 8th, quarter, half, whole → `2^(n−1)` sixteenth-ticks |
-| 0x15–0x19 | the same five notes, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump table at image 0x22b3, entries aliasing 0x01–0x05). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. |
+| 0x00–0x05 | note: **32nd**, 16th, 8th, quarter, half, whole → `2^n` thirty-second-ticks. `0x00` is the 32nd (the first note in the program's palette); it was originally dropped, which shortened every measure using it (ALLEGRO, DIE, …). One tick = one 32nd. |
+| 0x14–0x19 | the same six notes, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump table at image 0x22b3, entries aliasing 0x00–0x05). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. |
 | 0x06 / 0x0D | treble / bass clef glyph |
-| 0x08–0x0C | rest, same ladder (= note sym + 7; MIN2 ground truth `0x82→0x89`) |
+| 0x07–0x0C | rest, same ladder (= note sym + 7; `0x07` = 32nd rest; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
 | 0x11 | augmentation dot — the engine adds **half the note's own duration** to the sounding note (handler at image 0x245c) |
 | 0x12 | in the clef record: 8va for the staff (+0x18 = +12 semitones) |
@@ -174,9 +174,12 @@ Two corpus songs (GOOD.MCS, PRETTY6.MCS) have 3–4 staves; the reader decodes t
 sit (v 1–20 → treble, v 21–41 → bass) rather than by staff order.
 
 ## Remaining unknowns (playback-immaterial)
-- Symbols 0x00 (252×, 37 distinct verticals — note-like but no duration fits), 0x13
-  (425×, dispatches to a skip stub), and 0x1A–0x1E (rare, timing-control handlers).
-  0x14 never occurs. None appear in enough songs to affect playback; MCSTEST.MCS +
+- **Solved:** 0x00 is the **32nd note** and 0x07 the **32nd rest** (see the symbol table) —
+  previously listed here as "note-like but no duration fits"; they are now decoded, one
+  tick = one 32nd. 0x1B occurs only inside SCALES.MCS's clef record (a staff-header glyph,
+  not a note) and is ignored. 0x14 (beamed 32nd) never occurs.
+- Symbols 0x13 (dispatches to a skip stub) and 0x1A/0x1C–0x1E (rare, timing-control
+  handlers) still unmapped. None appear in enough songs to affect playback; MCSTEST.MCS +
   MartyPC is the way to pin them with a controlled edit if a song ever sounds thin.
 - **Note-symbol dispatch could not be isolated by emulation.** The image exceeds 64 KB,
   so the note engine's true segment base is not the image base; a Unicorn harness over

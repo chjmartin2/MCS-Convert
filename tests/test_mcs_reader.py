@@ -40,24 +40,27 @@ def test_entry_bitfields():
 
 
 def test_decode_duration_note_ladder():
-    assert decode_duration(0x01) == (False, 1)    # sixteenth
-    assert decode_duration(0x02) == (False, 2)    # eighth
-    assert decode_duration(0x03) == (False, 4)    # quarter
-    assert decode_duration(0x04) == (False, 8)    # half
-    assert decode_duration(0x05) == (False, 16)   # whole
+    # One tick = a 32nd. 0x00 is the 32nd note (1 tick); the ladder doubles up from there.
+    assert decode_duration(0x00) == (False, 1)    # thirty-second
+    assert decode_duration(0x01) == (False, 2)    # sixteenth
+    assert decode_duration(0x02) == (False, 4)    # eighth
+    assert decode_duration(0x03) == (False, 8)    # quarter
+    assert decode_duration(0x04) == (False, 16)   # half
+    assert decode_duration(0x05) == (False, 32)   # whole
     # vertical bits must not change the decoded duration
-    assert decode_duration(0x82) == (False, 2)
+    assert decode_duration(0x82) == (False, 4)
 
 
 def test_decode_duration_beamed_notes():
-    # 0x15..0x19 are the same five note values as 0x01..0x05, beamed (value = sym - 0x14).
+    # 0x14..0x19 are the same six note values as 0x00..0x05, beamed (value = sym - 0x14).
     # These carry the bulk of fast runs (BUMBLE.MCD) and were previously dropped.
-    assert decode_duration(0x15) == (False, 1)    # beamed 16th
-    assert decode_duration(0x16) == (False, 2)    # beamed 8th
-    assert decode_duration(0x17) == (False, 4)    # beamed quarter
-    assert decode_duration(0x18) == (False, 8)    # beamed half
-    assert decode_duration(0x19) == (False, 16)   # beamed whole
-    assert decode_duration(0xF5) == (False, 1)    # vertical bits don't affect duration
+    assert decode_duration(0x14) == (False, 1)    # beamed 32nd
+    assert decode_duration(0x15) == (False, 2)    # beamed 16th
+    assert decode_duration(0x16) == (False, 4)    # beamed 8th
+    assert decode_duration(0x17) == (False, 8)    # beamed quarter
+    assert decode_duration(0x18) == (False, 16)   # beamed half
+    assert decode_duration(0x19) == (False, 32)   # beamed whole
+    assert decode_duration(0xF5) == (False, 2)    # vertical bits don't affect duration
 
 
 def test_beamed_run_is_sounded(tmp_path):
@@ -73,16 +76,18 @@ def test_beamed_run_is_sounded(tmp_path):
     ])
     notes = _song(body, tmp_path).tracks[0].notes
     assert len(notes) == 8
-    assert all(not n.is_rest and n.duration_ticks == 1 for n in notes)
-    assert [n.start_tick for n in notes] == list(range(8))
+    assert all(not n.is_rest and n.duration_ticks == 2 for n in notes)   # 16th = 2 ticks
+    assert [n.start_tick for n in notes] == list(range(0, 16, 2))
 
 
 def test_decode_duration_rest_ladder():
-    # rests are note symbol + 7 (MIN2 ground truth: 8th note 0x82 -> 8th rest 0x89)
-    assert decode_duration(0x08) == (True, 1)
-    assert decode_duration(0x89) == (True, 2)
-    assert decode_duration(0x0A) == (True, 4)
-    assert decode_duration(0x0C) == (True, 16)
+    # rests are note symbol + 7 (MIN2 ground truth: 8th note 0x82 -> 8th rest 0x89);
+    # 0x07 is the 32nd rest. One tick = a 32nd.
+    assert decode_duration(0x07) == (True, 1)     # 32nd rest
+    assert decode_duration(0x08) == (True, 2)     # 16th rest
+    assert decode_duration(0x89) == (True, 4)     # 8th rest
+    assert decode_duration(0x0A) == (True, 8)     # quarter rest
+    assert decode_duration(0x0C) == (True, 32)    # whole rest
 
 
 # ---- record / staff structure -----------------------------------------------------
@@ -119,8 +124,8 @@ def test_minuet_opening_two_bars(tmp_path):
     ])
     notes = _song(body, tmp_path).tracks[0].notes
     assert [n.midi_note for n in notes] == [74, 67, 69, 71, 72, 74, 67, 67]
-    assert [n.duration_ticks for n in notes] == [4, 2, 2, 2, 2, 4, 4, 4]
-    assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10, 12, 16, 20]
+    assert [n.duration_ticks for n in notes] == [8, 4, 4, 4, 4, 8, 8, 8]
+    assert [n.start_tick for n in notes] == [0, 8, 12, 16, 20, 24, 32, 40]
 
 
 def test_minuet_bar3_key_signature_and_bar4_leap(tmp_path):
@@ -141,8 +146,8 @@ def test_minuet_bar3_key_signature_and_bar4_leap(tmp_path):
 
 
 def test_minuet_bass_chord_and_dot(tmp_path):
-    # Bass bar 1: {B3, G3} half chord (same x slot) + A3 quarter = 12 ticks = 3/4.
-    # Bar 2: a half note with an augmentation dot (sym 0x11) = 12 ticks.
+    # Bass bar 1: {B3, G3} half chord (same x slot) + A3 quarter = 24 ticks = 3/4.
+    # Bar 2: a half note with an augmentation dot (sym 0x11) = 24 ticks (16 + 8).
     body = (EMPTY_TREBLE + bytes([
         0xFF, 0xFF, 2, 0, 0x0D, 0x74, 0xBF, 0x83,   # bass clef + key-sig sharp
         0xFF, 0xFF, 3, 2,
@@ -154,10 +159,10 @@ def test_minuet_bass_chord_and_dot(tmp_path):
     ]))
     notes = _song(body, tmp_path).tracks[1].notes
     assert [(n.midi_note, n.start_tick, n.duration_ticks) for n in notes] == [
-        (59, 0, 8),     # chord note 1, half
-        (55, 0, 8),     # chord note 2, half (same slot)
-        (57, 8, 4),     # quarter
-        (59, 12, 12),   # dotted half fills bar 2 (8 + 4)
+        (59, 0, 16),    # chord note 1, half
+        (55, 0, 16),    # chord note 2, half (same slot)
+        (57, 16, 8),    # quarter
+        (59, 24, 24),   # dotted half fills bar 2 (16 + 8)
     ]
 
 
@@ -171,7 +176,7 @@ def test_rest_replaces_note_like_min2(tmp_path):
     ])
     notes = _song(body, tmp_path).tracks[0].notes
     assert [n.is_rest for n in notes] == [False, True, False, False, False]
-    assert [n.start_tick for n in notes] == [0, 4, 6, 8, 10]
+    assert [n.start_tick for n in notes] == [0, 8, 12, 16, 20]
     assert notes[1].midi_note == 0
     assert [n.midi_note for n in notes if not n.is_rest] == [74, 69, 71, 72]
 
@@ -224,8 +229,8 @@ def test_scale_covers_the_fixed_windows(tmp_path):
 
 
 def test_metadata_tempo_time_key(tmp_path):
-    # A 3/4 measure (quarter + 4 eighths = 12) in G major (one sharp glyph in the clef
-    # record), with the tempo word 0x3B02 = level 3 at header offset 0x05.
+    # A 3/4 measure (quarter + 4 eighths = 24 ticks) in G major (one sharp glyph in the
+    # clef record), with the tempo word 0x3B02 = level 3 at header offset 0x05.
     header = bytearray(0x0F)
     header[0x05], header[0x06] = 0x02, 0x3B      # tempo word 0x3B02 -> level 3
     body = bytes([
@@ -245,12 +250,12 @@ def test_metadata_tempo_time_key(tmp_path):
 
 
 def test_metadata_four_four_c_major(tmp_path):
-    # No accidental glyphs -> C major; a 16-tick measure -> 4/4; default tempo word.
+    # No accidental glyphs -> C major; a 32-tick measure -> 4/4; default tempo word.
     header = bytearray(0x0F)
     header[0x05], header[0x06] = 0xFC, 0x3A       # 0x3AFC -> level 1
     body = bytes([
         0xFF, 0xFF, 1, 0, 0x06, 0x72,
-        0xFF, 0xFF, 4, 1, 0x03, 34, 0x03, 50, 0x03, 66, 0x03, 82,   # 4 quarters = 16
+        0xFF, 0xFF, 4, 1, 0x03, 34, 0x03, 50, 0x03, 66, 0x03, 82,   # 4 quarters = 32
         0xFF, 0xFF, 0, 4,
         0xFF, 0xFF, 0, 0,
     ])
@@ -263,8 +268,8 @@ def test_metadata_four_four_c_major(tmp_path):
 
 
 def test_whole_rest_fills_the_measure(tmp_path):
-    # In a 2/4 song (8-tick measures), a measure holding a lone whole rest means
-    # "rest this measure" (8 ticks), not a literal 16 — BUMBLE's bass opens this way.
+    # In a 2/4 song (16-tick measures), a measure holding a lone whole rest means
+    # "rest this measure" (16 ticks), not a literal 32 — BUMBLE's bass opens this way.
     body = (EMPTY_TREBLE + bytes([
         0xFF, 0xFF, 1, 0, 0x0D, 0x74,
         0xFF, 0xFF, 1, 1, 0x0C, 90,                      # lone whole rest
@@ -274,13 +279,13 @@ def test_whole_rest_fills_the_measure(tmp_path):
         0xFF, 0xFF, 0, 0,
     ]))
     notes = _song(body, tmp_path).tracks[1].notes
-    assert notes[0].is_rest and notes[0].duration_ticks == 8
-    assert notes[1].start_tick == 8                       # music starts at measure 2
+    assert notes[0].is_rest and notes[0].duration_ticks == 16
+    assert notes[1].start_tick == 16                     # music starts at measure 2
 
 
 def test_grid_is_modal_not_max(tmp_path):
-    # One long final measure (a 16-tick held note) must not stretch every 8-tick
-    # measure of a 2/4 song — the old max() grid put 16 ticks of silence in each bar.
+    # One long final measure (a 32-tick held note) must not stretch every 16-tick
+    # measure of a 2/4 song — the old max() grid put a whole note of silence in each bar.
     body = bytes([
         0xFF, 0xFF, 1, 0, 0x06, 0x72,
         0xFF, 0xFF, 4, 1, 0x22, 30, 0x22, 60, 0x22, 90, 0x22, 120,
@@ -290,14 +295,14 @@ def test_grid_is_modal_not_max(tmp_path):
         0xFF, 0xFF, 0, 0,
     ])
     notes = _song(body, tmp_path).tracks[0].notes
-    assert [n.start_tick for n in notes] == [0, 2, 4, 6, 8, 10, 12, 14, 16]
-    assert notes[-1].duration_ticks == 16                 # the long bar keeps its length
+    assert [n.start_tick for n in notes] == [0, 4, 8, 12, 16, 20, 24, 28, 32]
+    assert notes[-1].duration_ticks == 32                 # the long bar keeps its length
 
 
 def test_scale_measure_alignment(tmp_path):
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}
     assert by_name["Bass"].notes[0].start_tick == 0
-    assert by_name["Bass"].notes[16].start_tick == 16     # bass measure 2, tick 0
-    assert by_name["Treble"].notes[0].start_tick == 20    # measure 2, front-padded by 4
-    assert by_name["Treble"].notes[12].start_tick == 32   # measure 3 from its top
+    assert by_name["Bass"].notes[16].start_tick == 32     # bass measure 2, tick 0
+    assert by_name["Treble"].notes[0].start_tick == 40    # measure 2, front-padded by 8
+    assert by_name["Treble"].notes[12].start_tick == 64   # measure 3 from its top

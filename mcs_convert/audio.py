@@ -26,11 +26,11 @@ def midi_to_freq(midi: int) -> float:
 
 
 def tempo_bpm(tick_seconds: float) -> float:
-    """Quarter-note BPM for a per-sixteenth-tick duration (4 sixteenths per quarter).
+    """Quarter-note BPM for a per-tick duration. A tick is a 32nd, so 8 ticks per quarter.
 
     The real tempo is set by the file's header byte 0 (see reader.tick_seconds_for),
     measured from DOSBox-X captures — NOT the 0x05 "level" word."""
-    return 60.0 / (4.0 * tick_seconds)
+    return 60.0 / (8.0 * tick_seconds)
 
 
 def _wave(phase: np.ndarray, waveform: str) -> np.ndarray:
@@ -100,7 +100,7 @@ def _render_pcspeaker(song: Song, sr: int, step: float) -> np.ndarray:
     return (bits * 2.0 - 1.0).astype(np.float32) * 0.6
 
 
-def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.125,
+def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.0625,
                amplitude: float = 0.35, waveform: str = "square") -> Tuple[bytes, int]:
     """Render every track (mixed) to mono 16-bit PCM. Returns (pcm_bytes, sample_rate)."""
     if waveform == "pcspeaker":

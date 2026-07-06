@@ -66,21 +66,29 @@ _BASS_WINDOW = bytes.fromhex("4642403c38 3632 2e2a2824201e1a16 12100c080600")  #
 # mis-read off the 1-bit polyphonic audio, whose octave/voice detection is unreliable.)
 MIDI_ANCHOR = 44
 
-_NOTE_TICKS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
+# One tick = one THIRTY-SECOND note (MCS's smallest note value; symbol 0x00 is the 32nd,
+# shown as the first note in the program's palette). value n -> 2**n thirty-second-ticks:
+# 0=32nd, 1=16th, 2=8th, 3=quarter, 4=half, 5=whole.
+_NOTE_TICKS = {0: 1, 1: 2, 2: 4, 3: 8, 4: 16, 5: 32}
 
-# A note can be stored "beamed" — symbols 0x15..0x19 are the same five note values as
-# 0x01..0x05 with 0x14 added (the engine's dispatch routes them to the identical
+# A note can be stored "beamed" — symbols 0x14..0x19 are the same six note values as
+# 0x00..0x05 with 0x14 added (the engine's dispatch routes them to the identical
 # duration handlers; confirmed by BUMBLE.MCD, whose beamed-16th runs otherwise vanish).
 _BEAM_OFFSET = 0x14
 
 
 def _note_value(sym: int) -> tuple[str, int]:
-    """Classify a symbol: ('note'|'rest'|'', value) where value indexes _NOTE_TICKS."""
-    if _BEAM_OFFSET + 1 <= sym <= _BEAM_OFFSET + 5:      # 0x15..0x19 = beamed note
+    """Classify a symbol: ('note'|'rest'|'', value) where value indexes _NOTE_TICKS.
+
+    Notes are 0x00..0x05 (0x00 = 32nd), beamed notes 0x14..0x19, rests 0x07..0x0c
+    (0x07 = 32nd rest). The 32nd note/rest were originally dropped, which shortened every
+    measure that used them (ALLEGRO, DIE, ...); MCS's palette proves the 32nd is real.
+    """
+    if _BEAM_OFFSET <= sym <= _BEAM_OFFSET + 5:          # 0x14..0x19 = beamed note
         return "note", sym - _BEAM_OFFSET
-    if 1 <= sym <= 5:
+    if 0 <= sym <= 5:                                    # 0x00..0x05 = note
         return "note", sym
-    if 8 <= sym <= 12:
+    if 7 <= sym <= 12:                                   # 0x07..0x0c = rest
         return "rest", sym - 7
     return "", 0
 
@@ -90,29 +98,30 @@ TEMPO_BASE = 0x3AF9
 TEMPO_STEP = 3
 
 # The REAL playback tempo is set by header byte 0 (0x77..0x92, in steps of 3), NOT the
-# 0x05 word. Measured from DOSBox-X captures: seconds per sixteenth-tick =
+# 0x05 word. Measured from DOSBox-X captures: seconds per SIXTEENTH =
 # 0.067 + 0.016 * step, where step = (byte0 - 0x77) // 3. Fits ENTERTAN (0x7a -> 83ms),
 # AXEL/YANKEE (0x80 -> 115ms), MINUETG (0x83 -> 131ms), DIXIE (0x89 -> 163ms).
 _TEMPO_BASE_BYTE = 0x77
 
 
 def tick_seconds_for(byte0: int) -> float:
+    """Seconds per tick. A tick is a 32nd, so it's half the measured per-sixteenth rate."""
     step = max(0, (byte0 - _TEMPO_BASE_BYTE) // 3)
-    return 0.067 + 0.016 * step
+    return (0.067 + 0.016 * step) / 2.0
 
 # Key names by number of sharps / flats in the clef-record signature.
 _SHARP_KEYS = ["C", "G", "D", "A", "E", "B", "F#", "C#"]
 _FLAT_KEYS = ["C", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"]
 
-# Common measure lengths (in sixteenth-ticks) -> time signature label.
-_TIME_SIG = {2: "2/8", 4: "1/4", 6: "3/8", 8: "2/4", 12: "3/4",
-             16: "4/4", 20: "5/4", 24: "6/8", 32: "4/2"}
+# Common measure lengths (in thirty-second-ticks) -> time signature label.
+_TIME_SIG = {4: "2/8", 8: "1/4", 12: "3/8", 16: "2/4", 24: "3/4",
+             32: "4/4", 40: "5/4", 48: "6/8", 64: "4/2"}
 
 
-def _time_signature(sixteenths: int) -> str:
-    if sixteenths in _TIME_SIG:
-        return _TIME_SIG[sixteenths]
-    return f"{sixteenths}/16" if sixteenths else ""
+def _time_signature(ticks: int) -> str:
+    if ticks in _TIME_SIG:
+        return _TIME_SIG[ticks]
+    return f"{ticks}/32" if ticks else ""
 
 
 def _key_name(keysig: List[int]) -> str:
@@ -138,7 +147,7 @@ def x_slot(byte1: int) -> int:
 
 
 def decode_duration(byte0: int) -> tuple[bool, int]:
-    """(is_rest, ticks) for a note/rest symbol. One tick = one sixteenth."""
+    """(is_rest, ticks) for a note/rest symbol. One tick = one thirty-second."""
     kind, value = _note_value(symbol(byte0))
     if not kind:
         raise ValueError(f"symbol 0x{symbol(byte0):02x} is not a note or rest")
@@ -313,7 +322,7 @@ def parse(path: str) -> Song:
     def _fills_measure(slots: List[_Slot]) -> bool:
         # Notation convention: a lone whole rest means "rest the whole measure",
         # whatever the meter (BUMBLE's 2/4 bass opens with four of them).
-        return len(slots) == 1 and slots[0].is_rest and slots[0].duration == 16
+        return len(slots) == 1 and slots[0].is_rest and slots[0].duration == 32
 
     # The measure grid is the MODAL span (the meter), not the maximum — one long
     # final measure must not stretch every bar of the song (ties break upward so a
@@ -322,7 +331,7 @@ def parse(path: str) -> Song:
     if spans:
         measure_len = max(set(spans), key=lambda v: (spans.count(v), v))
     else:
-        measure_len = 16
+        measure_len = 32
     for _, ms in decoded:
         for m in ms:
             if _fills_measure(m):

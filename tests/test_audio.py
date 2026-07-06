@@ -9,10 +9,11 @@ from mcs_convert.model import NoteEvent, Song, Track
 
 def test_tempo_from_header_byte0():
     # Real tempo is set by header byte 0 (measured from DOSBox-X captures), not the 0x05
-    # word: 0.067 + 0.016*step, step = (byte0 - 0x77)//3.
-    assert tick_seconds_for(0x7a) == 0.083          # ENTERTAN (~180 BPM)
-    assert tick_seconds_for(0x80) == 0.115          # AXEL / YANKEE (~130 BPM)
-    assert tick_seconds_for(0x89) == 0.163          # DIXIE
+    # word: per-sixteenth = 0.067 + 0.016*step, step = (byte0 - 0x77)//3. A tick is a
+    # 32nd, so tick_seconds is half that; BPM is unchanged.
+    assert round(tick_seconds_for(0x7a), 4) == 0.0415    # ENTERTAN (~180 BPM)
+    assert round(tick_seconds_for(0x80), 4) == 0.0575    # AXEL / YANKEE (~130 BPM)
+    assert round(tick_seconds_for(0x89), 4) == 0.0815    # DIXIE
     assert round(tempo_bpm(tick_seconds_for(0x7a))) == 181
     assert round(tempo_bpm(tick_seconds_for(0x80))) == 130
 

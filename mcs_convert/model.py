@@ -58,7 +58,7 @@ class Song:
     key_signature: str = ""                     # e.g. "G major", from the clef-record accidentals
     tempo_level: Optional[int] = None           # MCS stored speed index (0..3), None if unknown
     tempo_raw: Optional[int] = None             # the raw 0x05 header word
-    tempo_tick_seconds: float = 0.083           # real seconds per sixteenth-tick (from header byte0)
+    tempo_tick_seconds: float = 0.042           # real seconds per 32nd-tick (from header byte0)
 
     def add_track(self, track: Track) -> Track:
         self.tracks.append(track)

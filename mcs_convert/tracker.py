@@ -1,9 +1,9 @@
 """Render a decoded Song as a 4-voice tracker grid — a diagnostic view.
 
 MCS plays up to four simultaneous voices through the PC speaker. This lays the decoded
-notes on a fixed time grid (16th-note rows — MCS's finest note value, so every row is a
-real beat position, no padding) with four columns holding the sounding notes ranked
-**highest to lowest** at each row. A note's
+notes on a fixed time grid (32nd-note rows — MCS's finest note value; one row per tick)
+with four columns holding the sounding notes ranked **highest to lowest** at each row.
+A note's
 name is printed once, at its onset; while it sustains the cell is blank; a rest onset shows
 `R`. Measure boundaries are marked so it lines up with a written score.
 
@@ -17,8 +17,8 @@ from typing import List, Tuple
 from .model import Song
 from .pitch import midi_to_name
 
-# time_signature "N/D" -> sixteenth-ticks per measure (16 sixteenths = a whole note).
-_TS_DEN = {"1": 16, "2": 8, "4": 4, "8": 2, "16": 1}
+# time_signature "N/D" -> thirty-second-ticks per measure (32 thirty-seconds = a whole note).
+_TS_DEN = {"1": 32, "2": 16, "4": 8, "8": 4, "16": 2, "32": 1}
 
 
 def _measure_ticks(time_signature: str) -> int:
@@ -30,7 +30,7 @@ def _measure_ticks(time_signature: str) -> int:
 
 
 def tracker_rows(song: Song, subdiv: int = 1) -> List[Tuple[str, bool, List[str]]]:
-    """Grid rows for `song`. subdiv = rows per sixteenth-tick (1 → one row per 16th).
+    """Grid rows for `song`. subdiv = rows per 32nd-tick (1 → one row per 32nd).
 
     Each row is (label, is_measure_start, [col0..col3]) with columns highest→lowest.
     A cell holds a note name only where that note begins; blank while it sustains; 'R'
