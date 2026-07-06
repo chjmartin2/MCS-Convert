@@ -100,8 +100,16 @@ class PlayerApp:
         frame = tk.Frame(self.root, bg=_BG)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
         cols = ("bar", "v1", "v2", "v3", "v4")       # 4 voices, highest -> lowest
-        self.tree = ttk.Treeview(frame, columns=cols, show="headings", height=24)
-        self.tree.tag_configure("bar", background="#1b1f2a")
+        style = ttk.Style()
+        # Explicit light grid: set foreground too, so a shaded row never hides its text
+        # (the old bar tag set only a dark background -> black-on-black first note).
+        style.configure("Tracker.Treeview", background="#ffffff", fieldbackground="#ffffff",
+                        foreground="#141414", rowheight=20)
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", height=24,
+                                 style="Tracker.Treeview")
+        self.tree.tag_configure("stripe", background="#e8f6e8", foreground="#141414")  # zebra
+        self.tree.tag_configure("bar", background="#bfe3bf", foreground="#0b3d0b",      # bar start
+                                font=("TkDefaultFont", 9, "bold"))
         for c, w in (("bar", 46), ("v1", 88), ("v2", 88), ("v3", 88), ("v4", 88)):
             self.tree.heading(c, text=c.upper() if c != "bar" else "Bar")
             self.tree.column(c, width=w, anchor="center")
@@ -138,9 +146,18 @@ class PlayerApp:
     def _populate(self, path: str) -> None:
         self.tree.delete(*self.tree.get_children())
         # 4-voice tracker: 32nd-note rows, sounding notes ranked highest -> lowest.
-        for lbl, is_bar, cols in tracker_rows(self.song):
+        rows = tracker_rows(self.song)
+        for idx, (lbl, is_bar, cols) in enumerate(rows):
+            tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
             self.tree.insert("", "end", values=(lbl, *cols),
-                             tags=("bar",) if is_bar else ())
+                             tags=(tag,) if tag else ())
+        self.tree.yview_moveto(0.0)          # always show the first row after a load
+        self.tree.update_idletasks()         # force the grid to repaint now
+
+        # Stamp the decoded first note into the title so THIS window self-identifies —
+        # if the title and the grid ever disagree, this window is running stale code.
+        first = next((c for _, _, cols in rows for c in cols if c and c != "R"), "?")
+        self.root.title(f"MCS-Convert — {os.path.basename(path)}  (first note {first})")
 
         self.meta_vars["Time"].set(self.song.time_signature or "—")
         self.meta_vars["Key"].set(self.song.key_signature or "—")

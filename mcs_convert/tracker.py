@@ -1,8 +1,9 @@
 """Render a decoded Song as a 4-voice tracker grid — a diagnostic view.
 
 MCS plays up to four simultaneous voices through the PC speaker. This lays the decoded
-notes on a fixed time grid (default 32nd-note rows — the player's finest granularity) with
-four columns holding the sounding notes ranked **highest to lowest** at each row. A note's
+notes on a fixed time grid (16th-note rows — MCS's finest note value, so every row is a
+real beat position, no padding) with four columns holding the sounding notes ranked
+**highest to lowest** at each row. A note's
 name is printed once, at its onset; while it sustains the cell is blank; a rest onset shows
 `R`. Measure boundaries are marked so it lines up with a written score.
 
@@ -28,8 +29,8 @@ def _measure_ticks(time_signature: str) -> int:
         return 16                                    # sensible 4/4 default
 
 
-def tracker_rows(song: Song, subdiv: int = 2) -> List[Tuple[str, bool, List[str]]]:
-    """Grid rows for `song`. subdiv = rows per sixteenth-tick (2 → 32nd notes).
+def tracker_rows(song: Song, subdiv: int = 1) -> List[Tuple[str, bool, List[str]]]:
+    """Grid rows for `song`. subdiv = rows per sixteenth-tick (1 → one row per 16th).
 
     Each row is (label, is_measure_start, [col0..col3]) with columns highest→lowest.
     A cell holds a note name only where that note begins; blank while it sustains; 'R'
@@ -71,7 +72,7 @@ def tracker_rows(song: Song, subdiv: int = 2) -> List[Tuple[str, bool, List[str]
     return rows
 
 
-def tracker_text(song: Song, subdiv: int = 2, max_rows: int | None = None) -> str:
+def tracker_text(song: Song, subdiv: int = 1, max_rows: int | None = None) -> str:
     """The tracker as monospaced text (blank line between measures)."""
     rows = tracker_rows(song, subdiv)
     if max_rows:
