@@ -71,6 +71,14 @@ class PlayerApp:
                                     state="disabled")
         self.export_btn.pack(side="left", padx=(12, 0))
 
+        # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
+        # rendering (see audio._render_pcspeaker), for comparing against real hardware.
+        self._voices = {"PC Speaker": "pcspeaker", "Square": "square",
+                        "Triangle": "triangle", "Sine": "sine"}
+        self.voice = tk.StringVar(value="PC Speaker")
+        ttk.Combobox(bar, textvariable=self.voice, width=11, state="readonly",
+                     values=list(self._voices)).pack(side="right")
+
     def _build_meta(self) -> None:
         # Read-only song metadata extracted from the file. Playback follows these; there
         # are no manual overrides — the point is to reproduce what the .MCS actually stores.
@@ -152,9 +160,9 @@ class PlayerApp:
 
     def _render(self):
         """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None."""
-        # Timing comes from the file's own tempo (header byte 0); timbre = PC-speaker square.
+        # Timing comes from the file's own tempo (header byte 0); voice from the dropdown.
         pcm, sr = synth_song(self.song, step_seconds=self.song.tempo_tick_seconds,
-                             waveform="square")
+                             waveform=self._voices[self.voice.get()])
         return wav_bytes(pcm, sr) if pcm else None
 
     def play(self) -> None:

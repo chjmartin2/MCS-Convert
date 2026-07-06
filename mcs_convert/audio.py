@@ -68,9 +68,46 @@ def _render_track(events: List[Tuple[int, int, int]], sr: int, step: float,
     return out
 
 
+def _render_pcspeaker(song: Song, sr: int, step: float) -> np.ndarray:
+    """Reproduce MCS's 4-voice PC-speaker rendering.
+
+    The real engine (MCSDISK.EXE loop at image 0x1929) runs four phase accumulators, one
+    per voice, adds a per-voice increment each pass, and combines their overflows into the
+    single 1-bit speaker — all four voices sound at once, quantized to 1 bit. This models
+    that faithfully (not cycle-exact): sum the voices' 1-bit square waves, then render the
+    sum back to 1 bit with first-order delta-sigma (PDM), which is what gives the speaker
+    its gritty texture. Comparable directly against real captures. See docs/mcs-format.md.
+    """
+    events = [(n.start_tick, n.duration_ticks, n.midi_note)
+              for tr in song.tracks for n in tr.notes if not n.is_rest]
+    if not events:
+        return np.zeros(1, dtype=np.float32)
+    total = int(max(s + d for s, d, _ in events) * step * sr) + 1
+    level = np.zeros(total, dtype=np.float32)               # 0..N voices high per sample
+    for start, dur, midi in events:
+        pos = int(start * step * sr)
+        ns = int(dur * step * sr)
+        if ns <= 0:
+            continue
+        phase = midi_to_freq(midi) * np.arange(pos, pos + ns, dtype=np.float64) / sr
+        level[pos:pos + ns] += (np.mod(phase, 1.0) < 0.5).astype(np.float32)  # 1-bit square
+    peak = float(level.max()) or 1.0
+    duty = level / peak                                     # target speaker density 0..1
+    # First-order delta-sigma: the running count of output 1s tracks the integral of duty,
+    # so each output bit is floor(cumsum) stepping up. Vectorized (no per-sample loop).
+    cum = np.floor(np.cumsum(duty, dtype=np.float64))
+    bits = np.diff(np.concatenate(([0.0], cum)))           # 0/1 speaker state per sample
+    return (bits * 2.0 - 1.0).astype(np.float32) * 0.6
+
+
 def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.125,
                amplitude: float = 0.35, waveform: str = "square") -> Tuple[bytes, int]:
     """Render every track (mixed) to mono 16-bit PCM. Returns (pcm_bytes, sample_rate)."""
+    if waveform == "pcspeaker":
+        mix = _render_pcspeaker(song, sample_rate, step_seconds)
+        if not np.any(mix):
+            return b"", sample_rate
+        return (mix * 32767.0).astype("<i2").tobytes(), sample_rate
     tracks = []
     for tr in song.tracks:
         events = [(n.start_tick, n.duration_ticks, n.midi_note)

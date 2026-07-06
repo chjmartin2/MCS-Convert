@@ -22,6 +22,25 @@ def test_higher_byte0_plays_slower():
     assert tempo_bpm(tick_seconds_for(0x77)) > tempo_bpm(tick_seconds_for(0x92))
 
 
+def test_pcspeaker_mode_is_one_bit_and_polyphonic():
+    import numpy as np
+    # two simultaneous notes (a chord) + one after: PC-speaker mode renders all voices to
+    # a single 1-bit stream.
+    song = Song(title="chord")
+    tr = Track(name="T")
+    tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=60))
+    tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=67))   # simultaneous
+    tr.add(NoteEvent(start_tick=8, duration_ticks=8, midi_note=72))
+    song.add_track(tr)
+    pcm, sr = synth_song(song, waveform="pcspeaker", step_seconds=0.1)
+    assert pcm
+    samp = np.frombuffer(pcm, dtype="<i2")
+    # 1-bit speaker: samples take only two distinct values (±level)
+    assert len(np.unique(samp)) == 2
+    # and it is not silent
+    assert np.abs(samp).mean() > 1000
+
+
 def _demo_song():
     song = Song(title="demo")
     t = Track(name="Treble")

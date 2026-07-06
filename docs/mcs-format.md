@@ -52,6 +52,17 @@ The reader surfaces three display values; a fourth (volume) provably isn't in th
   attenuation but it's driven by clef/voice config, not per-note or per-song file data.
   In the player, "volume" can only ever be a synth-amplitude control, not song data.
 
+### PC-speaker rendering (the actual 4-voice engine)
+MCS's "4-note" mode is **additive 1-bit synthesis**, not voice-multiplexing (the speaker
+plays all four voices at once). The tight loop at MCSDISK image **0x1929** keeps four
+phase accumulators (`bp/di/bx/si`), adds a per-voice increment (patched per note, ∝
+frequency) to each pass, and folds their overflows (`rcl ah,1` ×4) into the single 1-bit
+speaker via a PWM step, timed against the CGA retrace (`in al,0x3da`). So the audible
+signal is the **sum of four square waves quantised to 1 bit** — hence the grit.
+The player's **"PC Speaker" voice** ([`audio._render_pcspeaker`](../mcs_convert/audio.py))
+reproduces this (faithful, not cycle-exact): sum the voices' 1-bit squares, then
+delta-sigma the sum back to 1 bit. It exists to be compared against real captures.
+
 ### Body: measures and staves
 `FF FF count prev_count` records, each followed by `count` 2-byte entries.
 - **A record is one measure.** `prev_count` back-links the previous record's count.
