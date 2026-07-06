@@ -44,16 +44,34 @@ def _cmd_play(args) -> int:
 
 
 def _cmd_convert(args) -> int:
-    from .nsf.extract import extract_song
-    from .mcs.writer import write_mcs
+    from .mcs.encode import encode_song
 
+    ext = args.input.lower().rsplit(".", 1)[-1]
     try:
-        song = extract_song(args.input, subsong=args.subsong)
-        write_mcs(song, args.output)
+        if ext == "pt3":
+            from .pt3 import parse_pt3
+            with open(args.input, "rb") as fh:
+                song, byte0 = parse_pt3(fh.read())
+            data = encode_song(song, tempo_byte0=byte0)
+        elif ext == "nsf":
+            from .nsf.extract import extract_song
+            song = extract_song(args.input, subsong=args.subsong)
+            data = encode_song(song)
+        else:
+            print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
+                  file=sys.stderr)
+            return 1
     except NotImplementedError as exc:
         print(f"not yet implemented: {exc}", file=sys.stderr)
         return 2
-    print(f"wrote {args.output}")
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    with open(args.output, "wb") as fh:
+        fh.write(data)
+    notes = sum(1 for t in song.tracks for n in t.notes if not n.is_rest)
+    print(f"wrote {args.output} ({len(data)} bytes, {notes} notes, "
+          f"'{song.title}')")
     return 0
 
 
@@ -69,8 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_play.add_argument("file", nargs="?", help="optional .mcs/.mcd file to open")
     p_play.set_defaults(func=_cmd_play)
 
-    p_conv = sub.add_parser("convert", help="convert NSF -> MCS (in progress)")
-    p_conv.add_argument("input", help="path to a .nsf file")
+    p_conv = sub.add_parser("convert",
+                            help="convert a chiptune module (.pt3, .nsf) to .MCS")
+    p_conv.add_argument("input", help="path to a .pt3 (Vortex Tracker) or .nsf file")
     p_conv.add_argument("output", help="output .mcs path")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.set_defaults(func=_cmd_convert)

@@ -79,10 +79,23 @@ engine-exact: what this player shows and plays is what MCS 1984 plays.
 
 The goal (in progress): a fully functional **tracker editor and converter**
 for various music formats, built around the neutral note-event model at the
-project's core. The MCS reader/writer and the player are the first pieces;
-editing and more formats come next. Work has started on importing **NES
-chiptunes (`.nsf`)** — the 6502 + APU emulation that turns a player rip into
-note events is partially built. See
+project's core.
+
+**Working today — convert Vortex Tracker (`.pt3`) modules to MCS:**
+
+```powershell
+python -m mcs_convert convert SONG.pt3 SONG.MCS
+```
+
+PT3 is the ZX Spectrum / Atari ST scene's AY-3-8910 tracker format — three
+pure tone channels, note-based, no samples — which makes it the ideal MCS
+source. The importer extracts the notes and maps the row rate onto MCS's
+tempo; the general `Song → MCS` encoder handles staff split, voice capping,
+rests, tied sustains across barlines, and accidental spelling. (The encoder
+is verified by re-encoding our Maple Leaf Rag demo losslessly.)
+
+Work has also started on importing **NES chiptunes (`.nsf`)** — the
+6502 + APU emulation is partially built. See
 [docs/architecture.md](docs/architecture.md).
 
 ## Layout

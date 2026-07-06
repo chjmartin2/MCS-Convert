@@ -203,8 +203,9 @@ def emit_staff(bars, treble: bool, octava_bars=(), untie_bars=()):
                 entries.extend(glyphs)
                 entries.extend(heads)
                 if tied and bi not in untie_bars:
-                    top_v = min(v_of(n[0], n[1], treble) for n in notes)
-                    entries.append(make_entry(SYM_TIE, max(1, top_v - 2), x + 1))
+                    for n in notes:                 # one tie glyph per chord member,
+                        tv = v_of(n[0], n[1], treble)   # at that note's own v
+                        entries.append(make_entry(SYM_TIE, tv, x + 1))
             tick += ticks
         assert tick == 16, f"bar {bi} spans {tick} ticks"
         measures.append(entries)

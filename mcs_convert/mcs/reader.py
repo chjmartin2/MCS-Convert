@@ -283,8 +283,7 @@ class _Slot:
     slot_x: int
     advance: int              # ticks until the staff's next slot (min of the notes)
     is_rest: bool
-    notes: List[List[int]]    # [midi, duration_ticks, v] per chord member
-    tied: bool = False        # a 0x13/0x19 tie/slur mark follows this slot
+    notes: List[List[int]]    # [midi, duration_ticks, v, tied] per chord member
     octave: int = 0           # 1 if the slot is under an 8va (the engine never shifts down)
 
 
@@ -318,8 +317,13 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 oc = 1
                 continue
             if sym in _TIE_SYMS:
-                if slots:                                 # tie/slur carries the last slot on
-                    slots[-1].tied = True
+                # The engine's tie handler finds ONE note by searching from the
+                # glyph's v (handlers 0x24e5/0x24df); a tied chord carries one
+                # glyph per member. Flag the nearest note of the last slot.
+                for s in reversed(slots):
+                    if not s.is_rest:
+                        min(s.notes, key=lambda n: abs(n[2] - v))[3] = True
+                        break
                 continue
             if sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
                 # Mid-measure accidental at this position (0x0C = forced natural). The
@@ -350,11 +354,11 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 if midi:
                     midi += 12 * oc                       # under an 8va: +1 octave
                 if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
-                    slots[-1].notes.append([midi, dur, v])  # chord: same 8-px slot
+                    slots[-1].notes.append([midi, dur, v, False])   # chord member
                     slots[-1].advance = min(slots[-1].advance, dur)
                 else:
-                    slots.append(_Slot(x_slot(b1), dur, False, [[midi, dur, v]],
-                                       octave=oc))
+                    slots.append(_Slot(x_slot(b1), dur, False,
+                                       [[midi, dur, v, False]], octave=oc))
             # markers, unknown symbols: no time, no pitch
         measures.append(slots)
     return measures, marks
@@ -453,11 +457,11 @@ def parse(path: str) -> Song:
             for s in slots:
                 if s.is_rest:
                     track.add(NoteEvent(start_tick=tick, duration_ticks=s.advance,
-                                        midi_note=0, is_rest=True, tied=s.tied))
+                                        midi_note=0, is_rest=True))
                 else:
-                    for m, dur, _v in s.notes:
+                    for m, dur, _v, tied in s.notes:
                         track.add(NoteEvent(start_tick=tick, duration_ticks=dur,
-                                            midi_note=m, tied=s.tied, octave=s.octave))
+                                            midi_note=m, tied=tied, octave=s.octave))
                 tick += s.advance
         song.add_track(track)
     return song
