@@ -1,84 +1,98 @@
 # MCS-Convert
 
-Convert chiptune music into **Will Harvey's Music Construction Set** (IBM-PC, 1984/1987)
-song format.
+A player, viewer, and fully reverse-engineered format spec for **Will Harvey's
+Music Construction Set** (IBM-PC, 1984) — plus the beginnings of a chiptune
+(NSF) → MCS converter.
 
-## Status: early scaffolding
+MCS was one of the first music notation programs for home computers. Its
+`.MCS`/`.MCD` song format was never documented — until now. This project
+recovered the complete byte-level format by disassembling the original
+playback engine, and ships a modern player that reproduces what the 1984
+program plays, note for note, on all 86 songs we could find.
 
-The project is being built in phases. The first supported input is the **NES Sound
-Format (`.nsf`)**, chosen because the NES APU exposes a small, discrete set of pitched
-channels (2 pulse + 1 triangle) that map cleanly onto staff notation — sidestepping the
-pitch-detection problems that raw audio (WAV/MP3) would bring. Raw audio is explicitly
-**out of scope**.
+## The Player (v0.1)
 
+Open a song, watch it scroll by in a tracker-style grid, and listen:
+
+- **Tracker view** — one row per 32nd note, four voice columns ranked high→low,
+  `PITCH:DUR` notation with dotted (`.`), tied (`~`), and irregular (`!N`)
+  markers, plus an event column for 8va spans and mid-staff clef changes.
+- **Real transport** — play, pause/resume, stop; click any row to start there
+  (or to seek live during playback); a playhead follows the music.
+- **Live volume slider** and four synth voices, including **"PC Speaker"** — a
+  faithful model of the original 4-voice 1-bit delta-sigma output, gritty
+  texture included.
+- **Oscilloscope window** — the four voices on scopes plus a master mix,
+  phosphor green on black, resizable.
+- **Export** — decoded playback as WAV, or the full tracker grid as text.
+
+### Quick start (Windows)
+
+```powershell
+git clone https://github.com/chjmartin2/MCS-Convert.git
+cd MCS-Convert
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+python -m mcs_convert play path\to\SONG.MCS
 ```
-  .nsf  ──▶  [ 6502 + APU emulation ]  ──▶  note events  ──▶  [ MCS writer ]  ──▶  MCS song
- (input)        extract register writes      (intermediate)      encode bytes       (output)
-```
 
-### What works today
-- **MCS/MCD viewer + player GUI** — open a song, see it in a tracker-style grid, play it
-  back: `python -m mcs_convert play [SONG.MCS]` (or `mcs-convert play`). This is our
-  format-validation harness: if a song plays back recognizably, we decoded it right.
-- **MCS reader** — parse `.MCS`/`.MCD` into the neutral model (pitch decoded and validated
-  against Bach's Minuet in G; see [docs/mcs-format.md](docs/mcs-format.md)).
-- NSF header parsing and inspection: `python -m mcs_convert inspect song.nsf`
-- Frequency/period ↔ MIDI-note conversion helpers.
-- The intermediate note-event model that both ends talk through.
+Live playback uses the Windows audio API; on other platforms the parsing,
+tracker export, and WAV export still work.
 
-> Player caveats (first pass): note durations are uniform (byte0 not yet decoded),
-> bass-clef octaves are uncalibrated, and accidentals are dropped. These are the next
-> reverse-engineering targets — and the player is how we'll confirm each one.
+### Where do I get songs?
 
-### What's stubbed / in progress
-- **6502 + APU emulation** — needed to turn an NSF's player code into a timed stream of
-  register writes, then into note-on/note-off events. Interface is defined; core is a TODO.
-- **MCS format writer** — *blocked on reverse-engineering the format* (see below).
+Song files are copyrighted, so none are included. The original 1984 disk
+(with classics like *The Entertainer*, *Flight of the Bumblebee*, and
+Pachelbel's *Canon*) is preserved on archive.org — extract the `*.MCS` /
+`*.MCD` files from the disk image and drop them in `samples/` (gitignored).
 
-## The big open problem: the MCS file format is undocumented
+## The format, documented
 
-There is **no public byte-level specification** for the Music Construction Set IBM-PC song
-format. The 1984 IBM release boots from a non-standard single-sided disk; songs are stored
-as files but nobody has published the layout. To build the writer we must **reverse-engineer
-it from real sample song files**, which live inside the disk images on archive.org.
+[docs/mcs-format.md](docs/mcs-format.md) is, as far as we know, the only
+byte-level specification of the MCS song format in existence: the 16-bit note
+word (position / vertical / symbol), the four clef-selected pitch ladders, key
+signatures and accidentals, beamed notes, dots, ties, 8va spans, mid-staff
+clef changes, tempo, and the engine's voice-fed timing model — all recovered
+from a capstone disassembly of `MCSDISK.EXE` and validated by ear against the
+original program running in an emulator.
 
-See [docs/mcs-format.md](docs/mcs-format.md) for the running reverse-engineering log and
-[docs/architecture.md](docs/architecture.md) for the overall design.
+The reader round-trips every sample byte-identically, and the decode is
+engine-exact: what this player shows and plays is what MCS 1984 plays.
+
+## The bigger project
+
+The original goal (in progress): convert **NES chiptunes (`.nsf`)** into MCS
+songs, so 1984's Music Construction Set can play 1985's soundtracks. The NSF
+side (6502 + APU emulation → note events) is partially built; the MCS writer
+and the neutral note-event model in the middle are done. See
+[docs/architecture.md](docs/architecture.md).
 
 ## Layout
 
 ```
 mcs_convert/
-  cli.py            command-line entry point
-  model.py          Song / Track / NoteEvent  (the intermediate representation)
-  pitch.py          NES period <-> frequency <-> MIDI note
-  nsf/
-    header.py       NSF header parsing            (working)
-    apu.py          APU register decode -> pitch  (partial)
-    cpu6502.py      6502 CPU core                 (skeleton)
-    extract.py      emulate player -> note events (skeleton)
-  mcs/
-    writer.py       encode note events -> MCS     (stub, pending RE)
-docs/               format notes + architecture
-tests/              unit tests
-samples/            drop .nsf / .mcs sample files here (gitignored)
+  gui/player.py     the player/viewer GUI (tkinter)
+  tracker.py        tracker-grid rendering
+  audio.py          synth (square/triangle/sine/PC-speaker) + waveOut transport
+  mcs/reader.py     .MCS/.MCD -> Song   (the decoded format lives here)
+  mcs/writer.py     Song -> .MCS        (round-trips all samples byte-identically)
+  model.py          Song / Track / NoteEvent  (the neutral middle)
+  nsf/              NSF header/APU/6502 (converter input, in progress)
+docs/               the format spec + architecture notes
+tools/              disk-image and test-song utilities
+tests/              58 tests, including engine ground-truth checks
 ```
 
 ## Development
 
-Create the project venv and install the package (editable) with dev/runtime deps:
-
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1        # PowerShell   (Git Bash: source .venv/Scripts/activate)
-pip install -e ".[dev]"             # installs numpy, pytest, and mcs-convert itself
+pip install -e ".[dev]"
 pytest
 ```
 
-VS Code picks up `.venv` automatically via `.vscode/settings.json`, so Run ▶, F5, and the
-integrated terminal all use it. Launch the player with the *MCS Player* debug config, the
-Run button on `play.py`, or:
+## License
 
-```powershell
-python -m mcs_convert play samples\ia_1984\extracted\whmcs\MINUETG.MCS
-```
+MIT — see [LICENSE](LICENSE). The Music Construction Set itself, its disk
+images, and its song files remain the property of their rights holders; this
+project contains only original code and documentation.

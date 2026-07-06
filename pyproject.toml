@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcs-convert"
-version = "0.0.1"
-description = "Convert chiptune music (starting with NES NSF) into Will Harvey's Music Construction Set song format"
+version = "0.1.0"
+description = "Player, viewer, and reverse-engineered format spec for Will Harvey's Music Construction Set (IBM-PC, 1984), plus a chiptune (NSF) converter in progress"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
