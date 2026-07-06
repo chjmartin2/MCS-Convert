@@ -8,7 +8,7 @@ Each cell is `PITCH:DUR` at the note's onset (blank while it sustains); a rest i
 DUR is the note-value denominator — `32 16 8 4 2 1` for 32nd…whole, a trailing `.` for
 dotted, and `!N` (raw ticks) for anything that isn't a clean value, so a decode glitch
 stands out. A trailing `~` marks a tie/slur. A leading **Evt** column carries per-measure
-events: `8^`/`8v` for an 8va/8vb span and `G`/`F` for a mid-staff clef change.
+events: `8^` for an 8va span (MCS only shifts up) and `G`/`F` for a mid-staff clef change.
 
 It's a plain grid so it diffs cleanly against a transcription of the real hardware output.
 """

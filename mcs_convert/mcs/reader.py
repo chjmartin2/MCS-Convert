@@ -18,21 +18,32 @@ Note entry = 16-bit little-endian word (byte0, byte1):
                  staff 1 uses v 1..20, staff 2 uses v 21..41 — the engine splits at
                  v*4 >= 0x54). The old models missed that byte1's low 3 bits are the
                  high half of the vertical.
-  bits [4:0]   = symbol:
-                 0x01..0x05  note: 16th, 8th, quarter, half, whole (2**(n-1) ticks)
-                 0x15..0x19  the same five notes, *beamed* (value = symbol - 0x14). The
-                             engine dispatches these to the identical duration handlers;
-                             fast beamed runs (BUMBLE.MCD) are stored entirely this way.
+  bits [4:0]   = symbol (dispatch table at MCSDISK image 0x22b1, entry (sym+1)&0x1f,
+                 handler = table word + 0x40):
+                 0x00..0x05  note: 32nd, 16th, 8th, quarter, half, whole (2**n ticks)
+                 0x14..0x18  the same values 32nd..half, *beamed* (value = symbol - 0x14);
+                             the engine dispatches these to the identical duration
+                             handlers; fast beamed runs (BUMBLE.MCD) are stored this way.
                  0x06 / 0x0D treble / bass clef glyph
-                 0x08..0x0C  rest of the same ladder (n-7)
+                 0x07..0x0C  rest of the same ladder (n-7)
                  0x0E / 0x0F / 0x10  natural / sharp / flat glyph. In the clef record
                              these build the KEY SIGNATURE (applied at the glyph's
                              staff degree in every octave); inside a measure they set
                              a measure-scoped accidental at that exact position.
                  0x11        augmentation dot: the engine adds half the previous
                              note's duration to it (handler at MCSDISK 0x245c).
-                 0x12        in the clef record: 8va for the staff (+12 semitones).
-                 0x1F        the FF FF record marker seen as an entry; skipped.
+                 0x12        8va. In the clef record: whole-staff baseline +12 semitones
+                             (0x1629/0x16b3: [0x5bbe/f] = 0x18). Mid-measure: sets the
+                             staff's working shift to +12 (handler 0x24d7) from that
+                             entry onward; the FF FF boundary handler (0x22fd) restores
+                             the baseline, so it lasts to the END OF THE MEASURE only.
+                             The shift is an absolute SET, always UP - the glyph's
+                             position is cosmetic and the engine has NO 8vb at all.
+                 0x13 / 0x19 tie/slur mark drawn above / below its notes (handlers
+                             0x24e5/0x24df search down/up from the glyph for the
+                             sounding voice). No duration, no pitch.
+                 0x1F        the FF FF record marker seen as an entry: the engine's
+                             measure-boundary handler (octave reset, accidental clear).
 
   Pitch: the engine xlats v-1 through a fixed 41-byte grand-staff ladder chosen by
   the two staves' clefs (tables at MCSDISK image 0x5c88..): value = 2 x semitone.
@@ -45,7 +56,6 @@ Note entry = 16-bit little-endian word (byte0, byte1):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import median
 from typing import Dict, List, Tuple
 
 from ..model import NoteEvent, Song, Track
@@ -54,8 +64,10 @@ CLEF_TREBLE = 0x06
 CLEF_BASS = 0x0D
 SYM_NATURAL, SYM_SHARP, SYM_FLAT = 0x0E, 0x0F, 0x10
 SYM_DOT = 0x11
-SYM_OCTAVA = 0x12         # 8va/8vb: shifts a whole measure ±1 octave (dir = glyph above/below notes)
-SYM_TIE = 0x13           # tie/slur mark: carries the preceding note into the next
+SYM_OCTAVA = 0x12         # 8va: +1 octave from the glyph to the end of the measure (never down)
+SYM_TIE = 0x13            # tie/slur drawn above its notes
+SYM_TIE_BELOW = 0x19      # tie/slur drawn below its notes (same playback effect)
+_TIE_SYMS = (SYM_TIE, SYM_TIE_BELOW)
 SYM_MARKER = 0x1F
 
 # The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
@@ -73,20 +85,22 @@ MIDI_ANCHOR = 44
 # 0=32nd, 1=16th, 2=8th, 3=quarter, 4=half, 5=whole.
 _NOTE_TICKS = {0: 1, 1: 2, 2: 4, 3: 8, 4: 16, 5: 32}
 
-# A note can be stored "beamed" — symbols 0x14..0x19 are the same six note values as
-# 0x00..0x05 with 0x14 added (the engine's dispatch routes them to the identical
-# duration handlers; confirmed by BUMBLE.MCD, whose beamed-16th runs otherwise vanish).
+# A note can be stored "beamed" — symbols 0x14..0x18 are the note values 32nd..half with
+# 0x14 added (the engine's dispatch routes them to the identical duration handlers;
+# confirmed by BUMBLE.MCD, whose beamed-16th runs otherwise vanish). 0x19 is NOT a beamed
+# whole — it's the below-the-notes tie glyph (222 occurrences corpus-wide; decoding it as
+# a note inserted phantom whole notes into CANON, ELSEWERE, BABYFACE, ...).
 _BEAM_OFFSET = 0x14
 
 
 def _note_value(sym: int) -> tuple[str, int]:
     """Classify a symbol: ('note'|'rest'|'', value) where value indexes _NOTE_TICKS.
 
-    Notes are 0x00..0x05 (0x00 = 32nd), beamed notes 0x14..0x19, rests 0x07..0x0c
+    Notes are 0x00..0x05 (0x00 = 32nd), beamed notes 0x14..0x18, rests 0x07..0x0c
     (0x07 = 32nd rest). The 32nd note/rest were originally dropped, which shortened every
     measure that used them (ALLEGRO, DIE, ...); MCS's palette proves the 32nd is real.
     """
-    if _BEAM_OFFSET <= sym <= _BEAM_OFFSET + 5:          # 0x14..0x19 = beamed note
+    if _BEAM_OFFSET <= sym <= _BEAM_OFFSET + 4:          # 0x14..0x18 = beamed note
         return "note", sym - _BEAM_OFFSET
     if 0 <= sym <= 5:                                    # 0x00..0x05 = note
         return "note", sym
@@ -256,40 +270,24 @@ class _Slot:
     duration: int
     is_rest: bool
     midis: List[int]
-    tied: bool = False        # a 0x13 tie/slur mark follows this slot
-    octave: int = 0           # 8va/8vb applied to this slot: +1 up, -1 down
-
-
-def _octave_shift_at(oct_marks: List[Tuple[int, int]], x: int) -> int:
-    """Octave shift for a note at x-slot `x`, given the measure's 8va/8vb markers.
-    The first marker covers the whole measure; a later one switches from its x onward."""
-    if not oct_marks:
-        return 0
-    shift = oct_marks[0][1]                                # first marker = whole measure
-    for mx, direction in oct_marks:
-        if mx <= x:
-            shift = direction
-    return shift
+    tied: bool = False        # a 0x13/0x19 tie/slur mark follows this slot
+    octave: int = 0           # 1 if the slot is under an 8va (the engine never shifts down)
 
 
 def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, str]]]:
     """Decode a staff into per-measure slot lists, plus (measure_index, label) event marks
-    for the tracker: '8^'/'8v' where a measure is under 8va/8vb, and 'G'/'F' for a mid-staff
+    for the tracker: '8^' where a measure carries an 8va, and 'G'/'F' for a mid-staff
     clef change (a clef change is diagnostic only; pitch re-windowing is not applied)."""
     measures: List[List[_Slot]] = []
     marks: List[Tuple[int, str]] = []
     for mi, rec in enumerate(staff.records):
-        # 8va/8vb: a glyph sitting ABOVE the measure's notes shifts it up an octave, BELOW
-        # shifts it down; it governs the whole measure (a second glyph switches from its x).
-        note_vs = [vertical(b0, b1) for b0, b1 in rec.entries
-                   if _note_value(symbol(b0))[0] == "note"]
-        med = median(note_vs) if note_vs else 0
-        oct_marks = sorted((x_slot(b1), 1 if vertical(b0, b1) < med else -1)
-                           for b0, b1 in rec.entries if symbol(b0) == SYM_OCTAVA)
-        if oct_marks:
-            marks.append((mi, "8^" if oct_marks[0][1] > 0 else "8v"))
         slots: List[_Slot] = []
         measure_acc: Dict[int, int] = {}       # explicit accidentals, per position
+        # 8va: the engine SETS the staff's shift to +1 octave when it walks past the glyph
+        # and restores the baseline at the measure boundary — so it runs from the glyph's
+        # stream position to the end of the measure, and only ever shifts UP (the glyph's
+        # placement above or below the notes is purely cosmetic; there is no 8vb).
+        oc = 0
         for b0, b1 in rec.entries:
             sym = symbol(b0)
             v = vertical(b0, b1)
@@ -297,8 +295,11 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 marks.append((mi, "G" if sym == CLEF_TREBLE else "F"))
                 continue
             if sym == SYM_OCTAVA:
-                continue                                  # applied per note below
-            if sym == SYM_TIE:
+                if oc == 0:
+                    marks.append((mi, "8^"))
+                oc = 1
+                continue
+            if sym in _TIE_SYMS:
                 if slots:                                 # tie/slur carries the last slot on
                     slots[-1].tied = True
                 continue
@@ -322,10 +323,9 @@ def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, 
                 acc = measure_acc.get(v, staff.keysig[(v - 1) % 7])
                 if acc == 0x0C:
                     acc = 0
-                oc = _octave_shift_at(oct_marks, x_slot(b1))
                 midi = staff.midi(v, acc)
                 if midi:
-                    midi += 12 * oc                       # 8va/8vb: ±1 octave
+                    midi += 12 * oc                       # under an 8va: +1 octave
                 if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
                     slots[-1].midis.append(midi)          # chord: same 8-px slot
                     slots[-1].duration = max(slots[-1].duration, dur)
@@ -389,7 +389,7 @@ def parse(path: str) -> Song:
     for dur in m_dur:
         m_start.append(m_start[-1] + dur)
 
-    # 8va/8vb spans and mid-staff clef changes -> tracker event markers (at measure start).
+    # 8va spans and mid-staff clef changes -> tracker event markers (at measure start).
     for name, marks in staff_marks:
         for mi, label in marks:
             if mi < len(m_start):

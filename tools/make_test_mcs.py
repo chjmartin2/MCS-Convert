@@ -24,9 +24,10 @@ from mcs_convert.pitch import midi_to_name     # noqa: E402
 
 # Symbol values (see docs/mcs-format.md).
 N16, N8, N4, N2, N1 = 1, 2, 3, 4, 5                 # note durations
-B16, B8, B4, B2, B1 = 0x15, 0x16, 0x17, 0x18, 0x19  # beamed notes (same durations)
+B16, B8, B4, B2 = 0x15, 0x16, 0x17, 0x18            # beamed notes (same durations;
+                                                    # 0x19 is a tie glyph, NOT a beamed whole)
 R16, R8, R4, R2, R1 = 8, 9, 10, 11, 12              # rest durations
-TICKS = {N16: 1, N8: 2, N4: 4, N2: 8, N1: 16, B16: 1, B8: 2, B4: 4, B2: 8, B1: 16,
+TICKS = {N16: 1, N8: 2, N4: 4, N2: 8, N1: 16, B16: 1, B8: 2, B4: 4, B2: 8,
          R16: 1, R8: 2, R4: 4, R2: 8, R1: 16}
 REST_V = {1: 10, 21: 30}                            # a mid-staff glyph slot for rests
 

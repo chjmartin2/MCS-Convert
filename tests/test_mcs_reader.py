@@ -7,6 +7,8 @@ signature coming from accidental glyphs in the clef record. All byte values belo
 verbatim from MINUETG.MCS / SCALE.MCS.
 """
 
+import pytest
+
 from mcs_convert.mcs.reader import (
     decode_duration,
     parse,
@@ -52,14 +54,17 @@ def test_decode_duration_note_ladder():
 
 
 def test_decode_duration_beamed_notes():
-    # 0x14..0x19 are the same six note values as 0x00..0x05, beamed (value = sym - 0x14).
-    # These carry the bulk of fast runs (BUMBLE.MCD) and were previously dropped.
+    # 0x14..0x18 are the note values 32nd..half, beamed (value = sym - 0x14). These carry
+    # the bulk of fast runs (BUMBLE.MCD) and were previously dropped. 0x19 is NOT a beamed
+    # whole — the engine dispatches it to a tie handler (it once inserted phantom whole
+    # notes into CANON, ELSEWERE, BABYFACE, ...).
     assert decode_duration(0x14) == (False, 1)    # beamed 32nd
     assert decode_duration(0x15) == (False, 2)    # beamed 16th
     assert decode_duration(0x16) == (False, 4)    # beamed 8th
     assert decode_duration(0x17) == (False, 8)    # beamed quarter
     assert decode_duration(0x18) == (False, 16)   # beamed half
-    assert decode_duration(0x19) == (False, 32)   # beamed whole
+    with pytest.raises(ValueError):
+        decode_duration(0x19)                     # below-the-notes tie glyph, not a note
     assert decode_duration(0xF5) == (False, 2)    # vertical bits don't affect duration
 
 
@@ -299,10 +304,10 @@ def test_grid_is_modal_not_max(tmp_path):
     assert notes[-1].duration_ticks == 32                 # the long bar keeps its length
 
 
-def test_8va_glyph_raises_the_whole_measure(tmp_path):
-    # An 8va glyph (0x12) sitting above the notes raises the measure an octave. Here the
-    # glyph is at v4 (above), the note C6 at v10 -> sounds C7. This is the fix that put
-    # ENTERTAN's main theme back in the intro's register.
+def test_8va_glyph_raises_from_its_position(tmp_path):
+    # An 8va glyph (0x12) raises notes AFTER it an octave; the engine restores the
+    # baseline at the barline. Here the glyph leads the measure, so C6 @v10 sounds C7.
+    # This is the fix that put ENTERTAN's main theme back in the intro's register.
     body = bytes([
         0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
         0xFF, 0xFF, 2, 1, 0x92, 0x10, 0x43, 0x51,   # 8va glyph @v4, then C6 quarter @v10
@@ -313,16 +318,51 @@ def test_8va_glyph_raises_the_whole_measure(tmp_path):
     assert note.midi_note == 96 and note.octave == 1     # C6 (84) + 12 = C7
 
 
-def test_tie_mark_flags_the_preceding_note(tmp_path):
-    # A tie/slur glyph (0x13) after a note flags it as carried into the next.
+def test_notes_before_a_mid_measure_8va_stay_put(tmp_path):
+    # The engine SETS the shift when its walker passes the glyph, so earlier notes in the
+    # measure are untouched. ENTERTAN bars 5/9/13/... put the glyph after the first two
+    # notes; shifting them too is exactly the once-a-phrase wrong jump the fix removes.
     body = bytes([
-        0xFF, 0xFF, 1, 0, 0x06, 0x72,
-        0xFF, 0xFF, 2, 1, 0x43, 0x51, 0x13, 0x60,   # C6 quarter, then a tie mark
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
+        0xFF, 0xFF, 3, 1,
+        0x43, 0x21,                                 # C6 quarter @v10 x4 — before the glyph
+        0x92, 0x40,                                 # 8va glyph @v4 x8
+        0x43, 0x61,                                 # C6 quarter @v10 x12 — after it
+        0xFF, 0xFF, 0, 3,
+        0xFF, 0xFF, 0, 0,
+    ])
+    notes = _song(body, tmp_path).tracks[0].notes
+    assert notes[0].midi_note == 84 and notes[0].octave == 0   # untouched
+    assert notes[1].midi_note == 96 and notes[1].octave == 1   # raised
+
+
+def test_8va_below_the_notes_still_raises(tmp_path):
+    # The glyph's vertical placement is cosmetic: MCSDISK's handler is a bare
+    # "working shift = +0x18" whatever v is. There is no 8vb in the engine.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
+        0xFF, 0xFF, 2, 1, 0x92, 0x12, 0x43, 0x51,   # 8va glyph @v20 (below), C6 @v10
         0xFF, 0xFF, 0, 2,
         0xFF, 0xFF, 0, 0,
     ])
     note = _song(body, tmp_path).tracks[0].notes[0]
-    assert note.tied and note.midi_note == 84            # C6, tied forward
+    assert note.midi_note == 96 and note.octave == 1     # up, not down
+
+
+def test_tie_mark_flags_the_preceding_note(tmp_path):
+    # A tie/slur glyph after a note flags it as carried into the next. 0x13 is the
+    # above-the-notes form, 0x19 the below form — same effect, and 0x19 must not
+    # decode as a note (it used to become a phantom beamed whole).
+    for tie_b0 in (0x13, 0x99):                     # 0x99 = sym 0x19 with v bits set
+        body = bytes([
+            0xFF, 0xFF, 1, 0, 0x06, 0x72,
+            0xFF, 0xFF, 2, 1, 0x43, 0x51, tie_b0, 0x60,   # C6 quarter, then a tie mark
+            0xFF, 0xFF, 0, 2,
+            0xFF, 0xFF, 0, 0,
+        ])
+        notes = _song(body, tmp_path).tracks[0].notes
+        assert len(notes) == 1                            # the tie adds no note
+        assert notes[0].tied and notes[0].midi_note == 84  # C6, tied forward
 
 
 def test_scale_measure_alignment(tmp_path):

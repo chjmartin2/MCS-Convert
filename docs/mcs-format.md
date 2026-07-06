@@ -81,7 +81,10 @@ delta-sigma the sum back to 1 bit. It exists to be compared against real capture
 ```
 
 The engine literally does `AND AX,0x07E0` to extract v (image 0x1633/0x29b2) and
-dispatches `(byte0+1) & 0x1F` through a 32-entry jump table (image 0x22ac).
+dispatches `(byte0+1) & 0x1F` through a 32-entry jump table (the `jmp cs:[bx+0x2271]`
+at image 0x22ac reads the table at **image 0x22b1**; handler = table word **+ 0x40**
+— the cs base offset. Handlers verified: note stubs set duration `dh` = 4·2^n at
+0x2387–0x23a5, dot 0x245c, 8va 0x24d7, ties 0x24e5/0x24df, barline 0x22fd).
 
 ### v — the 6-bit vertical position
 1-based, top-down (smaller = higher). **Staff 1 occupies v 1..20, staff 2 v 21..41**
@@ -116,14 +119,14 @@ for note, exactly as the program displays it.
 | sym | meaning |
 |-----|---------|
 | 0x00–0x05 | note: **32nd**, 16th, 8th, quarter, half, whole → `2^n` thirty-second-ticks. `0x00` is the 32nd (the first note in the program's palette); it was originally dropped, which shortened every measure using it (ALLEGRO, DIE, …). One tick = one 32nd. |
-| 0x14–0x19 | the same six notes, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump table at image 0x22b3, entries aliasing 0x00–0x05). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. |
+| 0x14–0x18 | the note values 32nd–half, **beamed** (value = sym − 0x14). The engine dispatches these to the identical duration handlers (jump-table entries aliasing 0x00–0x04). Fast beamed runs store notes entirely this way — **BUMBLE.MCD** (Flight of the Bumblebee) is almost all `0x15` beamed-16ths; dropping them silently gutted the melody. **0x19 is NOT a beamed whole** — see 0x13/0x19 below. |
 | 0x06 / 0x0D | treble / bass clef glyph |
 | 0x07–0x0C | rest, same ladder (= note sym + 7; `0x07` = 32nd rest; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
 | 0x11 | augmentation dot — the engine adds **half the note's own duration** to the sounding note (handler at image 0x245c) |
-| 0x12 | 8va/8vb. In the clef record it octave-shifts the whole staff; **mid-measure (612×)** it shifts that measure ±1 octave — up when the glyph sits above the measure's notes, down when below (whole-measure scope; a second glyph switches from its x on). Dropping these low-clef-position notes made ENTERTAN's main theme an octave flat. |
-| 0x13 | tie/slur mark (848×) — flags the preceding note as carried into the next (same-pitch = tie, different-pitch = slur). Marked, not merged: the notes already occupy the right total time. |
-| 0x1F | the `FF FF` record marker seen as an entry |
+| 0x12 | 8va — **always +1 octave, never down**. In the clef record it sets the staff's baseline (+0x18 at image 0x1629/0x16b3 → `[0x5bbe/f]`); **mid-measure (612×)** the handler at 0x24d7 is a bare `mov [0x5bc2],0x18` — an absolute SET of the working shift **from the glyph's stream position to the end of the measure**, where the barline handler restores the baseline. The glyph's vertical placement is cosmetic; the engine has **no 8vb** and no way to shift down mid-song. (ENTERTAN bars 5/9/13/… place the glyph mid-measure: the first notes stay put, the rest jump up.) |
+| 0x13 / 0x19 | tie/slur mark drawn **above** (0x13, 425×) or **below** (0x19, 222×) its notes — handlers 0x24e5/0x24df search down/up from the glyph's v for the sounding voice and flag its pitch slot. Flags the preceding note as carried into the next (same-pitch = tie, different-pitch = slur). Marked, not merged: the notes already occupy the right total time. Decoding 0x19 as a "beamed whole" inserted 222 phantom whole notes into CANON, ELSEWERE, BABYFACE, … |
+| 0x1F | the `FF FF` record marker seen as an entry — the engine's **measure-boundary handler** (image 0x22fd): waits for sounding voices, resets both staves' octave shifts to the clef-record baselines, clears the accidental/pitch-slot table, and skips the `(count,prev)` header word. This is what makes the 8va per-measure. |
 
 **Accidentals & key signature.** `0x0e` / `0x0f` / `0x10` = natural / sharp / flat.
 Glyphs in the *clef record* build the key signature: the glyph's staff degree
@@ -182,15 +185,14 @@ sit (v 1–20 → treble, v 21–41 → bass) rather than by staff order.
 - **Mid-staff clef change** (`0x06`/`0x0D` inside a measure, 16 songs): shown as a tracker
   event marker (`G`/`F`) but pitch **re-windowing is not yet applied** — notes after a
   mid-staff clef change may read in the wrong octave in those songs.
-- Symbols 0x1A/0x1C–0x1E (rare, timing-control handlers) still unmapped. None appear in
-  enough songs to affect playback; MCSTEST.MCS + MartyPC is the way to pin them with a
-  controlled edit if a song ever sounds thin.
-- **Note-symbol dispatch could not be isolated by emulation.** The image exceeds 64 KB,
-  so the note engine's true segment base is not the image base; a Unicorn harness over
-  the isolated `0x22ac` dispatch resolves the on-screen *drawing* handlers, not the
-  playback duration path, and the latter needs the full runtime (segments, PIT timer,
-  video) reconstructed. The behaviour is instead validated end-to-end by the round-trip
-  above and by the decoded music being correct.
+- **Solved:** symbols 0x1A/0x1C–0x1E dispatch straight to the walker's next-entry code
+  (0x228b) — engine no-ops. None occur in the corpus anyway.
+- **Solved:** the note-symbol dispatch is now fully mapped statically. The 0x22ac
+  `jmp cs:[bx+0x2271]` reads the 32-entry table at image 0x22b1, and the entries are
+  cs-relative: **handler = table word + 0x40**. (An earlier reading used the table at
+  0x22b3 with raw values, which landed mid-instruction for the note stubs and mislabeled
+  the 0x12/0x13/0x19 handlers — corrected when the +0x40 mapping reproduced the
+  independently-known dot handler at 0x245c and duration setters `dh = 4·2^n`.)
 - **Absolute tempo** remains a calibration (relative steps faithful, level 1 = 120 BPM);
   the true rate is in the PIT timing loop, not yet reduced.
 - Header bytes 0x07–0x08; the exact view semantics of the five scroll bytes.

@@ -24,8 +24,8 @@ class NoteEvent:
     midi_note: int          # 0-127 (ignored when is_rest)
     velocity: int = 100     # 0-127, derived from channel volume where available
     is_rest: bool = False   # a timed silence; occupies duration but sounds nothing
-    tied: bool = False       # a tie/slur mark carries this note into the next (MCS 0x13)
-    octave: int = 0          # 8va/8vb applied: +1 up, -1 down, 0 none (MCS 0x12)
+    tied: bool = False       # a tie/slur mark carries this note into the next (MCS 0x13/0x19)
+    octave: int = 0          # 1 if under an 8va (MCS 0x12; the engine only shifts up)
 
     @property
     def end_tick(self) -> int:
