@@ -51,12 +51,19 @@ def tracker_rows(song: Song, subdiv: int = 2) -> List[Tuple[str, bool, List[str]
     for r in range(end):
         sounding = sorted(((m, s == r) for s, e, m, rest in events
                            if not rest and s <= r < e), key=lambda x: -x[0])
+        resting = [s == r for s, e, m, rest in events if rest and s <= r < e]
         cols = ["", "", "", ""]
-        for i, (midi, onset) in enumerate(sounding[:4]):
-            if onset:
-                cols[i] = midi_to_name(midi)         # name at onset; blank while held
-        if not any(cols) and any(rest and s == r for s, e, m, rest in events):
-            cols[0] = "R"                            # a rest begins, nothing else sounding
+        col = 0
+        for midi, onset in sounding:                 # sounding notes fill the top columns
+            if col >= 4:
+                break
+            cols[col] = midi_to_name(midi) if onset else ""   # name at onset, blank while held
+            col += 1
+        for onset in resting:                        # then resting voices, each as R
+            if col >= 4:
+                break
+            cols[col] = "R" if onset else ""          # R at the rest's onset, blank while held
+            col += 1
         measure, step = divmod(r, rows_per_measure) if rows_per_measure else (0, r)
         is_bar = step == 0
         label = f"{measure + 1:>3}" if is_bar else ("" if step % subdiv else f".{step}")
