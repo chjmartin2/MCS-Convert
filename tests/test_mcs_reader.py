@@ -299,6 +299,32 @@ def test_grid_is_modal_not_max(tmp_path):
     assert notes[-1].duration_ticks == 32                 # the long bar keeps its length
 
 
+def test_8va_glyph_raises_the_whole_measure(tmp_path):
+    # An 8va glyph (0x12) sitting above the notes raises the measure an octave. Here the
+    # glyph is at v4 (above), the note C6 at v10 -> sounds C7. This is the fix that put
+    # ENTERTAN's main theme back in the intro's register.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,               # treble clef
+        0xFF, 0xFF, 2, 1, 0x92, 0x10, 0x43, 0x51,   # 8va glyph @v4, then C6 quarter @v10
+        0xFF, 0xFF, 0, 2,
+        0xFF, 0xFF, 0, 0,
+    ])
+    note = _song(body, tmp_path).tracks[0].notes[0]
+    assert note.midi_note == 96 and note.octave == 1     # C6 (84) + 12 = C7
+
+
+def test_tie_mark_flags_the_preceding_note(tmp_path):
+    # A tie/slur glyph (0x13) after a note flags it as carried into the next.
+    body = bytes([
+        0xFF, 0xFF, 1, 0, 0x06, 0x72,
+        0xFF, 0xFF, 2, 1, 0x43, 0x51, 0x13, 0x60,   # C6 quarter, then a tie mark
+        0xFF, 0xFF, 0, 2,
+        0xFF, 0xFF, 0, 0,
+    ])
+    note = _song(body, tmp_path).tracks[0].notes[0]
+    assert note.tied and note.midi_note == 84            # C6, tied forward
+
+
 def test_scale_measure_alignment(tmp_path):
     song = _song(_scale_body(), tmp_path)
     by_name = {t.name: t for t in song.tracks}

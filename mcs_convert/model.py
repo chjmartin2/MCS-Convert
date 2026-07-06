@@ -24,6 +24,8 @@ class NoteEvent:
     midi_note: int          # 0-127 (ignored when is_rest)
     velocity: int = 100     # 0-127, derived from channel volume where available
     is_rest: bool = False   # a timed silence; occupies duration but sounds nothing
+    tied: bool = False       # a tie/slur mark carries this note into the next (MCS 0x13)
+    octave: int = 0          # 8va/8vb applied: +1 up, -1 down, 0 none (MCS 0x12)
 
     @property
     def end_tick(self) -> int:
@@ -59,6 +61,9 @@ class Song:
     tempo_level: Optional[int] = None           # MCS stored speed index (0..3), None if unknown
     tempo_raw: Optional[int] = None             # the raw 0x05 header word
     tempo_tick_seconds: float = 0.042           # real seconds per 32nd-tick (from header byte0)
+    # Positional annotations for the tracker's event column: (start_tick, staff_name, label),
+    # e.g. a mid-staff clef change. Not sounded — a diagnostic marker.
+    events: List[tuple] = field(default_factory=list)
 
     def add_track(self, track: Track) -> Track:
         self.tracks.append(track)

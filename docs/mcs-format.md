@@ -121,7 +121,8 @@ for note, exactly as the program displays it.
 | 0x07–0x0C | rest, same ladder (= note sym + 7; `0x07` = 32nd rest; MIN2 ground truth `0x82→0x89`) |
 | 0x0E / 0x0F / 0x10 | natural / sharp / flat glyph (engine values 0x0C, +2, −2) |
 | 0x11 | augmentation dot — the engine adds **half the note's own duration** to the sounding note (handler at image 0x245c) |
-| 0x12 | in the clef record: 8va for the staff (+0x18 = +12 semitones) |
+| 0x12 | 8va/8vb. In the clef record it octave-shifts the whole staff; **mid-measure (612×)** it shifts that measure ±1 octave — up when the glyph sits above the measure's notes, down when below (whole-measure scope; a second glyph switches from its x on). Dropping these low-clef-position notes made ENTERTAN's main theme an octave flat. |
+| 0x13 | tie/slur mark (848×) — flags the preceding note as carried into the next (same-pitch = tie, different-pitch = slur). Marked, not merged: the notes already occupy the right total time. |
 | 0x1F | the `FF FF` record marker seen as an entry |
 
 **Accidentals & key signature.** `0x0e` / `0x0f` / `0x10` = natural / sharp / flat.
@@ -178,9 +179,12 @@ sit (v 1–20 → treble, v 21–41 → bass) rather than by staff order.
   previously listed here as "note-like but no duration fits"; they are now decoded, one
   tick = one 32nd. 0x1B occurs only inside SCALES.MCS's clef record (a staff-header glyph,
   not a note) and is ignored. 0x14 (beamed 32nd) never occurs.
-- Symbols 0x13 (dispatches to a skip stub) and 0x1A/0x1C–0x1E (rare, timing-control
-  handlers) still unmapped. None appear in enough songs to affect playback; MCSTEST.MCS +
-  MartyPC is the way to pin them with a controlled edit if a song ever sounds thin.
+- **Mid-staff clef change** (`0x06`/`0x0D` inside a measure, 16 songs): shown as a tracker
+  event marker (`G`/`F`) but pitch **re-windowing is not yet applied** — notes after a
+  mid-staff clef change may read in the wrong octave in those songs.
+- Symbols 0x1A/0x1C–0x1E (rare, timing-control handlers) still unmapped. None appear in
+  enough songs to affect playback; MCSTEST.MCS + MartyPC is the way to pin them with a
+  controlled edit if a song ever sounds thin.
 - **Note-symbol dispatch could not be isolated by emulation.** The image exceeds 64 KB,
   so the note engine's true segment base is not the image base; a Unicorn harness over
   the isolated `0x22ac` dispatch resolves the on-screen *drawing* handlers, not the

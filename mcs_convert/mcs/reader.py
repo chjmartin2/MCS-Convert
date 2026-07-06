@@ -45,6 +45,7 @@ Note entry = 16-bit little-endian word (byte0, byte1):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 from typing import Dict, List, Tuple
 
 from ..model import NoteEvent, Song, Track
@@ -53,7 +54,8 @@ CLEF_TREBLE = 0x06
 CLEF_BASS = 0x0D
 SYM_NATURAL, SYM_SHARP, SYM_FLAT = 0x0E, 0x0F, 0x10
 SYM_DOT = 0x11
-SYM_OCTAVA = 0x12
+SYM_OCTAVA = 0x12         # 8va/8vb: shifts a whole measure ±1 octave (dir = glyph above/below notes)
+SYM_TIE = 0x13           # tie/slur mark: carries the preceding note into the next
 SYM_MARKER = 0x1F
 
 # The per-clef vertical windows, lifted verbatim from MCSDISK.EXE (image 0x5cb1..):
@@ -254,16 +256,52 @@ class _Slot:
     duration: int
     is_rest: bool
     midis: List[int]
+    tied: bool = False        # a 0x13 tie/slur mark follows this slot
+    octave: int = 0           # 8va/8vb applied to this slot: +1 up, -1 down
 
 
-def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
+def _octave_shift_at(oct_marks: List[Tuple[int, int]], x: int) -> int:
+    """Octave shift for a note at x-slot `x`, given the measure's 8va/8vb markers.
+    The first marker covers the whole measure; a later one switches from its x onward."""
+    if not oct_marks:
+        return 0
+    shift = oct_marks[0][1]                                # first marker = whole measure
+    for mx, direction in oct_marks:
+        if mx <= x:
+            shift = direction
+    return shift
+
+
+def _decode_measures(staff: _Staff) -> Tuple[List[List[_Slot]], List[Tuple[int, str]]]:
+    """Decode a staff into per-measure slot lists, plus (measure_index, label) event marks
+    for the tracker: '8^'/'8v' where a measure is under 8va/8vb, and 'G'/'F' for a mid-staff
+    clef change (a clef change is diagnostic only; pitch re-windowing is not applied)."""
     measures: List[List[_Slot]] = []
-    for rec in staff.records:
+    marks: List[Tuple[int, str]] = []
+    for mi, rec in enumerate(staff.records):
+        # 8va/8vb: a glyph sitting ABOVE the measure's notes shifts it up an octave, BELOW
+        # shifts it down; it governs the whole measure (a second glyph switches from its x).
+        note_vs = [vertical(b0, b1) for b0, b1 in rec.entries
+                   if _note_value(symbol(b0))[0] == "note"]
+        med = median(note_vs) if note_vs else 0
+        oct_marks = sorted((x_slot(b1), 1 if vertical(b0, b1) < med else -1)
+                           for b0, b1 in rec.entries if symbol(b0) == SYM_OCTAVA)
+        if oct_marks:
+            marks.append((mi, "8^" if oct_marks[0][1] > 0 else "8v"))
         slots: List[_Slot] = []
         measure_acc: Dict[int, int] = {}       # explicit accidentals, per position
         for b0, b1 in rec.entries:
             sym = symbol(b0)
             v = vertical(b0, b1)
+            if sym in (CLEF_TREBLE, CLEF_BASS):
+                marks.append((mi, "G" if sym == CLEF_TREBLE else "F"))
+                continue
+            if sym == SYM_OCTAVA:
+                continue                                  # applied per note below
+            if sym == SYM_TIE:
+                if slots:                                 # tie/slur carries the last slot on
+                    slots[-1].tied = True
+                continue
             if sym in (SYM_NATURAL, SYM_SHARP, SYM_FLAT):
                 # Mid-measure accidental at this position (0x0C = forced natural). The
                 # Entertainer's main theme is the chromatic D-D#-E, so 0x0f (sharp) raises.
@@ -284,15 +322,18 @@ def _decode_measures(staff: _Staff) -> List[List[_Slot]]:
                 acc = measure_acc.get(v, staff.keysig[(v - 1) % 7])
                 if acc == 0x0C:
                     acc = 0
+                oc = _octave_shift_at(oct_marks, x_slot(b1))
                 midi = staff.midi(v, acc)
+                if midi:
+                    midi += 12 * oc                       # 8va/8vb: ±1 octave
                 if slots and not slots[-1].is_rest and x_slot(b1) == slots[-1].slot_x:
                     slots[-1].midis.append(midi)          # chord: same 8-px slot
                     slots[-1].duration = max(slots[-1].duration, dur)
                 else:
-                    slots.append(_Slot(x_slot(b1), dur, False, [midi]))
-            # clefs, 8va, markers, unknown symbols: no time, no pitch
+                    slots.append(_Slot(x_slot(b1), dur, False, [midi], octave=oc))
+            # markers, unknown symbols: no time, no pitch
         measures.append(slots)
-    return measures
+    return measures, marks
 
 
 def _span(slots: List[_Slot]) -> int:
@@ -309,6 +350,7 @@ def parse(path: str) -> Song:
 
     staff_recs = split_staves(parse_records(d))
     decoded: List[Tuple[str, List[List[_Slot]]]] = []
+    staff_marks: List[Tuple[str, List[Tuple[int, str]]]] = []
     staves: List[_Staff] = []
     name_counts: Dict[str, int] = {}
     for si, recs in enumerate(staff_recs):           # all staves (a few songs have 3-4)
@@ -317,7 +359,9 @@ def parse(path: str) -> Song:
         base = {CLEF_TREBLE: "Treble", CLEF_BASS: "Bass"}.get(staff.clef, f"Staff {si}")
         name_counts[base] = name_counts.get(base, 0) + 1
         name = base if name_counts[base] == 1 else f"{base} {name_counts[base]}"
-        decoded.append((name, _decode_measures(staff)))
+        measures, marks = _decode_measures(staff)
+        decoded.append((name, measures))
+        staff_marks.append((name, marks))
 
     def _fills_measure(slots: List[_Slot]) -> bool:
         # Notation convention: a lone whole rest means "rest the whole measure",
@@ -345,6 +389,13 @@ def parse(path: str) -> Song:
     for dur in m_dur:
         m_start.append(m_start[-1] + dur)
 
+    # 8va/8vb spans and mid-staff clef changes -> tracker event markers (at measure start).
+    for name, marks in staff_marks:
+        for mi, label in marks:
+            if mi < len(m_start):
+                song.events.append((m_start[mi], name, label))
+    song.events.sort()
+
     # --- display metadata --------------------------------------------------
     if len(d) >= 0x07:
         song.tempo_raw = _u16(d, 0x05)
@@ -371,11 +422,11 @@ def parse(path: str) -> Song:
             for s in slots:
                 if s.is_rest:
                     track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
-                                        midi_note=0, is_rest=True))
+                                        midi_note=0, is_rest=True, tied=s.tied))
                 else:
                     for m in s.midis:
                         track.add(NoteEvent(start_tick=tick, duration_ticks=s.duration,
-                                            midi_note=m))
+                                            midi_note=m, tied=s.tied, octave=s.octave))
                 tick += s.duration
         song.add_track(track)
     return song

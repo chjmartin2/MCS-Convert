@@ -105,7 +105,7 @@ class PlayerApp:
     def _build_tracker(self) -> None:
         frame = tk.Frame(self.root, bg=_BG)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
-        cols = ("bar", "v1", "v2", "v3", "v4")       # 4 voices, highest -> lowest
+        cols = ("bar", "evt", "v1", "v2", "v3", "v4")   # events + 4 voices, highest -> lowest
         style = ttk.Style()
         # Explicit light grid: set foreground too, so a shaded row never hides its text
         # (the old bar tag set only a dark background -> black-on-black first note).
@@ -118,8 +118,9 @@ class PlayerApp:
                                 font=("TkDefaultFont", 9, "bold"))
         self.tree.tag_configure("playhead", background="#ff8f1f", foreground="#ffffff",  # now-playing
                                 font=("TkDefaultFont", 9, "bold"))
-        for c, w in (("bar", 46), ("v1", 88), ("v2", 88), ("v3", 88), ("v4", 88)):
-            self.tree.heading(c, text=c.upper() if c != "bar" else "Bar")
+        heads = {"bar": "Bar", "evt": "Evt"}
+        for c, w in (("bar", 44), ("evt", 40), ("v1", 96), ("v2", 96), ("v3", 96), ("v4", 96)):
+            self.tree.heading(c, text=heads.get(c, c.upper()))
             self.tree.column(c, width=w, anchor="center")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -155,19 +156,20 @@ class PlayerApp:
         self._stop_follow()                  # a new song invalidates the old playhead
         self._last_row = None
         self.tree.delete(*self.tree.get_children())
-        # 4-voice tracker: one row per 16th-tick, sounding notes ranked highest -> lowest.
+        # 4-voice tracker: one row per 32nd-tick, sounding notes ranked highest -> lowest.
         rows = tracker_rows(self.song)
         self._rows = rows
-        for idx, (lbl, is_bar, cols) in enumerate(rows):
+        for idx, (lbl, is_bar, evt, cols) in enumerate(rows):
             tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
-            self.tree.insert("", "end", values=(lbl, *cols),
+            self.tree.insert("", "end", values=(lbl, evt, *cols),
                              tags=(tag,) if tag else ())
         self.tree.yview_moveto(0.0)          # always show the first row after a load
         self.tree.update_idletasks()         # force the grid to repaint now
 
         # Stamp the decoded first note into the title so THIS window self-identifies —
         # if the title and the grid ever disagree, this window is running stale code.
-        first = next((c for _, _, cols in rows for c in cols if c and c != "R"), "?")
+        first = next((c.split(":")[0] for _, _, _, cols in rows
+                      for c in cols if c and not c.startswith("R")), "?")
         self.root.title(f"MCS-Convert — {os.path.basename(path)}  (first note {first})")
 
         self.meta_vars["Time"].set(self.song.time_signature or "—")
