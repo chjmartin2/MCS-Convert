@@ -33,7 +33,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from ..audio import Player, synth_song, tempo_bpm, wav_bytes
 from ..mcs.reader import parse
-from ..pitch import midi_to_name
+from ..tracker import tracker_rows, tracker_text
 
 _BG = "#12141a"
 _FG = "#d7dae0"
@@ -67,9 +67,12 @@ class PlayerApp:
         self.play_btn.pack(side="left", padx=(8, 0))
         self.stop_btn = tk.Button(bar, text="■ Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
-        self.export_btn = tk.Button(bar, text="⬇ Export WAV…", command=self.export_wav,
+        self.export_btn = tk.Button(bar, text="⬇ WAV…", command=self.export_wav,
                                     state="disabled")
         self.export_btn.pack(side="left", padx=(12, 0))
+        self.track_btn = tk.Button(bar, text="⬇ Tracker…", command=self.export_tracker,
+                                   state="disabled")
+        self.track_btn.pack(side="left", padx=(4, 0))
 
         # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
         # rendering (see audio._render_pcspeaker), for comparing against real hardware.
@@ -96,10 +99,11 @@ class PlayerApp:
     def _build_tracker(self) -> None:
         frame = tk.Frame(self.root, bg=_BG)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
-        cols = ("step", "treble", "bass")
+        cols = ("bar", "v1", "v2", "v3", "v4")       # 4 voices, highest -> lowest
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", height=24)
-        for c, w in (("step", 60), ("treble", 200), ("bass", 200)):
-            self.tree.heading(c, text=c.title())
+        self.tree.tag_configure("bar", background="#1b1f2a")
+        for c, w in (("bar", 46), ("v1", 88), ("v2", 88), ("v3", 88), ("v4", 88)):
+            self.tree.heading(c, text=c.upper() if c != "bar" else "Bar")
             self.tree.column(c, width=w, anchor="center")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -129,24 +133,14 @@ class PlayerApp:
         self._populate(path)
         self.play_btn.configure(state="normal")
         self.export_btn.configure(state="normal")
+        self.track_btn.configure(state="normal")
 
     def _populate(self, path: str) -> None:
         self.tree.delete(*self.tree.get_children())
-        by_name = {t.name: t for t in self.song.tracks}
-        treble = by_name.get("Treble", self.song.tracks[0] if self.song.tracks else None)
-        bass = by_name.get("Bass")
-        tnotes = treble.notes if treble else []
-        bnotes = bass.notes if bass else []
-
-        def label(notes, i):
-            if i >= len(notes):
-                return ""
-            n = notes[i]
-            return "— rest" if n.is_rest else midi_to_name(n.midi_note)
-
-        for i in range(max(len(tnotes), len(bnotes))):
-            self.tree.insert("", "end",
-                             values=(i + 1, label(tnotes, i), label(bnotes, i)))
+        # 4-voice tracker: 32nd-note rows, sounding notes ranked highest -> lowest.
+        for lbl, is_bar, cols in tracker_rows(self.song):
+            self.tree.insert("", "end", values=(lbl, *cols),
+                             tags=("bar",) if is_bar else ())
 
         self.meta_vars["Time"].set(self.song.time_signature or "—")
         self.meta_vars["Key"].set(self.song.key_signature or "—")
@@ -195,6 +189,23 @@ class PlayerApp:
             messagebox.showerror("Cannot write WAV", str(exc))
             return
         self.status.configure(text=f"Exported {len(wav)} bytes → {os.path.basename(out)}")
+
+    def export_tracker(self) -> None:
+        if not self.song:
+            return
+        default = os.path.splitext(os.path.basename(getattr(self, "path", "song")))[0] + ".txt"
+        out = filedialog.asksaveasfilename(
+            title="Export tracker grid as text", defaultextension=".txt",
+            initialfile=default, filetypes=[("Text", "*.txt")])
+        if not out:
+            return
+        try:
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(tracker_text(self.song))
+        except OSError as exc:
+            messagebox.showerror("Cannot write tracker", str(exc))
+            return
+        self.status.configure(text=f"Exported tracker → {os.path.basename(out)}")
 
     def stop(self) -> None:
         self.player.stop()
