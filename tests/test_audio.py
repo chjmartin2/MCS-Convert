@@ -2,7 +2,9 @@ import io
 import sys
 import wave
 
-from mcs_convert.audio import Player, midi_to_freq, synth_song, tempo_bpm, wav_bytes
+from mcs_convert.audio import (
+    Player, _note_events, midi_to_freq, render_song, synth_song, tempo_bpm, wav_bytes,
+)
 from mcs_convert.mcs.reader import tick_seconds_for
 from mcs_convert.model import NoteEvent, Song, Track
 
@@ -40,6 +42,46 @@ def test_pcspeaker_mode_is_one_bit_and_polyphonic():
     assert len(np.unique(samp)) == 2
     # and it is not silent
     assert np.abs(samp).mean() > 1000
+
+
+def test_tied_notes_render_as_one_event():
+    # AXEL.MCD bar 3.28: an eighth D5 tied into a half-note D5. Rendered separately, the
+    # joint restarts phase and re-fades — an audible pop. The synth must merge the whole
+    # tied chain (here three links) into one seamless event.
+    notes = [
+        NoteEvent(start_tick=0, duration_ticks=4, midi_note=74, tied=True),
+        NoteEvent(start_tick=4, duration_ticks=16, midi_note=74, tied=True),
+        NoteEvent(start_tick=20, duration_ticks=8, midi_note=74),
+        NoteEvent(start_tick=28, duration_ticks=4, midi_note=76),
+    ]
+    assert _note_events(notes) == [(0, 28, 74), (28, 4, 76)]
+
+
+def test_slur_and_gapped_tie_do_not_merge():
+    # A tie to a different pitch is a slur — both onsets stay. A tied note with nothing
+    # abutting it (transcription quirk) also stays put.
+    notes = [
+        NoteEvent(start_tick=0, duration_ticks=4, midi_note=74, tied=True),
+        NoteEvent(start_tick=4, duration_ticks=4, midi_note=76),
+        NoteEvent(start_tick=12, duration_ticks=4, midi_note=74, tied=True),
+    ]
+    assert _note_events(notes) == [(0, 4, 74), (4, 4, 76), (12, 4, 74)]
+
+
+def test_voice_channels_rank_highest_first():
+    import numpy as np
+    # A two-note chord: the higher note must land on channel 0 (the tracker's v1),
+    # the lower on channel 1, and the unused channels stay silent.
+    song = Song(title="chord")
+    tr = Track(name="T")
+    tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=60))
+    tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=72))
+    song.add_track(tr)
+    master, voices, sr = render_song(song, waveform="pcspeaker", step_seconds=0.05)
+    assert len(voices) == 4 and all(len(v) == len(master) for v in voices)
+    zc = [int(np.sum(np.abs(np.diff(np.sign(v))) > 0)) for v in voices]
+    assert zc[0] > zc[1] > 0          # v1 = higher octave = more zero crossings
+    assert zc[2] == zc[3] == 0        # v3/v4 silent
 
 
 def _demo_song():

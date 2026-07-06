@@ -18,11 +18,53 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .model import Song
+from .model import NoteEvent, Song
 
 
 def midi_to_freq(midi: int) -> float:
     return 440.0 * 2.0 ** ((midi - 69) / 12.0)
+
+
+def _note_events(notes: List[NoteEvent]) -> List[Tuple[int, int, int]]:
+    """(start_tick, duration_ticks, midi) for sounding notes, with tied same-pitch chains
+    merged into ONE event. A tie means "don't re-attack": rendered as two notes, the
+    second restarts phase and re-fades, which pops audibly (AXEL.MCD bar 3.28's D5~ into
+    a half-note D5). A tie to a *different* pitch is a slur and keeps its own onset."""
+    sounding = [n for n in notes if not n.is_rest]
+    starts = {}
+    for i, n in enumerate(sounding):
+        starts.setdefault((n.start_tick, n.midi_note), i)
+    consumed: set = set()
+    events: List[Tuple[int, int, int]] = []
+    for i, n in enumerate(sounding):
+        if i in consumed:
+            continue
+        dur, cur = n.duration_ticks, n
+        while cur.tied:
+            j = starts.get((n.start_tick + dur, n.midi_note))
+            if j is None or j in consumed:
+                break
+            consumed.add(j)
+            cur = sounding[j]
+            dur += cur.duration_ticks
+        events.append((n.start_tick, dur, n.midi_note))
+    return events
+
+
+def _allocate_voices(per_track: List[List[Tuple[int, int, int]]], n: int = 4
+                     ) -> List[List[Tuple[int, int, int]]]:
+    """Deal events onto n voice channels: at each onset the highest pitch takes the
+    first free channel, so channel 0 is the tracker's v1. Overflow (shouldn't happen —
+    MCS itself has four voices) doubles up on the channel that frees soonest."""
+    evs = sorted((e for track in per_track for e in track), key=lambda e: (e[0], -e[2]))
+    ends = [0] * n
+    chans: List[List[Tuple[int, int, int]]] = [[] for _ in range(n)]
+    for e in evs:
+        free = [i for i in range(n) if ends[i] <= e[0]]
+        i = free[0] if free else min(range(n), key=ends.__getitem__)
+        chans[i].append(e)
+        ends[i] = max(ends[i], e[0] + e[1])
+    return chans
 
 
 def tempo_bpm(tick_seconds: float) -> float:
@@ -68,7 +110,7 @@ def _render_track(events: List[Tuple[int, int, int]], sr: int, step: float,
     return out
 
 
-def _render_pcspeaker(song: Song, sr: int, step: float) -> np.ndarray:
+def _render_pcspeaker(events: List[Tuple[int, int, int]], sr: int, step: float) -> np.ndarray:
     """Reproduce MCS's 4-voice PC-speaker rendering.
 
     The real engine (MCSDISK.EXE loop at image 0x1929) runs four phase accumulators, one
@@ -78,8 +120,6 @@ def _render_pcspeaker(song: Song, sr: int, step: float) -> np.ndarray:
     sum back to 1 bit with first-order delta-sigma (PDM), which is what gives the speaker
     its gritty texture. Comparable directly against real captures. See docs/mcs-format.md.
     """
-    events = [(n.start_tick, n.duration_ticks, n.midi_note)
-              for tr in song.tracks for n in tr.notes if not n.is_rest]
     if not events:
         return np.zeros(1, dtype=np.float32)
     total = int(max(s + d for s, d, _ in events) * step * sr) + 1
@@ -100,30 +140,64 @@ def _render_pcspeaker(song: Song, sr: int, step: float) -> np.ndarray:
     return (bits * 2.0 - 1.0).astype(np.float32) * 0.6
 
 
+def _render_voice_bits(events: List[Tuple[int, int, int]], sr: int, step: float,
+                       total: int) -> np.ndarray:
+    """One voice's own 1-bit square (±0.6 while sounding, 0 when silent) — the scope's
+    view of what that voice contributes to the PC-speaker mix."""
+    out = np.zeros(total, dtype=np.float32)
+    for start, dur, midi in events:
+        pos = int(start * step * sr)
+        ns = min(int(dur * step * sr), total - pos)
+        if ns <= 0:
+            continue
+        phase = midi_to_freq(midi) * np.arange(pos, pos + ns, dtype=np.float64) / sr
+        out[pos:pos + ns] = ((np.mod(phase, 1.0) < 0.5).astype(np.float32) * 2.0 - 1.0) * 0.6
+    return out
+
+
+def render_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.0625,
+                amplitude: float = 0.35, waveform: str = "square"
+                ) -> Tuple[np.ndarray, List[np.ndarray], int]:
+    """Render (master, four voice channels, sample_rate) as float32 arrays in [-1, 1].
+
+    The master is the playback mix (synth_song wraps it in PCM); the four channels are
+    the same notes dealt onto MCS's voices (channel 0 = highest, like the tracker's v1)
+    for the oscilloscope view. Tied same-pitch notes are merged before rendering."""
+    per_track = [_note_events(tr.notes) for tr in song.tracks]
+    chans = _allocate_voices(per_track)
+    silent = np.zeros(1, dtype=np.float32)
+    if not any(per_track):
+        return silent, [silent] * 4, sample_rate
+    if waveform == "pcspeaker":
+        flat = [e for track in per_track for e in track]
+        master = _render_pcspeaker(flat, sample_rate, step_seconds)
+        voices = [_render_voice_bits(c, sample_rate, step_seconds, len(master))
+                  for c in chans]
+        return master, voices, sample_rate
+    bufs = [_render_track(c, sample_rate, step_seconds, amplitude, waveform) if c else silent
+            for c in chans]
+    length = max(len(b) for b in bufs)
+    mix = np.zeros(length, dtype=np.float32)
+    for b in bufs:
+        mix[:len(b)] += b
+    peak = float(np.max(np.abs(mix))) or 1.0
+    gain = 0.9 / peak
+    voices = [np.pad(b, (0, length - len(b))) * gain for b in bufs]
+    return mix * gain, voices, sample_rate
+
+
+def pcm16(buf: np.ndarray) -> bytes:
+    """Float [-1, 1] buffer -> mono 16-bit PCM bytes; b'' when silent (nothing to play)."""
+    if not np.any(buf):
+        return b""
+    return (buf * 32767.0).astype("<i2").tobytes()
+
+
 def synth_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.0625,
                amplitude: float = 0.35, waveform: str = "square") -> Tuple[bytes, int]:
     """Render every track (mixed) to mono 16-bit PCM. Returns (pcm_bytes, sample_rate)."""
-    if waveform == "pcspeaker":
-        mix = _render_pcspeaker(song, sample_rate, step_seconds)
-        if not np.any(mix):
-            return b"", sample_rate
-        return (mix * 32767.0).astype("<i2").tobytes(), sample_rate
-    tracks = []
-    for tr in song.tracks:
-        events = [(n.start_tick, n.duration_ticks, n.midi_note)
-                  for n in tr.notes if not n.is_rest]
-        if events:
-            tracks.append(_render_track(events, sample_rate, step_seconds, amplitude, waveform))
-    if not tracks:
-        return b"", sample_rate
-    length = max(len(t) for t in tracks)
-    mix = np.zeros(length, dtype=np.float32)
-    for t in tracks:
-        mix[:len(t)] += t
-    peak = float(np.max(np.abs(mix))) or 1.0
-    mix = (mix / peak) * 0.9
-    pcm = (mix * 32767.0).astype("<i2").tobytes()
-    return pcm, sample_rate
+    master, _, sr = render_song(song, sample_rate, step_seconds, amplitude, waveform)
+    return pcm16(master), sr
 
 
 def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:

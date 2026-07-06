@@ -32,13 +32,17 @@ import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from ..audio import Player, synth_song, tempo_bpm, wav_bytes
+import numpy as np
+
+from ..audio import Player, pcm16, render_song, tempo_bpm, wav_bytes
 from ..mcs.reader import parse
 from ..tracker import tracker_rows, tracker_text
 
 _BG = "#12141a"
 _FG = "#d7dae0"
 _ACCENT = "#7fd1b9"
+_SCOPE_LINE = "#00ff41"      # phosphor green
+_SCOPE_DIM = "#0c3d1e"       # midline / frame green
 
 
 class PlayerApp:
@@ -51,6 +55,9 @@ class PlayerApp:
         self._follow_id = None      # pending root.after id for the playhead loop
         self._play_start = None     # wall-clock time playback began
         self._last_row = None       # row currently under the playhead
+        self._scope_win = None      # oscilloscope Toplevel (None until opened)
+        self._scope_panels = []     # (canvas, line_item, w, h) — v1..v4 then master
+        self._scope_data = None     # (master, voices, sr) buffers from the last render
         root.title("MCS-Convert — Player")
         root.configure(bg=_BG)
         root.geometry("560x640")
@@ -79,6 +86,8 @@ class PlayerApp:
         self.track_btn = tk.Button(bar, text="⬇ Tracker…", command=self.export_tracker,
                                    state="disabled")
         self.track_btn.pack(side="left", padx=(4, 0))
+        tk.Button(bar, text="〰 Scope", command=self.open_scope).pack(side="left",
+                                                                     padx=(12, 0))
 
         # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
         # rendering (see audio._render_pcspeaker), for comparing against real hardware.
@@ -155,6 +164,8 @@ class PlayerApp:
     def _populate(self, path: str) -> None:
         self._stop_follow()                  # a new song invalidates the old playhead
         self._last_row = None
+        self._scope_data = None              # ...and the old scope buffers
+        self._draw_scope(None)
         self.tree.delete(*self.tree.get_children())
         # 4-voice tracker: one row per 32nd-tick, sounding notes ranked highest -> lowest.
         rows = tracker_rows(self.song)
@@ -183,10 +194,14 @@ class PlayerApp:
                  f"{total} notes ({rests} rests).")
 
     def _render(self):
-        """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None."""
+        """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None.
+        Also stashes the per-voice buffers that drive the oscilloscope."""
         # Timing comes from the file's own tempo (header byte 0); voice from the dropdown.
-        pcm, sr = synth_song(self.song, step_seconds=self.song.tempo_tick_seconds,
-                             waveform=self._voices[self.voice.get()])
+        master, voices, sr = render_song(self.song,
+                                         step_seconds=self.song.tempo_tick_seconds,
+                                         waveform=self._voices[self.voice.get()])
+        self._scope_data = (master, voices, sr)
+        pcm = pcm16(master)
         return wav_bytes(pcm, sr) if pcm else None
 
     def play(self) -> None:
@@ -212,13 +227,16 @@ class PlayerApp:
     def _follow_playhead(self) -> None:
         if self._play_start is None or not self._children:
             return
-        row = int((time.time() - self._play_start) / self._step)
+        elapsed = time.time() - self._play_start
+        row = int(elapsed / self._step)
         if row >= len(self._children):                     # played past the last row
             self._stop_follow()
             self.stop_btn.configure(state="disabled")
+            self._draw_scope(None)                         # flatline the scopes
             return
         if row != self._last_row:
             self._move_playhead(row)
+        self._draw_scope(elapsed)
         self._follow_id = self.root.after(30, self._follow_playhead)
 
     def _move_playhead(self, row: int) -> None:
@@ -245,6 +263,73 @@ class PlayerApp:
             self.root.after_cancel(self._follow_id)
             self._follow_id = None
         self._play_start = None
+
+    # ---- oscilloscope: four voice scopes + a master, fed by render_song ------
+    def open_scope(self) -> None:
+        """Open (or raise) the oscilloscope window: v1..v4 in a 2×2 grid, master below."""
+        if self._scope_win is not None and self._scope_win.winfo_exists():
+            self._scope_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("MCS-Convert — Oscilloscope")
+        win.configure(bg=_BG)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self._close_scope)
+        self._scope_win = win
+        self._scope_panels = []
+        vw, vh, mh = 224, 92, 116
+        grid = tk.Frame(win, bg=_BG)
+        grid.pack(padx=8, pady=(8, 2))
+        for k in range(4):                                  # v1 v2 / v3 v4
+            c = tk.Canvas(grid, width=vw, height=vh, bg="#000000", highlightthickness=1,
+                          highlightbackground=_SCOPE_DIM)
+            c.grid(row=k // 2, column=k % 2, padx=3, pady=3)
+            self._scope_panels.append(self._scope_panel(c, f"v{k + 1}", vw, vh))
+        mw = 2 * vw + 2 * 3 + 2                             # span the voice grid exactly
+        m = tk.Canvas(win, width=mw, height=mh, bg="#000000", highlightthickness=1,
+                      highlightbackground=_SCOPE_DIM)
+        m.pack(padx=11, pady=(2, 8))
+        self._scope_panels.append(self._scope_panel(m, "master", mw, mh))
+        self._draw_scope(None if self._play_start is None
+                         else time.time() - self._play_start)
+
+    def _scope_panel(self, c: tk.Canvas, label: str, w: int, h: int):
+        c.create_line(2, h / 2, w - 2, h / 2, fill=_SCOPE_DIM)          # midline
+        c.create_text(6, 4, text=label, anchor="nw", fill=_SCOPE_DIM,
+                      font=("TkDefaultFont", 8))
+        item = c.create_line(2, h / 2, w - 2, h / 2, fill=_SCOPE_LINE)  # the trace
+        return (c, item, w, h)
+
+    def _close_scope(self) -> None:
+        if self._scope_win is not None:
+            self._scope_win.destroy()
+        self._scope_win = None
+        self._scope_panels = []
+
+    def _draw_scope(self, elapsed: float | None) -> None:
+        """Draw a ~30 ms window of each voice (and the master) at the playback position;
+        None flatlines all five traces."""
+        if self._scope_win is None or not self._scope_win.winfo_exists():
+            return
+        bufs = [None] * 5
+        idx, span = 0, 0
+        if elapsed is not None and self._scope_data is not None:
+            master, voices, sr = self._scope_data
+            bufs = list(voices[:4]) + [None] * (4 - len(voices)) + [master]
+            idx = max(0, int(elapsed * sr))
+            span = int(0.030 * sr)
+        for buf, (c, item, w, h) in zip(bufs, self._scope_panels):
+            mid = h / 2
+            seg = buf[idx:idx + span] if buf is not None else ()
+            n = min(w // 2, len(seg))
+            if n < 2:
+                c.coords(item, 2, mid, w - 2, mid)
+                continue
+            ys = seg[np.linspace(0, len(seg) - 1, n).astype(int)]
+            pts = np.empty(2 * n)
+            pts[0::2] = np.linspace(2, w - 2, n)
+            pts[1::2] = mid - ys * (mid - 8)
+            c.coords(item, *pts.tolist())
 
     def export_wav(self) -> None:
         if not self.song:
@@ -288,6 +373,7 @@ class PlayerApp:
         self.player.stop()
         self._stop_follow()          # leave the playhead frozen where it stopped
         self.stop_btn.configure(state="disabled")
+        self._draw_scope(None)       # flatline the scopes
 
 
 def main(argv=None) -> int:
