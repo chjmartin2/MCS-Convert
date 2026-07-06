@@ -28,6 +28,7 @@ if __package__ in (None, ""):
 
 import os
 import sys
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -45,6 +46,11 @@ class PlayerApp:
         self.root = root
         self.player = Player()
         self.song = None
+        self._rows = []             # cached tracker_rows for the loaded song
+        self._children = ()         # cached tree row ids, indexed by 16th-tick
+        self._follow_id = None      # pending root.after id for the playhead loop
+        self._play_start = None     # wall-clock time playback began
+        self._last_row = None       # row currently under the playhead
         root.title("MCS-Convert — Player")
         root.configure(bg=_BG)
         root.geometry("560x640")
@@ -110,6 +116,8 @@ class PlayerApp:
         self.tree.tag_configure("stripe", background="#e8f6e8", foreground="#141414")  # zebra
         self.tree.tag_configure("bar", background="#bfe3bf", foreground="#0b3d0b",      # bar start
                                 font=("TkDefaultFont", 9, "bold"))
+        self.tree.tag_configure("playhead", background="#ff8f1f", foreground="#ffffff",  # now-playing
+                                font=("TkDefaultFont", 9, "bold"))
         for c, w in (("bar", 46), ("v1", 88), ("v2", 88), ("v3", 88), ("v4", 88)):
             self.tree.heading(c, text=c.upper() if c != "bar" else "Bar")
             self.tree.column(c, width=w, anchor="center")
@@ -144,9 +152,12 @@ class PlayerApp:
         self.track_btn.configure(state="normal")
 
     def _populate(self, path: str) -> None:
+        self._stop_follow()                  # a new song invalidates the old playhead
+        self._last_row = None
         self.tree.delete(*self.tree.get_children())
-        # 4-voice tracker: 32nd-note rows, sounding notes ranked highest -> lowest.
+        # 4-voice tracker: one row per 16th-tick, sounding notes ranked highest -> lowest.
         rows = tracker_rows(self.song)
+        self._rows = rows
         for idx, (lbl, is_bar, cols) in enumerate(rows):
             tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
             self.tree.insert("", "end", values=(lbl, *cols),
@@ -185,6 +196,53 @@ class PlayerApp:
             return
         self.player.play(wav)
         self.stop_btn.configure(state="normal")
+        self._start_follow()
+
+    # ---- playhead: scroll the grid in time with playback --------------------
+    def _start_follow(self) -> None:
+        self._stop_follow()
+        self._clear_playhead()
+        self._children = self.tree.get_children()
+        self._step = self.song.tempo_tick_seconds or 0.1   # seconds per 16th-tick = one row
+        self._play_start = time.time()
+        self._follow_playhead()
+
+    def _follow_playhead(self) -> None:
+        if self._play_start is None or not self._children:
+            return
+        row = int((time.time() - self._play_start) / self._step)
+        if row >= len(self._children):                     # played past the last row
+            self._stop_follow()
+            self.stop_btn.configure(state="disabled")
+            return
+        if row != self._last_row:
+            self._move_playhead(row)
+        self._follow_id = self.root.after(30, self._follow_playhead)
+
+    def _move_playhead(self, row: int) -> None:
+        self._clear_playhead()                             # restore the row we're leaving
+        iid = self._children[row]
+        self.tree.item(iid, tags=("playhead",))
+        self._last_row = row
+        n = len(self._children)
+        visible = max(1, self.tree.winfo_height() // 20)   # rowheight is 20px
+        top = min(max(0, row - visible // 2), max(0, n - visible))   # keep it centred
+        self.tree.yview_moveto(top / n if n else 0.0)
+
+    def _clear_playhead(self) -> None:
+        """Give the row under the playhead its normal zebra/bar styling back."""
+        if self._last_row is None or not (0 <= self._last_row < len(self._children)):
+            return
+        idx = self._last_row
+        is_bar = self._rows[idx][1] if idx < len(self._rows) else False
+        tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
+        self.tree.item(self._children[idx], tags=(tag,) if tag else ())
+
+    def _stop_follow(self) -> None:
+        if self._follow_id is not None:
+            self.root.after_cancel(self._follow_id)
+            self._follow_id = None
+        self._play_start = None
 
     def export_wav(self) -> None:
         if not self.song:
@@ -226,6 +284,8 @@ class PlayerApp:
 
     def stop(self) -> None:
         self.player.stop()
+        self._stop_follow()          # leave the playhead frozen where it stopped
+        self.stop_btn.configure(state="disabled")
 
 
 def main(argv=None) -> int:
