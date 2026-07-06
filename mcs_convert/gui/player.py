@@ -97,6 +97,16 @@ class PlayerApp:
         ttk.Combobox(bar, textvariable=self.voice, width=11, state="readonly",
                      values=list(self._voices)).pack(side="right")
 
+        # Volume scales the rendered master (winsound has no live volume control, so it
+        # takes effect on the next Play). Linear: 50% slider = 50% amplitude on the scope.
+        self.volume = tk.DoubleVar(value=80.0)
+        tk.Scale(bar, from_=0, to=100, orient="horizontal", variable=self.volume,
+                 showvalue=False, length=90, bg=_BG, troughcolor="#2a2e3a", bd=0,
+                 highlightthickness=0, activebackground=_ACCENT,
+                 sliderrelief="flat").pack(side="right", padx=(0, 10))
+        tk.Label(bar, text="Vol", bg=_BG, fg=_ACCENT,
+                 font=("TkDefaultFont", 8)).pack(side="right", padx=(0, 4))
+
     def _build_meta(self) -> None:
         # Read-only song metadata extracted from the file. Playback follows these; there
         # are no manual overrides — the point is to reproduce what the .MCS actually stores.
@@ -193,13 +203,17 @@ class PlayerApp:
             text=f"{os.path.basename(path)} — {len(self.song.tracks)} staff/staves, "
                  f"{total} notes ({rests} rests).")
 
-    def _render(self):
+    def _render(self, gain: float = 1.0):
         """Synthesize the loaded song to WAV bytes at its own tempo. Returns bytes or None.
-        Also stashes the per-voice buffers that drive the oscilloscope."""
+        Also stashes the per-voice buffers that drive the oscilloscope (gain applied, so
+        the scope shows the amplitude actually being played)."""
         # Timing comes from the file's own tempo (header byte 0); voice from the dropdown.
         master, voices, sr = render_song(self.song,
                                          step_seconds=self.song.tempo_tick_seconds,
                                          waveform=self._voices[self.voice.get()])
+        if gain != 1.0:
+            master = master * gain
+            voices = [v * gain for v in voices]
         self._scope_data = (master, voices, sr)
         pcm = pcm16(master)
         return wav_bytes(pcm, sr) if pcm else None
@@ -207,9 +221,9 @@ class PlayerApp:
     def play(self) -> None:
         if not self.song:
             return
-        wav = self._render()
+        wav = self._render(gain=self.volume.get() / 100.0)
         if wav is None:
-            self.status.configure(text="Nothing to play (no decoded notes).")
+            self.status.configure(text="Nothing to play (no decoded notes, or volume 0).")
             return
         self.player.play(wav)
         self.stop_btn.configure(state="normal")
@@ -266,39 +280,61 @@ class PlayerApp:
 
     # ---- oscilloscope: four voice scopes + a master, fed by render_song ------
     def open_scope(self) -> None:
-        """Open (or raise) the oscilloscope window: v1..v4 in a 2×2 grid, master below."""
+        """Open (or raise) the oscilloscope window: v1..v4 in a 2×2 grid, master below.
+        The window is resizable — every canvas tracks its cell and redraws to size."""
         if self._scope_win is not None and self._scope_win.winfo_exists():
             self._scope_win.lift()
             return
         win = tk.Toplevel(self.root)
         win.title("MCS-Convert — Oscilloscope")
         win.configure(bg=_BG)
-        win.resizable(False, False)
+        win.minsize(380, 300)
         win.protocol("WM_DELETE_WINDOW", self._close_scope)
+        win.rowconfigure(0, weight=2)                       # voice grid gets 2/3
+        win.rowconfigure(1, weight=1)                       # master gets 1/3
+        win.columnconfigure(0, weight=1)
         self._scope_win = win
         self._scope_panels = []
-        vw, vh, mh = 224, 92, 116
         grid = tk.Frame(win, bg=_BG)
-        grid.pack(padx=8, pady=(8, 2))
+        grid.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 2))
+        for rc in (0, 1):
+            grid.rowconfigure(rc, weight=1)
+            grid.columnconfigure(rc, weight=1)
         for k in range(4):                                  # v1 v2 / v3 v4
-            c = tk.Canvas(grid, width=vw, height=vh, bg="#000000", highlightthickness=1,
+            c = tk.Canvas(grid, width=224, height=92, bg="#000000", highlightthickness=1,
                           highlightbackground=_SCOPE_DIM)
-            c.grid(row=k // 2, column=k % 2, padx=3, pady=3)
-            self._scope_panels.append(self._scope_panel(c, f"v{k + 1}", vw, vh))
-        mw = 2 * vw + 2 * 3 + 2                             # span the voice grid exactly
-        m = tk.Canvas(win, width=mw, height=mh, bg="#000000", highlightthickness=1,
+            c.grid(row=k // 2, column=k % 2, padx=3, pady=3, sticky="nsew")
+            self._scope_panels.append(self._scope_panel(c, f"v{k + 1}"))
+        m = tk.Canvas(win, width=458, height=116, bg="#000000", highlightthickness=1,
                       highlightbackground=_SCOPE_DIM)
-        m.pack(padx=11, pady=(2, 8))
-        self._scope_panels.append(self._scope_panel(m, "master", mw, mh))
+        m.grid(row=1, column=0, sticky="nsew", padx=11, pady=(2, 8))
+        self._scope_panels.append(self._scope_panel(m, "master"))
         self._draw_scope(None if self._play_start is None
                          else time.time() - self._play_start)
 
-    def _scope_panel(self, c: tk.Canvas, label: str, w: int, h: int):
-        c.create_line(2, h / 2, w - 2, h / 2, fill=_SCOPE_DIM)          # midline
+    def _scope_panel(self, c: tk.Canvas, label: str):
+        midline = c.create_line(0, 0, 0, 0, fill=_SCOPE_DIM)
         c.create_text(6, 4, text=label, anchor="nw", fill=_SCOPE_DIM,
                       font=("TkDefaultFont", 8))
-        item = c.create_line(2, h / 2, w - 2, h / 2, fill=_SCOPE_LINE)  # the trace
-        return (c, item, w, h)
+        trace = c.create_line(0, 0, 0, 0, fill=_SCOPE_LINE)
+        c.bind("<Configure>", lambda e, c=c, t=trace, m=midline:
+               self._scope_resized(c, t, m))
+        return (c, trace)
+
+    @staticmethod
+    def _scope_size(c: tk.Canvas):
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 10 or h < 10:                               # not mapped yet: creation size
+            w, h = int(c["width"]), int(c["height"])
+        return w, h
+
+    def _scope_resized(self, c: tk.Canvas, trace: int, midline: int) -> None:
+        """Refit a scope canvas after a window resize; the play loop redraws the trace,
+        so only idle canvases need their flat line restretched here."""
+        w, h = self._scope_size(c)
+        c.coords(midline, 2, h / 2, w - 2, h / 2)
+        if self._play_start is None:
+            c.coords(trace, 2, h / 2, w - 2, h / 2)
 
     def _close_scope(self) -> None:
         if self._scope_win is not None:
@@ -318,18 +354,19 @@ class PlayerApp:
             bufs = list(voices[:4]) + [None] * (4 - len(voices)) + [master]
             idx = max(0, int(elapsed * sr))
             span = int(0.030 * sr)
-        for buf, (c, item, w, h) in zip(bufs, self._scope_panels):
+        for buf, (c, trace) in zip(bufs, self._scope_panels):
+            w, h = self._scope_size(c)
             mid = h / 2
             seg = buf[idx:idx + span] if buf is not None else ()
             n = min(w // 2, len(seg))
             if n < 2:
-                c.coords(item, 2, mid, w - 2, mid)
+                c.coords(trace, 2, mid, w - 2, mid)
                 continue
             ys = seg[np.linspace(0, len(seg) - 1, n).astype(int)]
             pts = np.empty(2 * n)
             pts[0::2] = np.linspace(2, w - 2, n)
             pts[1::2] = mid - ys * (mid - 8)
-            c.coords(item, *pts.tolist())
+            c.coords(trace, *pts.tolist())
 
     def export_wav(self) -> None:
         if not self.song:
