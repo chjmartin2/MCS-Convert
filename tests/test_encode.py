@@ -197,6 +197,22 @@ def test_noise_only_samples_become_clicks():
     assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60
 
 
+def test_drum_detection_is_noise_duty_cycle():
+    # ALF's two lessons: a snare keeps noise on EVERY frame even with tone+
+    # envelope also on (must be a drum), while a slap-bass has one noise
+    # ATTACK frame on a pure-tone body (must stay melodic).
+    from mcs_convert.pt3 import _sample_is_drum
+    mod = bytearray(_build_pt3(drum_sample=True))
+    addr = struct.unpack_from("<H", mod, 0x69 + 2 * 2)[0]
+    # rewrite sample 2 as tone+noise+env, full amp, 3 frames  -> drum
+    mod[addr:addr + 2 + 12] = bytes([0, 3] + [0x00, 0x0F, 0, 0] * 3)
+    assert _sample_is_drum(bytes(mod), 2)
+    # rewrite as noise attack frame + 3 tone-only frames      -> melodic
+    mod[addr:addr + 2 + 16] = bytes([0, 4, 0x00, 0x0F, 0, 0]
+                                    + [0x00, 0x8F, 0, 0] * 3)
+    assert not _sample_is_drum(bytes(mod), 2)
+
+
 def test_vortex_tracker_magic_is_accepted():
     # Vortex Tracker II writes its own signature over the same header layout
     # ("Vortex Tracker II 1.0 module: ..." — seen in the wild); only the first

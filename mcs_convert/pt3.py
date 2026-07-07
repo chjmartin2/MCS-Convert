@@ -23,7 +23,7 @@ match the row rate best — so converted songs play at their original speed.
 from __future__ import annotations
 
 import struct
-from typing import List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from .model import NoteEvent, Song, Track
 
@@ -70,24 +70,38 @@ class _Channel:
 
 
 def _sample_is_drum(data: bytes, idx: int) -> bool:
-    """True when PT3 sample `idx` drives the noise generator with the tone off
-    for most of its frames — the AY percussion recipe. Frame byte 1: bit 4 set
-    = tone disabled, bit 7 set = noise disabled (they OR into the AY mixer;
-    verified against deater's pt3_lib.c, `(b1>>1) & 0x48`)."""
+    """True when PT3 sample `idx` keeps the noise generator on for MOST of its
+    audible frames — the AY percussion recipe. Frame byte 1: bit 4 set = tone
+    disabled, bit 7 set = noise disabled, low 4 bits = amplitude (verified
+    against deater's pt3_lib.c mixer code, `(b1>>1) & 0x48`).
+
+    The duty cycle matters, not the tone flag: a snare is often tone+noise+
+    envelope on EVERY frame (ALF's sample 1), while a slap-bass is a single
+    noise ATTACK frame on an otherwise pure tone (ALF's sample 5) and must
+    stay melodic — so count noise frames against audible frames."""
+    duty, _ = _sample_noise(data, idx)
+    return duty > 0.5
+
+
+def _sample_noise(data: bytes, idx: int) -> Tuple[float, float]:
+    """(noise_duty, tone_duty) over a sample's audible frames."""
     if not 0 <= idx < 32:
-        return False
+        return 0.0, 1.0
     addr = _u16(data, 0x69 + idx * 2)
     if not 0 < addr < len(data) - 2:
-        return False
-    length = data[addr + 1]
-    if length == 0:
-        return False
-    tone_on = noise_on = 0
-    for k in range(min(length, (len(data) - addr - 2) // 4)):
+        return 0.0, 1.0
+    length = min(data[addr + 1], (len(data) - addr - 2) // 4)
+    audible = noise_on = tone_on = 0
+    for k in range(length):
         b1 = data[addr + 2 + k * 4 + 1]
-        tone_on += 0 if b1 & 0x10 else 1
+        if b1 & 0x0F == 0:
+            continue                             # silent frame: doesn't count
+        audible += 1
         noise_on += 0 if b1 & 0x80 else 1
-    return noise_on * 2 >= length and tone_on * 2 < length
+        tone_on += 0 if b1 & 0x10 else 1
+    if audible == 0:
+        return 0.0, 1.0
+    return noise_on / audible, tone_on / audible
 
 
 def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
@@ -219,7 +233,23 @@ def parse_pt3(data: bytes) -> Tuple[Song, int]:
 
     song = Song(title=title or "PT3 module", source=f"pt3:{author}" if author else "pt3")
     total_rows = max(c.row for c in chans)
-    drum_sample = [_sample_is_drum(data, s) for s in range(32)]
+
+    # Drum classification needs USAGE, not just the sample table: a tone+noise
+    # buzz hammered at 1-2 fixed pitches is a snare/kick (ALF's s1, Neverending's
+    # s5), but the same recipe walking a scale would be a buzz-bass. Pure-noise
+    # samples are drums unconditionally.
+    usage: Dict[int, set] = {}
+    for ch in chans:
+        for _, idx, sample, _ in ch.notes:
+            usage.setdefault(sample, set()).add(idx)
+
+    def is_drum(sample: int) -> bool:
+        noise_duty, tone_duty = _sample_noise(data, sample)
+        if noise_duty <= 0.5:
+            return False
+        return tone_duty <= 0.5 or len(usage.get(sample, ())) <= 3
+
+    drum_sample = [is_drum(s) for s in range(32)]
     for name, ch in zip("ABC", chans):
         track = Track(name=f"AY {name}")
         drums = 0
@@ -229,13 +259,16 @@ def parse_pt3(data: bytes) -> Tuple[Song, int]:
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
             if 0 <= sample < 32 and drum_sample[sample]:
-                # AY percussion: noise generator with the tone muted. MCS has no
-                # noise, so fake it the PC-speaker way — a 1-tick click at the
-                # register extremes: dark noise (high period) or a low trigger
-                # note = kick thud at C3, bright noise = hat tick at E7 (the
-                # highest note MCS can play).
+                # AY percussion. MCS has no noise generator, so fake it the
+                # PC-speaker way — a 1-tick click at the register extremes.
+                # Kick = the sample's LOWEST trigger pitch (Neverending drives
+                # kick@36/snare@38 from one sample), a dark noise period, or a
+                # low absolute trigger; everything else is a hat/snare tick at
+                # E7, the highest note MCS can play.
                 drums += 1
-                kick = (noise is not None and noise > 12) or idx < 24
+                pitches = usage.get(sample, ())
+                kick = ((len(pitches) >= 2 and idx == min(pitches))
+                        or (noise is not None and noise > 12) or idx < 24)
                 track.add(NoteEvent(start_tick=row * ticks_per_row,
                                     duration_ticks=1,
                                     midi_note=48 if kick else 100))
