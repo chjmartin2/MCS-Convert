@@ -271,18 +271,12 @@ def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
                 if percussion == "drop":
                     continue
                 if percussion == "clicks":
-                    # AY percussion. MCS has no noise generator, so fake it the
-                    # PC-speaker way — a 1-tick click at the register extremes.
-                    # Kick = the sample's LOWEST trigger pitch (Neverending
-                    # drives kick@36/snare@38 from one sample), a dark noise
-                    # period, or a low absolute trigger; everything else is a
-                    # hat/snare tick at E7, the highest note MCS can play.
-                    pitches = usage.get(sample, ())
-                    kick = ((len(pitches) >= 2 and idx == min(pitches))
-                            or (noise is not None and noise > 12) or idx < 24)
+                    # AY percussion. MCS has no noise generator, so fake it
+                    # with a 1-tick thud at B2 — the LOWEST note MCS can play.
+                    # (High E7 ticks were tried first and dominated the mix;
+                    # a floor-register blip reads as a drum without piercing.)
                     track.add(NoteEvent(start_tick=row * ticks_per_row,
-                                        duration_ticks=1,
-                                        midi_note=48 if kick else 100))
+                                        duration_ticks=1, midi_note=47))
                     continue
                 # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
