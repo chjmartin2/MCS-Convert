@@ -276,7 +276,8 @@ def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
                     # (High E7 ticks were tried first and dominated the mix;
                     # a floor-register blip reads as a drum without piercing.)
                     track.add(NoteEvent(start_tick=row * ticks_per_row,
-                                        duration_ticks=1, midi_note=47))
+                                        duration_ticks=1, midi_note=47,
+                                        percussive=True))
                     continue
                 # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)

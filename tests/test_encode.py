@@ -219,6 +219,11 @@ def test_percussion_modes():
                [n.midi_note for n in clicks.tracks[0].notes]
     # drum stats survive in every mode (the preview verdict still works)
     assert {t.name: t.meta["drum_notes"] for t in pitched.tracks}["AY C"] == 2
+    # clicks are flagged percussive (octave-shift exempt); pitched notes aren't
+    c = {t.name: t for t in clicks.tracks}["AY C"]
+    assert all(n.percussive for n in c.notes)
+    p = {t.name: t for t in pitched.tracks}["AY C"]
+    assert not any(n.percussive for n in p.notes)
 
 
 def test_drum_detection_is_noise_duty_cycle():

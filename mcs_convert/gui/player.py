@@ -704,10 +704,14 @@ class ImportPreview(tk.Toplevel):
             shift = 12 * int(self.octave[i].get())
             nt = Track(name=tr.name, meta=dict(tr.meta))
             for n in tr.notes:
+                # percussion clicks stay pinned to the floor: the octave knob
+                # exists to move a channel's MUSIC away from the drums
+                s = 0 if (n.is_rest or n.percussive) else shift
                 nt.add(NoteEvent(start_tick=n.start_tick,
                                  duration_ticks=n.duration_ticks,
-                                 midi_note=n.midi_note + (0 if n.is_rest else shift),
-                                 is_rest=n.is_rest, tied=n.tied))
+                                 midi_note=n.midi_note + s,
+                                 is_rest=n.is_rest, tied=n.tied,
+                                 percussive=n.percussive))
             out.add_track(nt)
         return out
 

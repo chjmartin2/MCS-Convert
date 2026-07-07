@@ -26,6 +26,8 @@ class NoteEvent:
     is_rest: bool = False   # a timed silence; occupies duration but sounds nothing
     tied: bool = False       # a tie/slur mark carries this note into the next (MCS 0x13/0x19)
     octave: int = 0          # 1 if under an 8va (MCS 0x12; the engine only shifts up)
+    percussive: bool = False  # a synthesized drum click: pinned to the floor, exempt
+    #                           from octave shifts (importers set this, e.g. AY noise)
 
     @property
     def end_tick(self) -> int:
