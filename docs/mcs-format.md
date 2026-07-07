@@ -175,7 +175,9 @@ the data available at the time and were wrong — the disassembly ended the gues
 ## Writing & round-trip (validation)
 [`mcs_convert/mcs/writer.py`](../mcs_convert/mcs/writer.py) is the inverse of the reader
 and the format's strongest self-check:
-- **`serialize_records` reproduces all 80 corpus songs byte-for-byte** (`rewrite(path)`
+- **`serialize_records` reproduces every corpus song byte-for-byte** — the corpus being
+  the 12 songs of the original retail disk plus user-made songs collected over the
+  years, 86 files in all (`rewrite(path)`
   == the original file). Every field of the record model is therefore confirmed exact.
 - `build_file` assembles a valid header (tempo, the two section sizes = each staff's
   serialized length **minus its `(0,0)` separator**, total length, the `0x0F` pad byte)

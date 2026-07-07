@@ -8,9 +8,11 @@ MCS was one of the first music notation programs for home computers. Its
 `.MCS`/`.MCD` song format was never documented — until now. This project
 recovered the complete byte-level format by disassembling the original
 playback engine, and ships a modern player that reproduces what the 1984
-program plays, note for note, on all 86 songs we could find.
+program plays, note for note — tested against the 12 songs from the
+original retail disk plus dozens of user-made songs collected over the
+years (86 files in all, every one round-tripping byte-identically).
 
-## The Player (v0.1)
+## The Player + Importer (v0.2)
 
 Open a song, watch it scroll by in a tracker-style grid, and listen:
 
@@ -25,6 +27,13 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
 - **Oscilloscope window** — the four voices on scopes plus a master mix,
   phosphor green on black, resizable.
 - **Export** — decoded playback as WAV, or the full tracker grid as text.
+- **Import (new in 0.2)** — convert **Vortex Tracker `.pt3` modules** (the ZX
+  Spectrum AY-3-8910 scene format) to MCS, with a preview dialog: per-channel
+  stats and solo audition, percussion detection with three handling modes
+  (synthesized clicks — a dissonant-cluster or wood-block timbre — played as
+  written pitches, or dropped), per-channel octave shift, MCS tempo picker,
+  and optional decay shaping that recovers plucks and staccato from the
+  modules' volume tables.
 
 ### Just want to listen? (Windows, no Python)
 
