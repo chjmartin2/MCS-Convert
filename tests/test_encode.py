@@ -183,13 +183,15 @@ def test_channel_stats_flag_percussion():
 def test_noise_only_samples_become_clicks():
     # A channel playing a noise-only sample (tone mixer muted in the sample
     # table) is AY percussion; MCS has no noise, so each hit becomes a 1-tick
-    # thud at B2 — the lowest note MCS can play (high ticks dominated the mix).
+    # DISSONANT CLUSTER (G3+Ab3): beating squares read as roughness, not pitch
+    # (single notes failed by ear — E7 ticks dominated, B2 thuds hummed).
     song, _ = parse_pt3(_build_pt3(drum_sample=True))
     c = {t.name: t for t in song.tracks}["AY C"]
     assert c.meta["drum_notes"] == 2
     hits = [(n.start_tick, n.duration_ticks, n.midi_note) for n in c.notes]
-    ticks = hits[1][0] // 2
-    assert hits == [(0, 1, 47), (2 * ticks, 1, 47)]
+    assert hits[0:2] == [(0, 1, 55), (0, 1, 56)]
+    assert hits[2][2] == 55 and hits[3][2] == 56
+    assert all(n.percussive for n in c.notes)
     # the melodic channels are untouched
     a = {t.name: t for t in song.tracks}["AY A"]
     assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60
@@ -210,7 +212,8 @@ def test_percussion_modes():
                 for n in tr.notes] if tr else []
 
     ticks = clicks.tracks[0].notes[1].start_tick // 2
-    assert c_notes(clicks) == [(0, 1, 47), (2 * ticks, 1, 47)]
+    assert c_notes(clicks) == [(0, 1, 55), (0, 1, 56),
+                               (2 * ticks, 1, 55), (2 * ticks, 1, 56)]
     assert c_notes(pitched) == [(0, 2 * ticks, 60), (2 * ticks, 2 * ticks, 24)]
     assert c_notes(dropped) == []                  # drum channel silenced
     # melodic channels identical across all three modes

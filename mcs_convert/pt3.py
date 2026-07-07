@@ -271,13 +271,17 @@ def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
                 if percussion == "drop":
                     continue
                 if percussion == "clicks":
-                    # AY percussion. MCS has no noise generator, so fake it
-                    # with a 1-tick thud at B2 — the LOWEST note MCS can play.
-                    # (High E7 ticks were tried first and dominated the mix;
-                    # a floor-register blip reads as a drum without piercing.)
-                    track.add(NoteEvent(start_tick=row * ticks_per_row,
-                                        duration_ticks=1, midi_note=47,
-                                        percussive=True))
+                    # AY percussion. MCS has no noise generator, and no single
+                    # pitch can be a click either: the shortest note (~60-80ms)
+                    # spans several waveform cycles at any renderable pitch, so
+                    # high ticks dominate (tried E7) and low thuds hum (tried
+                    # B2). Instead, beat two squares a semitone apart — G3+Ab3
+                    # for one tick is roughness, not pitch: the nearest thing
+                    # to noise that pitched square waves can make.
+                    for midi in (55, 56):
+                        track.add(NoteEvent(start_tick=row * ticks_per_row,
+                                            duration_ticks=1, midi_note=midi,
+                                            percussive=True))
                     continue
                 # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
