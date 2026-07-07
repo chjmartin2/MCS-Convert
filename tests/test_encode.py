@@ -192,6 +192,11 @@ def test_noise_only_samples_become_clicks():
     assert hits[0:2] == [(0, 1, 55), (0, 1, 56)]
     assert hits[2][2] == 55 and hits[3][2] == 56
     assert all(n.percussive for n in c.notes)
+    # the wood-block alternative: one humble D4 tick per hit
+    block, _ = parse_pt3(_build_pt3(drum_sample=True), drum_sound="block")
+    cb = {t.name: t for t in block.tracks}["AY C"]
+    assert [(n.duration_ticks, n.midi_note) for n in cb.notes] == [(1, 62), (1, 62)]
+    assert all(n.percussive for n in cb.notes)
     # the melodic channels are untouched
     a = {t.name: t for t in song.tracks}["AY A"]
     assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60

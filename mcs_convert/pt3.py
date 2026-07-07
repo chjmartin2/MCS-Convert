@@ -187,16 +187,22 @@ def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
     return best[0], best[1]
 
 
-def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
+def parse_pt3(data: bytes, percussion: str = "clicks",
+              drum_sound: str = "cluster") -> Tuple[Song, int]:
     """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds.
 
     `percussion` decides what happens to drum-classified notes (see is_drum below):
-      "clicks"  — synthesize them as 1-tick C3/E7 percussion clicks (default);
+      "clicks"  — synthesize them as 1-tick percussion hits (default);
       "pitched" — ignore the noise modifier and play their written pitches;
       "drop"    — silence them, keeping the channel's melodic notes.
+    `drum_sound` picks the click timbre when percussion == "clicks":
+      "cluster" — G3+Ab3 beating a minor second apart (roughness ≈ noise);
+      "block"   — a single mid-register D4, the humble wood-block tick.
     """
     if percussion not in ("clicks", "pitched", "drop"):
         raise ValueError(f"percussion must be clicks/pitched/drop, not {percussion!r}")
+    if drum_sound not in ("cluster", "block"):
+        raise ValueError(f"drum_sound must be cluster/block, not {drum_sound!r}")
     if not any(data.startswith(m) for m in _MAGICS):
         raise PT3Error("not a ProTracker 3 / Vortex Tracker module (bad magic)")
     title = _cstr(data[0x1E:0x3E])
@@ -275,10 +281,12 @@ def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
                     # pitch can be a click either: the shortest note (~60-80ms)
                     # spans several waveform cycles at any renderable pitch, so
                     # high ticks dominate (tried E7) and low thuds hum (tried
-                    # B2). Instead, beat two squares a semitone apart — G3+Ab3
-                    # for one tick is roughness, not pitch: the nearest thing
-                    # to noise that pitched square waves can make.
-                    for midi in (55, 56):
+                    # B2). "cluster" beats two squares a semitone apart — for
+                    # one tick that is roughness, not pitch: the nearest thing
+                    # to noise square waves can make. "block" is the humble
+                    # single mid-register tick when the cluster is too thick.
+                    hit = (55, 56) if drum_sound == "cluster" else (62,)
+                    for midi in hit:
                         track.add(NoteEvent(start_tick=row * ticks_per_row,
                                             duration_ticks=1, midi_note=midi,
                                             percussive=True))

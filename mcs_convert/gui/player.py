@@ -254,13 +254,15 @@ class PlayerApp:
         ImportPreview(self, src, song, byte0)
 
     @staticmethod
-    def _load_module(src: str, percussion: str = "clicks"):
+    def _load_module(src: str, percussion: str = "clicks",
+                     drum_sound: str = "cluster"):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension."""
         ext = src.lower().rsplit(".", 1)[-1]
         if ext == "pt3":
             from ..pt3 import parse_pt3
             with open(src, "rb") as fh:
-                return parse_pt3(fh.read(), percussion=percussion)
+                return parse_pt3(fh.read(), percussion=percussion,
+                                 drum_sound=drum_sound)
         raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
@@ -645,6 +647,13 @@ class ImportPreview(tk.Toplevel):
                            command=self._on_percussion, bg=_BG, fg=_FG,
                            activebackground=_BG, activeforeground=_FG,
                            selectcolor="#2a2e3a").pack(side="left", padx=(10, 0))
+        tk.Label(perc, text="sound", bg=_BG, fg=_ACCENT).pack(side="left",
+                                                              padx=(18, 4))
+        self.drum = tk.StringVar(value="cluster")
+        snd = ttk.Combobox(perc, textvariable=self.drum, width=10,
+                           state="readonly", values=("cluster", "wood block"))
+        snd.pack(side="left")
+        snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
 
         # MCS tempo: ten discrete speeds; default = the row-rate suggestion.
         bar = tk.Frame(self, bg=_BG)
@@ -687,8 +696,9 @@ class ImportPreview(tk.Toplevel):
         """Reparse the module under the chosen percussion mode (fast — the
         file is small) so auditions and the import reflect it immediately."""
         self.app.player.stop()
+        sound = "block" if self.drum.get() == "wood block" else "cluster"
         try:
-            self.song, _ = self.app._load_module(self.src, self.perc.get())
+            self.song, _ = self.app._load_module(self.src, self.perc.get(), sound)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
