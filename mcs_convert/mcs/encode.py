@@ -42,6 +42,13 @@ _E7_DI, _G5_DI = 7 * 7 + 2, 5 * 7 + 4          # diatonic indices of the window 
 TREBLE_LO, TREBLE_HI = 67, 100                 # G4..E7
 BASS_LO, BASS_HI = 47, 79                      # B2..G5
 
+# The real program's song buffer: the two largest corpus songs (SOCKHOP, BRIDGE)
+# are EXACTLY this many bytes with different staff splits — the editor's hard cap.
+# (The manual's "~800 notes" is this same budget counted in noteheads; entries
+# also include rests, ties, dots, and accidentals.) Our own player has no limit;
+# this matters when a converted song should load in MCS 1984 itself.
+MCS_MAX_BYTES = 4246
+
 
 def _fit(midi: int, lo: int, hi: int) -> int:
     """Octave-shift a pitch into [lo, hi]."""

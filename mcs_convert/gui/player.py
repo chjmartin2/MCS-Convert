@@ -613,7 +613,8 @@ class ImportPreview(tk.Toplevel):
             self.include.append(keep)
             row = 2 + i
             tk.Checkbutton(self, variable=keep, bg=_BG, activebackground=_BG,
-                           selectcolor="#2a2e3a").grid(row=row, column=0)
+                           selectcolor="#2a2e3a",
+                           command=self._update_size).grid(row=row, column=0)
             tk.Label(self, text=tr.name, bg=_BG, fg=_FG).grid(row=row, column=1)
             labels = {}
             for col, key in ((2, "count"), (3, "range"), (4, "noise"),
@@ -625,9 +626,10 @@ class ImportPreview(tk.Toplevel):
                       ).grid(row=row, column=7, padx=(4, 2))
             var = tk.StringVar(value="0")
             self.octave.append(var)
-            ttk.Combobox(self, textvariable=var, width=3, state="readonly",
-                         values=("+2", "+1", "0", "-1", "-2")).grid(
-                row=row, column=8, padx=(2, 10))
+            oct_box = ttk.Combobox(self, textvariable=var, width=3, state="readonly",
+                                   values=("+2", "+1", "0", "-1", "-2"))
+            oct_box.grid(row=row, column=8, padx=(2, 10))
+            oct_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
         tk.Label(self, text="8va", bg=_BG, fg=_ACCENT,
                  font=("TkDefaultFont", 8)).grid(row=1, column=8)
         self._update_stats()
@@ -660,8 +662,11 @@ class ImportPreview(tk.Toplevel):
 
         btns = tk.Frame(self, bg=_BG)
         btns.grid(row=8, column=0, columnspan=9, sticky="e", padx=10, pady=(6, 10))
+        self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
+        self.size_label.pack(side="left", padx=(0, 14))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
         tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
+        self._update_size()
 
     def _update_stats(self) -> None:
         """Refresh the per-channel stat labels from the current parse."""
@@ -688,6 +693,22 @@ class ImportPreview(tk.Toplevel):
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
         self._update_stats()
+        self._update_size()
+
+    def _update_size(self) -> None:
+        """Live budget meter: the real program's song buffer is 4,246 bytes
+        (the size the two largest 1984 corpus songs both hit exactly). Our
+        player has no limit; red means MCS 1984 itself would truncate."""
+        from ..mcs.encode import MCS_MAX_BYTES
+        try:
+            size = len(self.encode_selection())
+        except Exception:  # noqa: BLE001 - e.g. nothing selected
+            size = 0
+        fits = size <= MCS_MAX_BYTES
+        self.size_label.configure(
+            text=f"{size:,} / {MCS_MAX_BYTES:,} bytes"
+                 f"{' (fits real MCS)' if fits else ' — too big for MCS 1984!'}",
+            fg=_ACCENT if fits else "#e08f8f")
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:

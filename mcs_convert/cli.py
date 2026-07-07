@@ -72,6 +72,12 @@ def _cmd_convert(args) -> int:
     notes = sum(1 for t in song.tracks for n in t.notes if not n.is_rest)
     print(f"wrote {args.output} ({len(data)} bytes, {notes} notes, "
           f"'{song.title}')")
+    from .mcs.encode import MCS_MAX_BYTES
+    if len(data) > MCS_MAX_BYTES:
+        print(f"warning: {len(data)} bytes exceeds the real program's "
+              f"{MCS_MAX_BYTES}-byte song buffer — plays fine in MCS-Convert, "
+              f"but MCS 1984 itself will truncate it. Try --percussion drop, "
+              f"fewer channels, or a shorter module.", file=sys.stderr)
     return 0
 
 
