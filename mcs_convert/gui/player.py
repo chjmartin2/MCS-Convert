@@ -706,19 +706,13 @@ class ImportPreview(tk.Toplevel):
         self._update_size()
 
     def _update_size(self) -> None:
-        """Live budget meter: the real program's song buffer is 4,246 bytes
-        (the size the two largest 1984 corpus songs both hit exactly). Our
-        player has no limit; red means MCS 1984 itself would truncate."""
-        from ..mcs.encode import MCS_MAX_BYTES
+        """Live size readout for the current selection. Purely informational —
+        the 1984 editor saved at most ~4.2KB, but its player handles more."""
         try:
             size = len(self.encode_selection())
         except Exception:  # noqa: BLE001 - e.g. nothing selected
             size = 0
-        fits = size <= MCS_MAX_BYTES
-        self.size_label.configure(
-            text=f"{size:,} / {MCS_MAX_BYTES:,} bytes"
-                 f"{' (fits real MCS)' if fits else ' — too big for MCS 1984!'}",
-            fg=_ACCENT if fits else "#e08f8f")
+        self.size_label.configure(text=f"{size:,} bytes", fg=_ACCENT)
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:
