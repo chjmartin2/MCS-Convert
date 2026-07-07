@@ -187,8 +187,34 @@ def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
     return best[0], best[1]
 
 
+def _sample_audible_ticks(data: bytes, idx: int, ticks_per_row: int,
+                          delay: int):
+    """How many 32nd-ticks sample `idx` stays audible, or None if it sustains.
+
+    MCS has no volume, so a decaying sample can only be expressed as TIME: a
+    note whose amplitude table falls to zero (and whose loop region is silent)
+    is audibly over at that point, however long the pattern holds it. Frames
+    run at 50 Hz; one row = `delay` frames = `ticks_per_row` ticks."""
+    if not 0 <= idx < 32:
+        return None
+    addr = _u16(data, 0x69 + idx * 2)
+    if not 0 < addr < len(data) - 2:
+        return None
+    loop = data[addr]
+    length = min(data[addr + 1], (len(data) - addr - 2) // 4)
+    if length <= 0:
+        return None
+    amps = [data[addr + 2 + k * 4 + 1] & 0x0F for k in range(length)]
+    if any(a > 0 for a in amps[min(loop, length - 1):]):
+        return None                              # loops at audible volume
+    last = max((k for k, a in enumerate(amps) if a > 0), default=-1)
+    frames = last + 1
+    return max(1, -(-frames * ticks_per_row // delay))     # ceil
+
+
 def parse_pt3(data: bytes, percussion: str = "clicks",
-              drum_sound: str = "cluster") -> Tuple[Song, int]:
+              drum_sound: str = "cluster",
+              shape_durations: bool = False) -> Tuple[Song, int]:
     """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds.
 
     `percussion` decides what happens to drum-classified notes (see is_drum below):
@@ -198,6 +224,9 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
     `drum_sound` picks the click timbre when percussion == "clicks":
       "cluster" — G3+Ab3 beating a minor second apart (roughness ≈ noise);
       "block"   — a single mid-register D4, the humble wood-block tick.
+    `shape_durations` truncates each note to its sample's audible length (the
+    frame where its volume table decays to permanent silence) — MCS's only way
+    to express a pluck, since it has no volume control.
     """
     if percussion not in ("clicks", "pitched", "drop"):
         raise ValueError(f"percussion must be clicks/pitched/drop, not {percussion!r}")
@@ -294,6 +323,10 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
                 # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
             dur = max(1, (end - row) * ticks_per_row)
+            if shape_durations:
+                audible = _sample_audible_ticks(data, sample, ticks_per_row, delay)
+                if audible is not None:
+                    dur = min(dur, audible)
             track.add(NoteEvent(start_tick=row * ticks_per_row,
                                 duration_ticks=dur, midi_note=midi))
         track.meta["noise_cmds"] = ch.noise_cmds

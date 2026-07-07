@@ -234,6 +234,41 @@ def test_percussion_modes():
     assert not any(n.percussive for n in p.notes)
 
 
+def test_decay_shaping_truncates_to_audible_length():
+    # A pluck sample (volume f/c/8 then silence, looping on a silent frame) is
+    # audibly 3 frames long: with shaping on, the held C-3 becomes a short
+    # note; off (the default) it sustains to the next event as before.
+    from mcs_convert.pt3 import _sample_audible_ticks
+    mod = bytearray(_build_pt3())                # B holds C-3 for 8 rows
+    sam = len(mod)
+    struct.pack_into("<H", mod, 0x69 + 3 * 2, sam)          # sample 3
+    mod += bytes([3, 4,                                     # loop 3, len 4
+                  0x00, 0x8F, 0, 0, 0x00, 0x8C, 0, 0,       # tone-only (noise
+                  0x00, 0x88, 0, 0, 0x00, 0x80, 0, 0])      # off): f, c, 8, 0
+    # channel B selects sample 3 before its note ($D3)
+    b_stream = bytes([0xB1, 8, 0xD3, 0x68, 0x00])
+    old = bytes([0xB1, 8, 0x68, 0x00])
+    idx = bytes(mod).index(old)
+    mod = bytes(mod[:idx]) + b_stream + bytes(mod[idx + len(old):])
+    # stream grew by 1 byte: shift the C-channel pattern pointer
+    pat_table = struct.unpack_from("<H", mod, 0x67)[0]
+    mod = bytearray(mod)
+    for k in (2,):                                          # channel C pointer
+        addr = struct.unpack_from("<H", mod, pat_table + k * 2)[0]
+        struct.pack_into("<H", mod, pat_table + k * 2, addr + 1)
+    struct.pack_into("<H", mod, 0x69 + 3 * 2, sam + 1)      # sample moved too
+    mod = bytes(mod)
+
+    ticks = row_ticks_and_tempo(3)[0]
+    assert _sample_audible_ticks(mod, 3, ticks, 3) == 1     # ceil(3 * 1/3)
+    plain, _ = parse_pt3(mod)
+    shaped, _ = parse_pt3(mod, shape_durations=True)
+    b_plain = {t.name: t for t in plain.tracks}["AY B"].notes[0]
+    b_shaped = {t.name: t for t in shaped.tracks}["AY B"].notes[0]
+    assert b_plain.duration_ticks == 8 * ticks              # sustains (default)
+    assert b_shaped.duration_ticks == 1                     # pluck recovered
+
+
 def test_drum_detection_is_noise_duty_cycle():
     # ALF's two lessons: a snare keeps noise on EVERY frame even with tone+
     # envelope also on (must be a drum), while a slap-bass has one noise

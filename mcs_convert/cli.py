@@ -52,7 +52,8 @@ def _cmd_convert(args) -> int:
             from .pt3 import parse_pt3
             with open(args.input, "rb") as fh:
                 song, byte0 = parse_pt3(fh.read(), percussion=args.percussion,
-                                        drum_sound=args.drum_sound)
+                                        drum_sound=args.drum_sound,
+                                        shape_durations=args.shape_durations)
             data = encode_song(song, tempo_byte0=byte0)
         elif ext == "nsf":
             from .nsf.extract import extract_song
@@ -101,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
                         default="cluster",
                         help="click timbre: G3+Ab3 dissonant cluster (default) "
                              "or a single D4 wood-block tick")
+    p_conv.add_argument("--shape-durations", action="store_true",
+                        help="truncate notes to their sample's audible decay "
+                             "(recovers plucks/staccato; MCS has no volume)")
     p_conv.set_defaults(func=_cmd_convert)
     return p
 

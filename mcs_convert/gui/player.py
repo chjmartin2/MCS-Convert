@@ -255,14 +255,15 @@ class PlayerApp:
 
     @staticmethod
     def _load_module(src: str, percussion: str = "clicks",
-                     drum_sound: str = "cluster"):
+                     drum_sound: str = "cluster", shape_durations: bool = False):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension."""
         ext = src.lower().rsplit(".", 1)[-1]
         if ext == "pt3":
             from ..pt3 import parse_pt3
             with open(src, "rb") as fh:
                 return parse_pt3(fh.read(), percussion=percussion,
-                                 drum_sound=drum_sound)
+                                 drum_sound=drum_sound,
+                                 shape_durations=shape_durations)
         raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
@@ -654,6 +655,12 @@ class ImportPreview(tk.Toplevel):
                            state="readonly", values=("cluster", "wood block"))
         snd.pack(side="left")
         snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
+        # MCS has no volume: a decaying sample can only be expressed as TIME.
+        self.shape = tk.BooleanVar(value=False)
+        tk.Checkbutton(perc, text="decay shaping", variable=self.shape,
+                       command=self._on_percussion, bg=_BG, fg=_FG,
+                       activebackground=_BG, activeforeground=_FG,
+                       selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
         # MCS tempo: ten discrete speeds; default = the row-rate suggestion.
         bar = tk.Frame(self, bg=_BG)
@@ -698,7 +705,8 @@ class ImportPreview(tk.Toplevel):
         self.app.player.stop()
         sound = "block" if self.drum.get() == "wood block" else "cluster"
         try:
-            self.song, _ = self.app._load_module(self.src, self.perc.get(), sound)
+            self.song, _ = self.app._load_module(self.src, self.perc.get(), sound,
+                                                 self.shape.get())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
