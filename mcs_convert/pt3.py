@@ -187,8 +187,16 @@ def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
     return best[0], best[1]
 
 
-def parse_pt3(data: bytes) -> Tuple[Song, int]:
-    """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds."""
+def parse_pt3(data: bytes, percussion: str = "clicks") -> Tuple[Song, int]:
+    """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds.
+
+    `percussion` decides what happens to drum-classified notes (see is_drum below):
+      "clicks"  — synthesize them as 1-tick C3/E7 percussion clicks (default);
+      "pitched" — ignore the noise modifier and play their written pitches;
+      "drop"    — silence them, keeping the channel's melodic notes.
+    """
+    if percussion not in ("clicks", "pitched", "drop"):
+        raise ValueError(f"percussion must be clicks/pitched/drop, not {percussion!r}")
     if not any(data.startswith(m) for m in _MAGICS):
         raise PT3Error("not a ProTracker 3 / Vortex Tracker module (bad magic)")
     title = _cstr(data[0x1E:0x3E])
@@ -259,20 +267,24 @@ def parse_pt3(data: bytes) -> Tuple[Song, int]:
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
             if 0 <= sample < 32 and drum_sample[sample]:
-                # AY percussion. MCS has no noise generator, so fake it the
-                # PC-speaker way — a 1-tick click at the register extremes.
-                # Kick = the sample's LOWEST trigger pitch (Neverending drives
-                # kick@36/snare@38 from one sample), a dark noise period, or a
-                # low absolute trigger; everything else is a hat/snare tick at
-                # E7, the highest note MCS can play.
                 drums += 1
-                pitches = usage.get(sample, ())
-                kick = ((len(pitches) >= 2 and idx == min(pitches))
-                        or (noise is not None and noise > 12) or idx < 24)
-                track.add(NoteEvent(start_tick=row * ticks_per_row,
-                                    duration_ticks=1,
-                                    midi_note=48 if kick else 100))
-                continue
+                if percussion == "drop":
+                    continue
+                if percussion == "clicks":
+                    # AY percussion. MCS has no noise generator, so fake it the
+                    # PC-speaker way — a 1-tick click at the register extremes.
+                    # Kick = the sample's LOWEST trigger pitch (Neverending
+                    # drives kick@36/snare@38 from one sample), a dark noise
+                    # period, or a low absolute trigger; everything else is a
+                    # hat/snare tick at E7, the highest note MCS can play.
+                    pitches = usage.get(sample, ())
+                    kick = ((len(pitches) >= 2 and idx == min(pitches))
+                            or (noise is not None and noise > 12) or idx < 24)
+                    track.add(NoteEvent(start_tick=row * ticks_per_row,
+                                        duration_ticks=1,
+                                        midi_note=48 if kick else 100))
+                    continue
+                # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
             dur = max(1, (end - row) * ticks_per_row)
             track.add(NoteEvent(start_tick=row * ticks_per_row,

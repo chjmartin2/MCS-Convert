@@ -51,7 +51,7 @@ def _cmd_convert(args) -> int:
         if ext == "pt3":
             from .pt3 import parse_pt3
             with open(args.input, "rb") as fh:
-                song, byte0 = parse_pt3(fh.read())
+                song, byte0 = parse_pt3(fh.read(), percussion=args.percussion)
             data = encode_song(song, tempo_byte0=byte0)
         elif ext == "nsf":
             from .nsf.extract import extract_song
@@ -92,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("input", help="path to a .pt3 (Vortex Tracker) or .nsf file")
     p_conv.add_argument("output", help="output .mcs path")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
+    p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
+                        default="clicks",
+                        help="drum-note handling: synthesize clicks (default), "
+                             "play written pitches, or drop them")
     p_conv.set_defaults(func=_cmd_convert)
     return p
 

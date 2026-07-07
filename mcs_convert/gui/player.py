@@ -254,13 +254,13 @@ class PlayerApp:
         ImportPreview(self, src, song, byte0)
 
     @staticmethod
-    def _load_module(src: str):
+    def _load_module(src: str, percussion: str = "clicks"):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension."""
         ext = src.lower().rsplit(".", 1)[-1]
         if ext == "pt3":
             from ..pt3 import parse_pt3
             with open(src, "rb") as fh:
-                return parse_pt3(fh.read())
+                return parse_pt3(fh.read(), percussion=percussion)
         raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
@@ -602,6 +602,8 @@ class ImportPreview(tk.Toplevel):
 
         self.include = []                       # BooleanVar per channel
         self.octave = []                        # StringVar per channel: +2..-2
+        self.perc = tk.StringVar(value="clicks")   # percussion mode
+        self._stat_labels = []                  # updatable per-channel labels
         for i, tr in enumerate(song.tracks):
             st = channel_stats(tr)
             # percussion stays checked: the importer renders AY drums as short
@@ -613,15 +615,12 @@ class ImportPreview(tk.Toplevel):
             tk.Checkbutton(self, variable=keep, bg=_BG, activebackground=_BG,
                            selectcolor="#2a2e3a").grid(row=row, column=0)
             tk.Label(self, text=tr.name, bg=_BG, fg=_FG).grid(row=row, column=1)
-            tk.Label(self, text=st["count"], bg=_BG, fg=_FG).grid(row=row, column=2)
-            tk.Label(self, text=st["range"], bg=_BG, fg=_FG).grid(row=row, column=3)
-            tk.Label(self, text=f"{st['noise']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=4)
-            tk.Label(self, text=f"{st['repet']:.0%}", bg=_BG, fg=_FG).grid(row=row, column=5)
-            verdict = st["verdict"]
-            if verdict == "percussion":
-                verdict = "percussion→clicks"
-            color = "#e0b060" if st["verdict"] == "percussion" else _ACCENT
-            tk.Label(self, text=verdict, bg=_BG, fg=color).grid(row=row, column=6)
+            labels = {}
+            for col, key in ((2, "count"), (3, "range"), (4, "noise"),
+                             (5, "repet"), (6, "verdict")):
+                labels[key] = tk.Label(self, bg=_BG, fg=_FG)
+                labels[key].grid(row=row, column=col)
+            self._stat_labels.append(labels)
             tk.Button(self, text="▶ solo", command=lambda i=i: self._audition([i])
                       ).grid(row=row, column=7, padx=(4, 2))
             var = tk.StringVar(value="0")
@@ -631,6 +630,19 @@ class ImportPreview(tk.Toplevel):
                 row=row, column=8, padx=(2, 10))
         tk.Label(self, text="8va", bg=_BG, fg=_ACCENT,
                  font=("TkDefaultFont", 8)).grid(row=1, column=8)
+        self._update_stats()
+
+        # Percussion handling — one of three states, live for audition.
+        perc = tk.Frame(self, bg=_BG)
+        perc.grid(row=6, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 0))
+        tk.Label(perc, text="Percussion", bg=_BG, fg=_ACCENT).pack(side="left")
+        for value, label in (("clicks", "as clicks"),
+                             ("pitched", "as written notes"),
+                             ("drop", "dropped")):
+            tk.Radiobutton(perc, text=label, value=value, variable=self.perc,
+                           command=self._on_percussion, bg=_BG, fg=_FG,
+                           activebackground=_BG, activeforeground=_FG,
+                           selectcolor="#2a2e3a").pack(side="left", padx=(10, 0))
 
         # MCS tempo: ten discrete speeds; default = the row-rate suggestion.
         bar = tk.Frame(self, bg=_BG)
@@ -650,6 +662,32 @@ class ImportPreview(tk.Toplevel):
         btns.grid(row=8, column=0, columnspan=9, sticky="e", padx=10, pady=(6, 10))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
         tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
+
+    def _update_stats(self) -> None:
+        """Refresh the per-channel stat labels from the current parse."""
+        for tr, labels in zip(self.song.tracks, self._stat_labels):
+            st = channel_stats(tr)
+            verdict = st["verdict"]
+            if st["verdict"] == "percussion" and self.perc.get() == "clicks":
+                verdict = "percussion→clicks"
+            labels["count"].configure(text=st["count"])
+            labels["range"].configure(text=st["range"])
+            labels["noise"].configure(text=f"{st['noise']:.0%}")
+            labels["repet"].configure(text=f"{st['repet']:.0%}")
+            labels["verdict"].configure(
+                text=verdict,
+                fg="#e0b060" if st["verdict"] == "percussion" else _ACCENT)
+
+    def _on_percussion(self) -> None:
+        """Reparse the module under the chosen percussion mode (fast — the
+        file is small) so auditions and the import reflect it immediately."""
+        self.app.player.stop()
+        try:
+            self.song, _ = self.app._load_module(self.src, self.perc.get())
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Cannot re-import", str(exc), parent=self)
+            return
+        self._update_stats()
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:

@@ -197,6 +197,32 @@ def test_noise_only_samples_become_clicks():
     assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60
 
 
+def test_percussion_modes():
+    # clicks (default): 1-tick C3/E7 hits; pitched: written pitches, full
+    # durations; drop: drum notes silenced, melodic channels untouched.
+    mod = _build_pt3(drum_sample=True)
+    clicks, _ = parse_pt3(mod)
+    pitched, _ = parse_pt3(mod, percussion="pitched")
+    dropped, _ = parse_pt3(mod, percussion="drop")
+
+    def c_notes(song):
+        by = {t.name: t for t in song.tracks}
+        tr = by.get("AY C")
+        return [(n.start_tick, n.duration_ticks, n.midi_note)
+                for n in tr.notes] if tr else []
+
+    ticks = clicks.tracks[0].notes[1].start_tick // 2
+    assert c_notes(clicks) == [(0, 1, 100), (2 * ticks, 1, 48)]
+    assert c_notes(pitched) == [(0, 2 * ticks, 60), (2 * ticks, 2 * ticks, 24)]
+    assert c_notes(dropped) == []                  # drum channel silenced
+    # melodic channels identical across all three modes
+    for song in (pitched, dropped):
+        assert [n.midi_note for n in song.tracks[0].notes] == \
+               [n.midi_note for n in clicks.tracks[0].notes]
+    # drum stats survive in every mode (the preview verdict still works)
+    assert {t.name: t.meta["drum_notes"] for t in pitched.tracks}["AY C"] == 2
+
+
 def test_drum_detection_is_noise_duty_cycle():
     # ALF's two lessons: a snare keeps noise on EVERY frame even with tone+
     # envelope also on (must be a drum), while a slap-bass has one noise
