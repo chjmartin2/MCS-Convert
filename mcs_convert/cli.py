@@ -59,8 +59,13 @@ def _cmd_convert(args) -> int:
             from .nsf.extract import extract_song
             song, byte0 = extract_song(args.input, subsong=args.subsong,
                                        percussion=args.percussion,
-                                       drum_sound=args.drum_sound)
+                                       drum_sound=args.drum_sound,
+                                       frames_per_tick=args.grid)
             data = encode_song(song, tempo_byte0=byte0)
+            if getattr(song, "dropped_short", 0):
+                print(f"note: {song.dropped_short} notes were too short for the "
+                      f"grid; try --grid 1 or 2 (plays slower, keeps everything)",
+                      file=sys.stderr)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
@@ -107,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--shape-durations", action="store_true",
                         help="truncate notes to their sample's audible decay "
                              "(recovers plucks/staccato; MCS has no volume)")
+    p_conv.add_argument("--grid", type=int, choices=(1, 2, 3, 4, 5, 6),
+                        default=None, metavar="N",
+                        help="NSF: force N frames per 32nd-tick instead of the "
+                             "auto fit. Finer than real time allows plays the "
+                             "song slower but keeps rapid notes (Dr. Wily mode)")
     p_conv.set_defaults(func=_cmd_convert)
     return p
 

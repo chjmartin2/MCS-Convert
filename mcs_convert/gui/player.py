@@ -674,6 +674,17 @@ class ImportPreview(tk.Toplevel):
                                           "120 s", "180 s"))
             ln_box.pack(side="left")
             ln_box.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
+            # Grid: frames per 32nd-tick. Finer than real time allows plays the
+            # song slower but keeps rapid notes a coarse grid would drop.
+            tk.Label(nrow, text="grid", bg=_BG, fg=_ACCENT).pack(
+                side="left", padx=(18, 4))
+            self.grid_choice = tk.StringVar(value="auto")
+            gr_box = ttk.Combobox(nrow, textvariable=self.grid_choice, width=15,
+                                  state="readonly",
+                                  values=("auto", "1 (finest, slower)",
+                                          "2", "3", "4", "5", "6 (coarsest)"))
+            gr_box.pack(side="left")
+            gr_box.bind("<<ComboboxSelected>>", lambda _e: self._on_track())
             base += 1
 
         # Percussion handling — live for audition. (NSF noise has no written
@@ -734,9 +745,12 @@ class ImportPreview(tk.Toplevel):
         total = max((n.end_tick for t in self.song.tracks for n in t.notes),
                     default=0)
         secs = int(total * tick_seconds_for(self._byte0))
+        dropped = getattr(self.song, "dropped_short", 0)
+        warn = f"   ⚠ {dropped} notes too short for this grid" if dropped else ""
         self.head_label.configure(
             text=f"{self.song.title or os.path.basename(self.src)} — "
-                 f"{total // 32} bars, ~{secs // 60}:{secs % 60:02d}")
+                 f"{total // 32} bars, ~{secs // 60}:{secs % 60:02d}{warn}",
+            fg="#e0b060" if dropped else _FG)
         for tr, labels in zip(self.song.tracks, self._stat_labels):
             st = channel_stats(tr)
             verdict = st["verdict"]
@@ -762,6 +776,9 @@ class ImportPreview(tk.Toplevel):
                 kw.update(max_seconds=180.0, detect_end=True)
             else:
                 kw.update(max_seconds=float(choice.split()[0]), detect_end=False)
+            grid = self.grid_choice.get()
+            if grid != "auto":
+                kw["frames_per_tick"] = int(grid.split()[0])
         return kw
 
     def _on_percussion(self) -> None:
