@@ -237,12 +237,14 @@ class PlayerApp:
             self.load(path)
 
     def import_dialog(self) -> None:
-        """Import a chiptune module: parse it, open the channel-preview dialog
-        (solo audition, filtering, octave/tempo), then convert and load.
-        Currently: Vortex Tracker .pt3; importers dispatch on the extension."""
+        """Import a chiptune module: parse/emulate it, open the channel-preview
+        dialog (solo audition, filtering, octave/tempo), then convert and load.
+        Formats: Vortex Tracker .pt3, NES .nsf; dispatch is by extension."""
         src = filedialog.askopenfilename(
             title="Import a chiptune module",
-            filetypes=[("Vortex Tracker modules", "*.pt3 *.PT3"),
+            filetypes=[("Chiptune modules", "*.pt3 *.PT3 *.nsf *.NSF"),
+                       ("Vortex Tracker modules", "*.pt3 *.PT3"),
+                       ("NES music (NSF)", "*.nsf *.NSF"),
                        ("All files", "*.*")])
         if not src:
             return
@@ -255,8 +257,11 @@ class PlayerApp:
 
     @staticmethod
     def _load_module(src: str, percussion: str = "clicks",
-                     drum_sound: str = "cluster", shape_durations: bool = False):
-        """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension."""
+                     drum_sound: str = "cluster", shape_durations: bool = False,
+                     subsong=None, max_seconds: float = 180.0,
+                     detect_end: bool = True):
+        """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension.
+        Importers ignore the options that don't apply to their format."""
         ext = src.lower().rsplit(".", 1)[-1]
         if ext == "pt3":
             from ..pt3 import parse_pt3
@@ -264,7 +269,13 @@ class PlayerApp:
                 return parse_pt3(fh.read(), percussion=percussion,
                                  drum_sound=drum_sound,
                                  shape_durations=shape_durations)
-        raise ValueError(f"no importer for .{ext} files (supported: .pt3)")
+        if ext == "nsf":
+            from ..nsf.extract import extract_song
+            return extract_song(
+                src, subsong=subsong, max_seconds=max_seconds,
+                percussion="drop" if percussion == "drop" else "clicks",
+                drum_sound=drum_sound, detect_end=detect_end)
+        raise ValueError(f"no importer for .{ext} files (supported: .pt3, .nsf)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
         """Save converted .MCS bytes (8.3-named by default) and open them."""
@@ -586,17 +597,16 @@ class ImportPreview(tk.Toplevel):
     def __init__(self, app: PlayerApp, src: str, song: Song, byte0: int) -> None:
         super().__init__(app.root)
         self.app, self.src, self.song = app, src, song
+        self.is_nsf = src.lower().endswith(".nsf")
         self.title(f"Import Preview — {os.path.basename(src)}")
         self.configure(bg=_BG)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        total = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
-        secs = total * tick_seconds_for(byte0)
-        tk.Label(self, text=f"{song.title or os.path.basename(src)} — "
-                            f"{total // 32} bars, ~{int(secs) // 60}:{int(secs) % 60:02d}",
-                 bg=_BG, fg=_FG).grid(row=0, column=0, columnspan=8,
-                                      sticky="w", padx=10, pady=(10, 6))
+        self.head_label = tk.Label(self, bg=_BG, fg=_FG)
+        self.head_label.grid(row=0, column=0, columnspan=8,
+                             sticky="w", padx=10, pady=(10, 6))
+        self._byte0 = byte0
 
         hdr = ("", "channel", "notes", "range", "noise", "repet.", "verdict", "")
         for c, text in enumerate(hdr):
@@ -636,14 +646,46 @@ class ImportPreview(tk.Toplevel):
         tk.Label(self, text="8va", bg=_BG, fg=_ACCENT,
                  font=("TkDefaultFont", 8)).grid(row=1, column=8)
         self._update_stats()
+        base = 2 + len(song.tracks)              # rows below the channel table
 
-        # Percussion handling — one of three states, live for audition.
+        # NSF: which track of the game's soundtrack, and how much of it.
+        if self.is_nsf:
+            from ..nsf.header import NSFHeader
+            hdr = NSFHeader.from_file(src)
+            nrow = tk.Frame(self, bg=_BG)
+            nrow.grid(row=base, column=0, columnspan=9, sticky="w",
+                      padx=10, pady=(8, 0))
+            tk.Label(nrow, text="Track", bg=_BG, fg=_ACCENT).pack(side="left")
+            self.track = tk.StringVar(value=str(hdr.starting_song))
+            tr_box = ttk.Combobox(nrow, textvariable=self.track, width=4,
+                                  state="readonly",
+                                  values=[str(i) for i in
+                                          range(1, hdr.total_songs + 1)])
+            tr_box.pack(side="left", padx=(6, 2))
+            tr_box.bind("<<ComboboxSelected>>", lambda _e: self._on_track())
+            tk.Label(nrow, text=f"of {hdr.total_songs}", bg=_BG,
+                     fg=_FG).pack(side="left")
+            tk.Label(nrow, text="length", bg=_BG, fg=_ACCENT).pack(
+                side="left", padx=(18, 4))
+            self.length = tk.StringVar(value="auto (one loop)")
+            ln_box = ttk.Combobox(nrow, textvariable=self.length, width=14,
+                                  state="readonly",
+                                  values=("auto (one loop)", "30 s", "60 s",
+                                          "120 s", "180 s"))
+            ln_box.pack(side="left")
+            ln_box.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
+            base += 1
+
+        # Percussion handling — live for audition. (NSF noise has no written
+        # pitches, so the "as written notes" mode is PT3-only.)
         perc = tk.Frame(self, bg=_BG)
-        perc.grid(row=6, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 0))
+        perc.grid(row=base, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 0))
         tk.Label(perc, text="Percussion", bg=_BG, fg=_ACCENT).pack(side="left")
-        for value, label in (("clicks", "as clicks"),
-                             ("pitched", "as written notes"),
-                             ("drop", "dropped")):
+        radio = [("clicks", "as clicks"), ("pitched", "as written notes"),
+                 ("drop", "dropped")]
+        if self.is_nsf:
+            radio = [("clicks", "as clicks"), ("drop", "dropped")]
+        for value, label in radio:
             tk.Radiobutton(perc, text=label, value=value, variable=self.perc,
                            command=self._on_percussion, bg=_BG, fg=_FG,
                            activebackground=_BG, activeforeground=_FG,
@@ -657,14 +699,16 @@ class ImportPreview(tk.Toplevel):
         snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
         # MCS has no volume: a decaying sample can only be expressed as TIME.
         self.shape = tk.BooleanVar(value=False)
-        tk.Checkbutton(perc, text="decay shaping", variable=self.shape,
-                       command=self._on_percussion, bg=_BG, fg=_FG,
-                       activebackground=_BG, activeforeground=_FG,
-                       selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
+        if not self.is_nsf:                      # PT3 sample tables only
+            tk.Checkbutton(perc, text="decay shaping", variable=self.shape,
+                           command=self._on_percussion, bg=_BG, fg=_FG,
+                           activebackground=_BG, activeforeground=_FG,
+                           selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
-        # MCS tempo: ten discrete speeds; default = the row-rate suggestion.
+        # MCS tempo: ten discrete speeds; default = the fitted suggestion.
         bar = tk.Frame(self, bg=_BG)
-        bar.grid(row=7, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 2))
+        bar.grid(row=base + 1, column=0, columnspan=9, sticky="w",
+                 padx=10, pady=(8, 2))
         tk.Label(bar, text="Tempo", bg=_BG, fg=_ACCENT).pack(side="left")
         self._tempos = [0x77 + 3 * s for s in range(10)]
         labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM" for b in self._tempos]
@@ -677,7 +721,8 @@ class ImportPreview(tk.Toplevel):
             side="left", padx=(4, 0))
 
         btns = tk.Frame(self, bg=_BG)
-        btns.grid(row=8, column=0, columnspan=9, sticky="e", padx=10, pady=(6, 10))
+        btns.grid(row=base + 2, column=0, columnspan=9, sticky="e",
+                  padx=10, pady=(6, 10))
         self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
         self.size_label.pack(side="left", padx=(0, 14))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
@@ -685,7 +730,13 @@ class ImportPreview(tk.Toplevel):
         self._update_size()
 
     def _update_stats(self) -> None:
-        """Refresh the per-channel stat labels from the current parse."""
+        """Refresh the header line and per-channel stat labels."""
+        total = max((n.end_tick for t in self.song.tracks for n in t.notes),
+                    default=0)
+        secs = int(total * tick_seconds_for(self._byte0))
+        self.head_label.configure(
+            text=f"{self.song.title or os.path.basename(self.src)} — "
+                 f"{total // 32} bars, ~{secs // 60}:{secs % 60:02d}")
         for tr, labels in zip(self.song.tracks, self._stat_labels):
             st = channel_stats(tr)
             verdict = st["verdict"]
@@ -699,18 +750,47 @@ class ImportPreview(tk.Toplevel):
                 text=verdict,
                 fg="#e0b060" if st["verdict"] == "percussion" else _ACCENT)
 
+    def _load_kwargs(self) -> dict:
+        kw = dict(percussion=self.perc.get(),
+                  drum_sound="block" if self.drum.get() == "wood block"
+                  else "cluster",
+                  shape_durations=self.shape.get())
+        if self.is_nsf:
+            kw["subsong"] = int(self.track.get())
+            choice = self.length.get()
+            if choice.startswith("auto"):
+                kw.update(max_seconds=180.0, detect_end=True)
+            else:
+                kw.update(max_seconds=float(choice.split()[0]), detect_end=False)
+        return kw
+
     def _on_percussion(self) -> None:
-        """Reparse the module under the chosen percussion mode (fast — the
-        file is small) so auditions and the import reflect it immediately."""
+        """Re-import the module under the current settings (PT3 reparse is
+        instant; NSF re-emulation takes a second or two) so auditions and the
+        import reflect them immediately."""
         self.app.player.stop()
-        sound = "block" if self.drum.get() == "wood block" else "cluster"
+        self.configure(cursor="watch")
+        self.update_idletasks()
         try:
-            self.song, _ = self.app._load_module(self.src, self.perc.get(), sound,
-                                                 self.shape.get())
+            self.song, self._byte0 = self.app._load_module(self.src,
+                                                           **self._load_kwargs())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
+        finally:
+            self.configure(cursor="")
         self._update_stats()
+        self._update_size()
+
+    def _on_track(self) -> None:
+        """A different subsong is a different piece of music: reload, then
+        re-default the channel checkboxes from the fresh verdicts."""
+        self._on_percussion()
+        for tr, keep in zip(self.song.tracks, self.include):
+            keep.set(channel_stats(tr)["verdict"] != "empty")
+        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
+                  for b in self._tempos]
+        self.tempo.set(labels[self._tempos.index(self._byte0)])
         self._update_size()
 
     def _update_size(self) -> None:

@@ -57,8 +57,10 @@ def _cmd_convert(args) -> int:
             data = encode_song(song, tempo_byte0=byte0)
         elif ext == "nsf":
             from .nsf.extract import extract_song
-            song = extract_song(args.input, subsong=args.subsong)
-            data = encode_song(song)
+            song, byte0 = extract_song(args.input, subsong=args.subsong,
+                                       percussion=args.percussion,
+                                       drum_sound=args.drum_sound)
+            data = encode_song(song, tempo_byte0=byte0)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
