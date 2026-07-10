@@ -259,7 +259,7 @@ class PlayerApp:
     def _load_module(src: str, percussion: str = "clicks",
                      drum_sound: str = "cluster", shape_durations: bool = False,
                      subsong=None, max_seconds: float = 180.0,
-                     detect_end: bool = True):
+                     detect_end: bool = True, frames_per_tick=None):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension.
         Importers ignore the options that don't apply to their format."""
         ext = src.lower().rsplit(".", 1)[-1]
@@ -274,7 +274,8 @@ class PlayerApp:
             return extract_song(
                 src, subsong=subsong, max_seconds=max_seconds,
                 percussion="drop" if percussion == "drop" else "clicks",
-                drum_sound=drum_sound, detect_end=detect_end)
+                drum_sound=drum_sound, detect_end=detect_end,
+                frames_per_tick=frames_per_tick)
         raise ValueError(f"no importer for .{ext} files (supported: .pt3, .nsf)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
