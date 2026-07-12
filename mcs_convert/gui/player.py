@@ -859,10 +859,10 @@ class ImportPreview(tk.Toplevel):
 
     def encode_selection(self) -> bytes:
         from ..mcs.encode import encode_song
-        # by_track: each channel gets its own MCS staff, so a busy import never
-        # overflows the real program's 32-entry-per-measure buffer
+        # cap: hold each measure to real MCS's 32-entry buffer so a busy import
+        # never overflows and corrupts playback
         return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0(),
-                           by_track=True)
+                           cap=True)
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:

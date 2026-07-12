@@ -54,7 +54,7 @@ def _cmd_convert(args) -> int:
                 song, byte0 = parse_pt3(fh.read(), percussion=args.percussion,
                                         drum_sound=args.drum_sound,
                                         shape_durations=args.shape_durations)
-            data = encode_song(song, tempo_byte0=byte0, by_track=True)
+            data = encode_song(song, tempo_byte0=byte0, cap=True)
         elif ext == "nsf":
             from .nsf.extract import extract_song
             byte0 = 0x77 + 3 * max(0, min(9, args.slow))
@@ -62,7 +62,7 @@ def _cmd_convert(args) -> int:
                                        percussion=args.percussion,
                                        drum_sound=args.drum_sound,
                                        tempo_byte0=byte0)
-            data = encode_song(song, tempo_byte0=byte0, by_track=True)
+            data = encode_song(song, tempo_byte0=byte0, cap=True)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)

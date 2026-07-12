@@ -34,14 +34,18 @@ def test_overflowing_measure_is_flagged():
     assert any(i.severity == "corrupt" and "buffer" in i.detail for i in issues)
 
 
-def test_by_track_import_stays_within_limits():
+def test_capped_import_stays_within_limits_and_2_staves():
     # a deliberately dense multi-track song (four channels of steady 16ths, all
-    # overlapping) must encode to a valid file when imported by_track
+    # overlapping) must encode to a valid, loadable file with cap=True
     song = Song(title="dense")
     for ch, base in enumerate((72, 76, 55, 48)):
         tr = Track(name=f"ch{ch}")
         for i in range(64):
             tr.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=base + i % 5))
         song.add_track(tr)
-    data = encode_song(song, by_track=True)
+    data = encode_song(song, cap=True)
     assert not [i for i in validate(data) if i.severity == "corrupt"]
+    from mcs_convert.mcs.reader import parse_records, split_staves
+    # exactly 2 staves — the grand-staff layout real MCS loads (not the 4-staff
+    # structure it rejects as "Not an MCS song")
+    assert len(split_staves(parse_records(data))) == 2

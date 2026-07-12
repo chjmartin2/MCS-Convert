@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple
 
 from ..audio import _note_events
 from ..model import Song
-from .validate import MAX_STAVES, MAX_X_SLOT as _MAX_X_SLOT
+from .validate import MAX_X_SLOT as _MAX_X_SLOT
 from .writer import build_file, make_entry
 
 # Symbols (see reader.py / docs/mcs-format.md).
@@ -184,61 +184,33 @@ def _emit_staff(bars, treble: bool, cap: bool = False):
     return measures
 
 
-def _track_events(track, total_box):
-    """(events fitted to a clef window, is_treble) for one track. total_box is a
-    one-element list used to accumulate the song's total length."""
-    raw, midis = [], []
-    for start, dur, midi in _note_events(track.notes):
-        if dur <= 0:
-            continue
-        total_box[0] = max(total_box[0], start + dur)
-        raw.append((start, dur, midi))
-        midis.append(midi)
-    treble = (sorted(midis)[len(midis) // 2] >= 67) if midis else True
-    lo, hi = (TREBLE_LO, TREBLE_HI) if treble else (BASS_LO, BASS_HI)
-    return [(s, d, _fit(m, lo, hi)) for s, d, m in raw], treble
-
-
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
-                split: int = 67, by_track: bool = False) -> bytes:
-    """Song (32nd-note ticks) -> .MCS bytes.
+                split: int = 67, cap: bool = False) -> bytes:
+    """Song (32nd-note ticks) -> .MCS bytes on a treble+bass grand staff (the
+    2-staff layout every corpus song uses, so real MCS always loads it).
 
-    Default: fold everything onto a treble+bass grand staff (split at `split`).
-    `by_track=True`: give each source track its OWN staff (up to MCS's 4), clef
-    chosen by its median pitch — this keeps a busy multi-channel import (NSF, PT3)
-    from piling every voice into one measure and overflowing MCS's 32-entry
-    per-measure buffer. Extra tracks beyond 4 fold onto the nearest-range staff."""
-    total_box = [0]
-    if by_track:
-        live = [t for t in song.tracks if any(not n.is_rest for n in t.notes)]
-        staff_evs = [_track_events(t, total_box) for t in live[:MAX_STAVES]]
-        for extra in live[MAX_STAVES:]:                  # fold overflow tracks in
-            evs, treble = _track_events(extra, total_box)
-            match = next((i for i, (_, tr) in enumerate(staff_evs) if tr == treble),
-                         0)
-            staff_evs[match] = (staff_evs[match][0] + evs, staff_evs[match][1])
-        if not staff_evs:
-            staff_evs = [([], True)]
-    else:
-        treble_ev, bass_ev = [], []
-        for tr in song.tracks:
-            for start, dur, midi in _note_events(tr.notes):
-                if dur <= 0:
-                    continue
-                total_box[0] = max(total_box[0], start + dur)
-                if midi >= split:
-                    treble_ev.append((start, dur, _fit(midi, TREBLE_LO, TREBLE_HI)))
-                else:
-                    bass_ev.append((start, dur, _fit(midi, BASS_LO, BASS_HI)))
-        staff_evs = [(treble_ev, True), (bass_ev, False)]
-
-    total = ((total_box[0] + bar_ticks - 1) // bar_ticks) * bar_ticks
-    blocks = []
-    for evs, treble in staff_evs:
-        measures = _emit_staff(_staff_slots(evs, total, bar_ticks), treble=treble,
-                               cap=by_track)
-        clef = [make_entry(_G_CLEF if treble else _F_CLEF,
-                           16 if treble else 32, 14)]
-        blocks.append([clef] + measures)
+    `cap=True` (used by automated imports) limits each measure to real MCS's
+    32-entry buffer, dropping the densest overflow rather than corrupting
+    playback. The default path stays lossless for hand-authoring/round-trips;
+    the validator flags any overflow there instead of silently dropping."""
+    treble_ev, bass_ev = [], []
+    total = 0
+    for tr in song.tracks:
+        # merge tied chains first: the encoder re-splits sustains itself, so a
+        # pre-tied input (e.g. a re-encoded MCS file) must arrive as whole notes
+        for start, dur, midi in _note_events(tr.notes):
+            if dur <= 0:
+                continue
+            total = max(total, start + dur)
+            if midi >= split:
+                treble_ev.append((start, dur, _fit(midi, TREBLE_LO, TREBLE_HI)))
+            else:
+                bass_ev.append((start, dur, _fit(midi, BASS_LO, BASS_HI)))
+    total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
+    tre = _emit_staff(_staff_slots(treble_ev, total, bar_ticks), True, cap=cap)
+    bas = _emit_staff(_staff_slots(bass_ev, total, bar_ticks), False, cap=cap)
+    clef_t = [make_entry(_G_CLEF, 16, 14)]
+    clef_b = [make_entry(_F_CLEF, 32, 14)]
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
-    return build_file(blocks, tempo_level=2, scroll=scroll)
+    return build_file([[clef_t] + tre, [clef_b] + bas],
+                      tempo_level=2, scroll=scroll)
