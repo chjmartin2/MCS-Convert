@@ -53,7 +53,8 @@ class FrameLog:
     """Everything the emulation run produced, still in 60 Hz frame time."""
 
     def __init__(self) -> None:
-        self.pitched: List[List[Optional[int]]] = [[], [], []]   # p1, p2, tri
+        self.pitched: List[List[Optional[int]]] = [[], [], []]   # p1, p2, tri (midi)
+        self.freqs: List[List[float]] = [[], [], []]             # continuous Hz/frame
         self.noise_hits: List[Tuple[int, int]] = []
         self.dpcm_hits: List[int] = []
         self.frames = 0
@@ -109,10 +110,12 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
     for frame in range(max_frames):
         cpu.call(header.play_addr)
         midis = apu.pitched_midis()
+        freqs = apu.pitched_freqs()
         sig = tuple(apu.writes)
         apu.end_frame()
         for k in range(3):
             log.pitched[k].append(midis[k])
+            log.freqs[k].append(freqs[k])
         log.frames = frame + 1
 
         if not detect_end:
@@ -155,6 +158,7 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
     log.dpcm_hits = [f for f in apu.dpcm_hits if f < log.frames]
     for k in range(3):
         log.pitched[k] = log.pitched[k][:log.frames]
+        log.freqs[k] = log.freqs[k][:log.frames]
     return header, log
 
 
@@ -247,7 +251,7 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
         #                                             import dialog shows 5 rows
     song.dropped_short = 0
     # raw per-frame streams so the dialog can play the true NES render for A/B
-    song.nsf_preview = {"pitched": log.pitched,
+    song.nsf_preview = {"freqs": log.freqs,
                         "noise": [f for f, _ in log.noise_hits],
                         "play_hz": header.play_rate_hz}
 

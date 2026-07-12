@@ -144,55 +144,49 @@ def _pulse_wave(phase: np.ndarray, duty: float = 0.5) -> np.ndarray:
     return np.where(np.mod(phase, 1.0) < duty, 1.0, -1.0).astype(np.float32)
 
 
-def _frames_to_events(stream) -> List[Tuple[int, int, int]]:
-    """Per-frame [midi|None] -> (start_frame, len_frames, midi) runs."""
-    events, run, start = [], None, 0
-    for i, m in enumerate(list(stream) + [None]):
-        if m != run:
-            if run is not None:
-                events.append((start, i - start, run))
-            run, start = m, i
-    return events
-
-
-def render_nes(pitched, noise_frames, play_hz: float, sample_rate: int = 22050,
+def render_nes(freqs, noise_frames, play_hz: float, sample_rate: int = 22050,
                max_seconds: float = None) -> Tuple[np.ndarray, int]:
-    """Render the raw NES per-frame streams to PCM with NES-like timbres — the
-    true-hardware reference, BEFORE any MCS quantization.
+    """Render the raw NES per-frame CONTINUOUS-frequency streams to PCM with
+    NES-like timbres — the true-hardware reference, before any MCS quantization.
 
-    pulse 1 & 2 -> duty-cycle square waves; triangle -> a triangle wave (softer,
-    the NES bass/harmony voice); noise -> short white-noise bursts at each key-on
-    (the LFSR percussion). Not cycle-exact, but the right *sound*: squares buzz,
-    the triangle hums, the drums hiss — unlike the MCS 1-bit render."""
-    frame_s = 1.0 / play_hz
-    n_frames = max((len(s) for s in pitched), default=0)
-    total = int(n_frames * frame_s * sample_rate) + sample_rate // 2
+    `freqs` is three lists of per-frame Hz (0 = silent). Because we drive a
+    phase-accumulating oscillator from the actual per-frame frequency (not a
+    rounded MIDI note), vibrato and pitch slides survive — that continuous
+    pitch wobble is much of what makes NES music sound alive. pulse 1 & 2 are
+    duty-cycle squares, triangle a triangle wave, noise white-noise bursts."""
+    frame_len = sample_rate / play_hz
+    n_frames = max((len(s) for s in freqs), default=0)
+    total = int(n_frames * frame_len) + sample_rate // 2
     if max_seconds:
         total = min(total, int(max_seconds * sample_rate))
     mix = np.zeros(max(total, 1), dtype=np.float32)
 
     specs = [("square", 0.125, 0.22), ("square", 0.25, 0.22), ("triangle", 0.0, 0.26)]
-    for stream, (kind, duty, amp) in zip(pitched, specs):
-        for start, length, midi in _frames_to_events(stream):
-            pos = int(start * frame_s * sample_rate)
-            ns = min(int(length * frame_s * sample_rate), total - pos)
-            if ns <= 0:
-                continue
-            t = np.arange(ns, dtype=np.float64) / sample_rate
-            phase = midi_to_freq(midi) * t
-            wave = (_wave(phase, "triangle") if kind == "triangle"
-                    else _pulse_wave(phase, duty))
-            f = min(int(0.004 * sample_rate), ns // 2)          # de-click fades
-            if f > 0:
-                wave[:f] *= np.linspace(0.0, 1.0, f)
-                wave[-f:] *= np.linspace(1.0, 0.0, f)
-            mix[pos:pos + ns] += amp * wave.astype(np.float32)
+    for stream, (kind, duty, amp) in zip(freqs, specs):
+        if not stream:
+            continue
+        # per-SAMPLE frequency + gate: hold each frame's value across its samples
+        idx = np.minimum((np.arange(total) / frame_len).astype(np.int64),
+                         len(stream) - 1)
+        fps = np.asarray(stream, dtype=np.float64)[idx]          # freq per sample
+        gate = (fps > 0).astype(np.float32)
+        # soften note edges so gate changes don't click
+        g = np.copy(gate)
+        edge = max(1, int(0.003 * sample_rate))
+        # phase integrates the instantaneous frequency -> vibrato/slides preserved
+        phase = np.cumsum(fps / sample_rate)
+        wave = (_wave(phase, "triangle") if kind == "triangle"
+                else _pulse_wave(phase, duty))
+        # a cheap 1-pole smoothing of the gate to taper attacks/releases
+        for _ in range(edge // 4 + 1):
+            g[1:] = 0.5 * g[1:] + 0.5 * g[:-1]
+        mix += amp * (wave.astype(np.float32) * g)
 
     burst = int(0.035 * sample_rate)
     env = np.linspace(1.0, 0.0, burst, dtype=np.float32) ** 2   # percussive decay
     rng = np.random.default_rng(0)
     for fr in noise_frames:
-        pos = int(fr * frame_s * sample_rate)
+        pos = int(fr * frame_len)
         ns = min(burst, total - pos)
         if ns > 0:
             noise = rng.uniform(-1.0, 1.0, ns).astype(np.float32)

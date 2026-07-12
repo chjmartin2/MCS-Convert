@@ -59,11 +59,17 @@ class _Pulse:
         if not self.halt and self.length > 0:
             self.length -= 1
 
+    def sounding(self) -> bool:
+        return (self.enabled and self.length > 0 and self.period >= 8
+                and self.volume() > 0)
+
+    def freq(self) -> float:
+        """Continuous frequency in Hz (0 when gated off) — the true pitch,
+        including any per-frame vibrato/slide, before rounding to a note."""
+        return pulse_period_to_freq(self.period) if self.sounding() else 0.0
+
     def midi(self):
-        if not (self.enabled and self.length > 0 and self.period >= 8
-                and self.volume() > 0):
-            return None
-        return freq_to_midi_int(pulse_period_to_freq(self.period))
+        return freq_to_midi_int(self.freq()) if self.sounding() else None
 
 
 @dataclass
@@ -87,11 +93,15 @@ class _Triangle:
         if not self.control & 0x80 and self.length > 0:
             self.length -= 1
 
+    def sounding(self) -> bool:
+        return (self.enabled and self.length > 0 and self.linear > 0
+                and self.period >= 2)
+
+    def freq(self) -> float:
+        return triangle_period_to_freq(self.period) if self.sounding() else 0.0
+
     def midi(self):
-        if not (self.enabled and self.length > 0 and self.linear > 0
-                and self.period >= 2):
-            return None
-        return freq_to_midi_int(triangle_period_to_freq(self.period))
+        return freq_to_midi_int(self.freq()) if self.sounding() else None
 
 
 class APUState:
@@ -174,3 +184,8 @@ class APUState:
     def pitched_midis(self):
         """(pulse1, pulse2, triangle) current midi notes (None = silent)."""
         return (self.pulse[0].midi(), self.pulse[1].midi(), self.triangle.midi())
+
+    def pitched_freqs(self):
+        """(pulse1, pulse2, triangle) continuous Hz (0 = silent) — keeps the
+        per-frame vibrato/slide that rounding to a MIDI note would erase."""
+        return (self.pulse[0].freq(), self.pulse[1].freq(), self.triangle.freq())

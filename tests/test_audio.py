@@ -12,23 +12,28 @@ from mcs_convert.mcs.reader import tick_seconds_for
 from mcs_convert.model import NoteEvent, Song, Track
 
 
-def test_render_nes_timbres_and_noise():
+def test_render_nes_timbres_and_vibrato():
     import numpy as np
 
     from mcs_convert.audio import render_nes
-    # 30 frames of A4 on pulse1, silent pulse2, A3 on triangle, one noise hit
-    pitched = [[69] * 30, [None] * 30, [57] * 30]
-    master, sr = render_nes(pitched, noise_frames=[10], play_hz=60.0)
+    # continuous per-frame frequency streams (Hz, 0 = silent): A4 pulse, A3 tri
+    A4, A3 = 440.0, 220.0
+    master, sr = render_nes([[A4] * 30, [0.0] * 30, [A3] * 30],
+                            noise_frames=[10], play_hz=60.0)
     assert sr == 22050 and len(master) > 0
     assert np.abs(master).max() <= 0.95            # normalized, not clipping
-    # a square (pulse) is richer in odd harmonics than the near-pure triangle:
-    # rendering only the triangle channel should have less high-frequency energy
-    tri_only, _ = render_nes([[None] * 30, [None] * 30, [57] * 30],
-                             noise_frames=[], play_hz=60.0)
-    sq_only, _ = render_nes([[69] * 30, [None] * 30, [None] * 30],
-                            noise_frames=[], play_hz=60.0)
-    hf = lambda x: float(np.mean(np.abs(np.diff(x))))    # crude brightness proxy
-    assert hf(sq_only) > hf(tri_only)              # square is brighter than triangle
+    # square (pulse) is brighter than the near-pure triangle
+    tri, _ = render_nes([[0.0] * 30, [0.0] * 30, [A3] * 30], [], 60.0)
+    sq, _ = render_nes([[A4] * 30, [0.0] * 30, [0.0] * 30], [], 60.0)
+    hf = lambda x: float(np.mean(np.abs(np.diff(x))))
+    assert hf(sq) > hf(tri)
+    # vibrato survives: a wobbling frequency must NOT render as a flat tone —
+    # its spectrum spreads vs a steady tone of the same mean pitch
+    import math
+    wob = [A4 * (1 + 0.03 * math.sin(i)) for i in range(60)]
+    v, _ = render_nes([wob, [0.0] * 60, [0.0] * 60], [], 60.0)
+    s, _ = render_nes([[A4] * 60, [0.0] * 60, [0.0] * 60], [], 60.0)
+    assert abs(hf(v) - hf(s)) > 1e-4               # the wobble changes the signal
 
 
 def test_tempo_from_header_byte0():

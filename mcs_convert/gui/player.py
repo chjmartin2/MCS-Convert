@@ -881,7 +881,7 @@ class ImportPreview(tk.Toplevel):
         prev = getattr(self.song, "nsf_preview", None)
         if not prev:
             return
-        master, sr = render_nes(prev["pitched"], prev["noise"], prev["play_hz"],
+        master, sr = render_nes(prev["freqs"], prev["noise"], prev["play_hz"],
                                 max_seconds=self._PREVIEW_SECONDS)
         pcm = pcm16(master)
         if pcm:
