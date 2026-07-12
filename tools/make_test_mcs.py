@@ -122,7 +122,7 @@ def build():
         M(21).note(s, N2).note(r, N2).done(),
         M(21).note(p, N1).done(),
     ]
-    return build_file([T, B], tempo_level=1, word7=18)
+    return build_file([T, B], time_sig=1, word7=18)          # 4/4
 
 
 def main():
@@ -134,7 +134,8 @@ def main():
     print(f"wrote {out} ({len(data)} bytes)")
 
     song = parse(out)
-    print(f"time={song.time_signature} key={song.key_signature} tempo={song.tempo_level}")
+    print(f"time={song.time_signature} key={song.key_signature} "
+          f"code={getattr(song, 'timesig_code', '?')}")
     for tr in song.tracks:
         print(f"\n{tr.name}: {len(tr.notes)} events")
         line = " ".join(("rest" if n.is_rest else midi_to_name(n.midi_note))
