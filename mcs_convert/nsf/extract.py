@@ -158,78 +158,52 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
     return header, log
 
 
-def fit_grid(onsets: List[int], play_hz: float,
-             durations: Optional[List[int]] = None) -> Tuple[int, int]:
-    """Choose (frames_per_tick, mcs_tempo_byte0) for the 32nd-tick grid. The tick
-    must land in MCS's tempo range; note onsets should sit near tick edges; and
-    crucially, notes that would round to zero length (shorter than half a tick)
-    are DROPPED, so a coarse grid on a busy theme loses the fast runs. We weight
-    that loss heavily — a fast piece is pushed toward a finer grid (which plays
-    slower than the original but keeps every note). Among otherwise-equal fits,
-    prefer the coarsest so slow pieces still land on musical note values."""
-    cands = []
-    n = len(durations) if durations else 0
-    for fpt in (1, 2, 3, 4, 5, 6):
-        tick = fpt / play_hz
-        step = round((2 * tick - 0.067) / 0.016)
-        if not 0 <= step <= 9:
-            continue
-        got = (0.067 + 0.016 * step) / 2.0
-        tempo_err = abs(got - tick) / tick
-        q = (sum(min(o % fpt, fpt - o % fpt) / fpt for o in onsets) / len(onsets)
-             if onsets else 0.0)
-        drop_frac = (sum(1 for d in durations if d * 2 < fpt) / n) if n else 0.0
-        cands.append((q + 2.0 * tempo_err + 6.0 * drop_frac, fpt, 0x77 + 3 * step))
-    if not cands:
-        return 3, 0x77
-    best_score = min(c[0] for c in cands)
-    good = [c for c in cands if c[0] <= best_score + 0.02]
-    _, fpt, byte0 = max(good, key=lambda c: c[1])
-    return fpt, byte0
-
-
 _CLICKS = {"cluster": (55, 56), "block": (62,)}
 _CHANNEL_NAMES = ("Pulse 1", "Pulse 2", "Triangle")
+
+# MCS's finest tick (byte0 0x77) is ~33.5 ms; that's the shortest note the format
+# can play, and it's the ceiling on how much timing detail we can keep.
+_FINEST_TICK_S = 0.0335
+
+
+def finest_fpt(play_hz: float) -> int:
+    """NES frames that fit in one MCS 32nd-tick at the finest MCS tempo — the
+    resolution we always quantize at, so no fast note is thrown away."""
+    return max(1, round(_FINEST_TICK_S * play_hz))
 
 
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                    percussion: str = "clicks", drum_sound: str = "cluster",
-                   frames_per_tick: Optional[int] = None) -> Tuple[Song, int]:
+                   tempo_byte0: int = 0x77) -> Tuple[Song, int]:
     """Frame-domain log -> (Song in 32nd ticks, mcs_tempo_byte0).
 
-    `frames_per_tick` overrides the automatic grid fit. A finer grid than real
-    time allows (MCS's shortest tick is ~33 ms) makes the song play SLOWER than
-    the original but keeps rapid notes that a coarser grid would drop — the
-    Dr. Wily trade: right notes at 80% speed beat missing notes at 100%."""
+    Timing is decoupled from tempo. We ALWAYS quantize at MCS's finest resolution
+    (~2 NES frames per tick) so every note survives; `tempo_byte0` is then a pure
+    playback-speed dial. At the fastest byte0 (0x77) a tick is ~33.5 ms ≈ 2 NES
+    frames, so the song plays at the real NES speed; a slower byte0 just stretches
+    every note in lockstep (the note COUNT in ticks never changes), which studies
+    the tune in slow motion without dropping anything. This is why a fast tempo
+    renders Dr. Wily's 16th-note runs where a coarse grid could not."""
+    fpt = finest_fpt(header.play_rate_hz)
     runs = [segment_frames(ch) for ch in log.pitched]
-    onsets = [n.start_tick for ch in runs for n in ch]
-    onsets += [f for f, _ in log.noise_hits] + list(log.dpcm_hits)
-    durations = [n.duration_ticks for ch in runs for n in ch]
-    if frames_per_tick:
-        fpt = frames_per_tick
-        step = max(0, min(9, round((2 * fpt / header.play_rate_hz - 0.067) / 0.016)))
-        byte0 = 0x77 + 3 * step
-    else:
-        fpt, byte0 = fit_grid(sorted(onsets), header.play_rate_hz, durations)
 
     title = header.song_name or "NSF"
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
-    dropped = 0
     for name, events in zip(_CHANNEL_NAMES, runs):
         track = Track(name=name)
+        prev_end = -1
         for n in events:
             start = round(n.start_tick / fpt)
             end = round((n.start_tick + n.duration_ticks) / fpt)
+            start = max(start, prev_end)            # keep the voice monotone
             if end <= start:
-                if n.duration_ticks * 2 < fpt:      # sub-half-tick blip: drop
-                    dropped += 1
-                    continue
-                end = start + 1
+                end = start + 1                     # a real note is worth >=1 tick
             track.add(NoteEvent(start_tick=start, duration_ticks=end - start,
                                 midi_note=n.midi_note))
+            prev_end = end
         song.add_track(track)                       # kept even when empty: the
         #                                             import dialog shows 5 rows
-    song.dropped_short = dropped                    # grid feedback for the dialog
+    song.dropped_short = 0                           # finest grid never drops
 
     for name, hits in (("Noise", [f for f, _ in log.noise_hits]),
                        ("DPCM", log.dpcm_hits)):
@@ -246,16 +220,16 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                                         midi_note=midi, percussive=True))
         track.meta["drum_notes"] = len(track.notes)
         song.add_track(track)
-    return song, byte0
+    return song, tempo_byte0
 
 
 def extract_song(path: str, subsong: Optional[int] = None,
                  max_seconds: float = 180.0, percussion: str = "clicks",
                  drum_sound: str = "cluster", detect_end: bool = True,
-                 frames_per_tick: Optional[int] = None) -> Tuple[Song, int]:
+                 tempo_byte0: int = 0x77) -> Tuple[Song, int]:
     """Emulate an NSF subsong and return (Song, mcs_tempo_byte0)."""
     with open(path, "rb") as fh:
         data = fh.read()
     header, log = run_nsf(data, subsong, max_seconds, detect_end)
     n = subsong if subsong is not None else header.starting_song
-    return frames_to_song(header, log, n, percussion, drum_sound, frames_per_tick)
+    return frames_to_song(header, log, n, percussion, drum_sound, tempo_byte0)

@@ -259,9 +259,11 @@ class PlayerApp:
     def _load_module(src: str, percussion: str = "clicks",
                      drum_sound: str = "cluster", shape_durations: bool = False,
                      subsong=None, max_seconds: float = 180.0,
-                     detect_end: bool = True, frames_per_tick=None):
+                     detect_end: bool = True):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension.
-        Importers ignore the options that don't apply to their format."""
+        Importers ignore the options that don't apply to their format. NSF note
+        timing is tempo-independent (quantized at MCS's finest resolution), so
+        tempo is applied later at encode time, not here."""
         ext = src.lower().rsplit(".", 1)[-1]
         if ext == "pt3":
             from ..pt3 import parse_pt3
@@ -274,8 +276,7 @@ class PlayerApp:
             return extract_song(
                 src, subsong=subsong, max_seconds=max_seconds,
                 percussion="drop" if percussion == "drop" else "clicks",
-                drum_sound=drum_sound, detect_end=detect_end,
-                frames_per_tick=frames_per_tick)
+                drum_sound=drum_sound, detect_end=detect_end)
         raise ValueError(f"no importer for .{ext} files (supported: .pt3, .nsf)")
 
     def save_and_load(self, data: bytes, src: str) -> None:
@@ -675,17 +676,6 @@ class ImportPreview(tk.Toplevel):
                                           "120 s", "180 s"))
             ln_box.pack(side="left")
             ln_box.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
-            # Grid: frames per 32nd-tick. Finer than real time allows plays the
-            # song slower but keeps rapid notes a coarse grid would drop.
-            tk.Label(nrow, text="grid", bg=_BG, fg=_ACCENT).pack(
-                side="left", padx=(18, 4))
-            self.grid_choice = tk.StringVar(value="auto")
-            gr_box = ttk.Combobox(nrow, textvariable=self.grid_choice, width=15,
-                                  state="readonly",
-                                  values=("auto", "1 (finest, slower)",
-                                          "2", "3", "4", "5", "6 (coarsest)"))
-            gr_box.pack(side="left")
-            gr_box.bind("<<ComboboxSelected>>", lambda _e: self._on_track())
             base += 1
 
         # Percussion handling — live for audition. (NSF noise has no written
@@ -717,16 +707,29 @@ class ImportPreview(tk.Toplevel):
                            activebackground=_BG, activeforeground=_FG,
                            selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
-        # MCS tempo: ten discrete speeds; default = the fitted suggestion.
+        # MCS tempo — a pure playback-speed dial. For NSF the note timing is
+        # already fixed at the finest resolution, so tempo just stretches the
+        # whole song: the fastest setting plays it at the real NES speed, slower
+        # settings study it in slow motion without losing any notes.
         bar = tk.Frame(self, bg=_BG)
         bar.grid(row=base + 1, column=0, columnspan=9, sticky="w",
                  padx=10, pady=(8, 2))
-        tk.Label(bar, text="Tempo", bg=_BG, fg=_ACCENT).pack(side="left")
+        tk.Label(bar, text="Tempo" if not self.is_nsf else "Speed",
+                 bg=_BG, fg=_ACCENT).pack(side="left")
         self._tempos = [0x77 + 3 * s for s in range(10)]
-        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM" for b in self._tempos]
+        if self.is_nsf:
+            labels = ["fastest (real NES)"] + \
+                [f"{round(100 * tick_seconds_for(0x77) / tick_seconds_for(b))}% speed"
+                 for b in self._tempos[1:]]
+        else:
+            labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
+                      for b in self._tempos]
+        self._tempo_labels = labels
         self.tempo = tk.StringVar(value=labels[self._tempos.index(byte0)])
-        ttk.Combobox(bar, textvariable=self.tempo, width=11, state="readonly",
-                     values=labels).pack(side="left", padx=(6, 16))
+        tempo_box = ttk.Combobox(bar, textvariable=self.tempo, width=16,
+                                 state="readonly", values=labels)
+        tempo_box.pack(side="left", padx=(6, 16))
+        tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
             [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
         tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
@@ -745,13 +748,11 @@ class ImportPreview(tk.Toplevel):
         """Refresh the header line and per-channel stat labels."""
         total = max((n.end_tick for t in self.song.tracks for n in t.notes),
                     default=0)
-        secs = int(total * tick_seconds_for(self._byte0))
-        dropped = getattr(self.song, "dropped_short", 0)
-        warn = f"   ⚠ {dropped} notes too short for this grid" if dropped else ""
+        secs = int(total * tick_seconds_for(self._tempo_byte0()))
         self.head_label.configure(
             text=f"{self.song.title or os.path.basename(self.src)} — "
-                 f"{total // 32} bars, ~{secs // 60}:{secs % 60:02d}{warn}",
-            fg="#e0b060" if dropped else _FG)
+                 f"{total // 32} bars, ~{secs // 60}:{secs % 60:02d}",
+            fg=_FG)
         for tr, labels in zip(self.song.tracks, self._stat_labels):
             st = channel_stats(tr)
             verdict = st["verdict"]
@@ -777,9 +778,6 @@ class ImportPreview(tk.Toplevel):
                 kw.update(max_seconds=180.0, detect_end=True)
             else:
                 kw.update(max_seconds=float(choice.split()[0]), detect_end=False)
-            grid = self.grid_choice.get()
-            if grid != "auto":
-                kw["frames_per_tick"] = int(grid.split()[0])
         return kw
 
     def _on_percussion(self) -> None:
@@ -806,9 +804,14 @@ class ImportPreview(tk.Toplevel):
         self._on_percussion()
         for tr, keep in zip(self.song.tracks, self.include):
             keep.set(channel_stats(tr)["verdict"] != "empty")
-        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
-                  for b in self._tempos]
-        self.tempo.set(labels[self._tempos.index(self._byte0)])
+        self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
+        self._update_size()
+
+    def _on_tempo(self) -> None:
+        """Tempo is pure playback speed — the note timing is already fixed — so
+        no re-import is needed, just refresh the duration and size readouts."""
+        self.app.player.stop()
+        self._update_stats()
         self._update_size()
 
     def _update_size(self) -> None:
@@ -822,8 +825,9 @@ class ImportPreview(tk.Toplevel):
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:
-        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM" for b in self._tempos]
-        return self._tempos[labels.index(self.tempo.get())]
+        if getattr(self, "tempo", None) is None:     # called before widget built
+            return self._byte0
+        return self._tempos[self._tempo_labels.index(self.tempo.get())]
 
     def selected_song(self, indices=None) -> Song:
         """The checked (or given) channels, octave shifts applied."""

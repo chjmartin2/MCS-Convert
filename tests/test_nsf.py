@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from mcs_convert.nsf.extract import extract_song, fit_grid
+from mcs_convert.nsf.extract import extract_song, finest_fpt
 
 
 def _build_nsf() -> bytes:
@@ -78,8 +78,23 @@ def test_explicit_length_disables_detection(nsf_path):
     assert total >= 1                            # ran the full 5s without ending early
 
 
-def test_fit_grid_prefers_clean_onsets():
-    # onsets on multiples of 4 frames: fpt=4 should beat fpt=3
-    onsets = list(range(0, 400, 4))
-    fpt, byte0 = fit_grid(onsets, 60.1)
-    assert fpt == 4 and 0x77 <= byte0 <= 0x92
+def test_finest_resolution_is_about_two_frames():
+    # MCS's finest tick (~33.5 ms) spans ~2 NES frames at 60 Hz — the resolution
+    # we always quantize at, so no fast note is dropped.
+    assert finest_fpt(60.1) == 2
+    assert finest_fpt(50.0) == 2                  # PAL
+
+
+def test_tempo_is_decoupled_from_note_timing(nsf_path):
+    # A slower tempo byte must NOT change the note timing in ticks — only the
+    # playback speed. Same tick counts, different byte0.
+    fast, b_fast = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
+                                tempo_byte0=0x77)
+    slow, b_slow = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
+                                tempo_byte0=0x92)
+    assert b_fast == 0x77 and b_slow == 0x92
+    fast_ticks = [(n.start_tick, n.duration_ticks)
+                  for t in fast.tracks for n in t.notes]
+    slow_ticks = [(n.start_tick, n.duration_ticks)
+                  for t in slow.tracks for n in t.notes]
+    assert fast_ticks == slow_ticks              # identical timing, only speed differs

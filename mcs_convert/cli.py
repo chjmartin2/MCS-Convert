@@ -57,15 +57,12 @@ def _cmd_convert(args) -> int:
             data = encode_song(song, tempo_byte0=byte0)
         elif ext == "nsf":
             from .nsf.extract import extract_song
+            byte0 = 0x77 + 3 * max(0, min(9, args.slow))
             song, byte0 = extract_song(args.input, subsong=args.subsong,
                                        percussion=args.percussion,
                                        drum_sound=args.drum_sound,
-                                       frames_per_tick=args.grid)
+                                       tempo_byte0=byte0)
             data = encode_song(song, tempo_byte0=byte0)
-            if getattr(song, "dropped_short", 0):
-                print(f"note: {song.dropped_short} notes were too short for the "
-                      f"grid; try --grid 1 or 2 (plays slower, keeps everything)",
-                      file=sys.stderr)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
@@ -112,11 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--shape-durations", action="store_true",
                         help="truncate notes to their sample's audible decay "
                              "(recovers plucks/staccato; MCS has no volume)")
-    p_conv.add_argument("--grid", type=int, choices=(1, 2, 3, 4, 5, 6),
-                        default=None, metavar="N",
-                        help="NSF: force N frames per 32nd-tick instead of the "
-                             "auto fit. Finer than real time allows plays the "
-                             "song slower but keeps rapid notes (Dr. Wily mode)")
+    p_conv.add_argument("--slow", type=int, choices=range(0, 10), default=0,
+                        metavar="N",
+                        help="NSF: playback-speed step 0-9. 0 (default) plays at "
+                             "the real NES speed with full timing detail; higher "
+                             "values study the tune in slow motion. Note timing is "
+                             "always kept at MCS's finest resolution either way.")
     p_conv.set_defaults(func=_cmd_convert)
     return p
 
