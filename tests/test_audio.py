@@ -12,6 +12,25 @@ from mcs_convert.mcs.reader import tick_seconds_for
 from mcs_convert.model import NoteEvent, Song, Track
 
 
+def test_render_nes_timbres_and_noise():
+    import numpy as np
+
+    from mcs_convert.audio import render_nes
+    # 30 frames of A4 on pulse1, silent pulse2, A3 on triangle, one noise hit
+    pitched = [[69] * 30, [None] * 30, [57] * 30]
+    master, sr = render_nes(pitched, noise_frames=[10], play_hz=60.0)
+    assert sr == 22050 and len(master) > 0
+    assert np.abs(master).max() <= 0.95            # normalized, not clipping
+    # a square (pulse) is richer in odd harmonics than the near-pure triangle:
+    # rendering only the triangle channel should have less high-frequency energy
+    tri_only, _ = render_nes([[None] * 30, [None] * 30, [57] * 30],
+                             noise_frames=[], play_hz=60.0)
+    sq_only, _ = render_nes([[69] * 30, [None] * 30, [None] * 30],
+                            noise_frames=[], play_hz=60.0)
+    hf = lambda x: float(np.mean(np.abs(np.diff(x))))    # crude brightness proxy
+    assert hf(sq_only) > hf(tri_only)              # square is brighter than triangle
+
+
 def test_tempo_from_header_byte0():
     # Real tempo is set by header byte 0 (measured from DOSBox-X captures), not the 0x05
     # word: per-sixteenth = 0.067 + 0.016*step, step = (byte0 - 0x77)//3. A tick is a

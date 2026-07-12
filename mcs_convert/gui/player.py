@@ -33,7 +33,9 @@ from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
-from ..audio import WaveOutPlayer, pcm16, render_song, tempo_bpm, wav_bytes
+from ..audio import (
+    WaveOutPlayer, pcm16, render_nes, render_song, tempo_bpm, wav_bytes,
+)
 from ..mcs.reader import parse, tick_seconds_for
 from ..model import NoteEvent, Song, Track
 from ..pitch import midi_to_name
@@ -873,30 +875,15 @@ class ImportPreview(tk.Toplevel):
                                  volume=self.app.volume.get() / 100.0)
 
     def _preview_original(self) -> None:
-        """Play the true NES render: the raw per-frame emulation at 60 Hz,
-        BEFORE any quantization — the reference to A/B the conversion against."""
+        """Play the true NES render: the raw per-frame emulation with NES-like
+        timbres (squares, triangle, noise) at 60 Hz, BEFORE any quantization —
+        the hardware reference to A/B the MCS conversion against."""
         prev = getattr(self.song, "nsf_preview", None)
         if not prev:
             return
-        # one tick = one NES frame; no rounding, real frame durations
-        orig = Song(title="original")
-        for name, stream in zip(("Pulse 1", "Pulse 2", "Triangle"), prev["pitched"]):
-            tr = Track(name=name)
-            run_note, run_start = None, 0
-            for i, m in enumerate(stream + [None]):
-                if m != run_note:
-                    if run_note is not None:
-                        tr.add(NoteEvent(run_start, i - run_start, run_note))
-                    run_note, run_start = m, i
-            orig.add_track(tr)
-        drums = Track(name="Noise")
-        for f in prev["noise"]:
-            for midi in (55, 56):
-                drums.add(NoteEvent(f, 1, midi, percussive=True))
-        orig.add_track(drums)
-        master, _, sr = render_song(orig, step_seconds=1.0 / prev["play_hz"],
-                                    waveform="pcspeaker")
-        pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
+        master, sr = render_nes(prev["pitched"], prev["noise"], prev["play_hz"],
+                                max_seconds=self._PREVIEW_SECONDS)
+        pcm = pcm16(master)
         if pcm:
             self.app.player.play(pcm, sr,
                                  volume=self.app.volume.get() / 100.0)

@@ -138,6 +138,72 @@ def _render_pcspeaker(events: List[Tuple[int, int, int]], sr: int, step: float) 
     return (bits * 2.0 - 1.0).astype(np.float32) * 0.6
 
 
+def _pulse_wave(phase: np.ndarray, duty: float = 0.5) -> np.ndarray:
+    """NES pulse channel: a square with a duty cycle (12.5/25/50%). Duty 0.5 is
+    a plain square; the narrower duties give the reedy NES lead timbre."""
+    return np.where(np.mod(phase, 1.0) < duty, 1.0, -1.0).astype(np.float32)
+
+
+def _frames_to_events(stream) -> List[Tuple[int, int, int]]:
+    """Per-frame [midi|None] -> (start_frame, len_frames, midi) runs."""
+    events, run, start = [], None, 0
+    for i, m in enumerate(list(stream) + [None]):
+        if m != run:
+            if run is not None:
+                events.append((start, i - start, run))
+            run, start = m, i
+    return events
+
+
+def render_nes(pitched, noise_frames, play_hz: float, sample_rate: int = 22050,
+               max_seconds: float = None) -> Tuple[np.ndarray, int]:
+    """Render the raw NES per-frame streams to PCM with NES-like timbres — the
+    true-hardware reference, BEFORE any MCS quantization.
+
+    pulse 1 & 2 -> duty-cycle square waves; triangle -> a triangle wave (softer,
+    the NES bass/harmony voice); noise -> short white-noise bursts at each key-on
+    (the LFSR percussion). Not cycle-exact, but the right *sound*: squares buzz,
+    the triangle hums, the drums hiss — unlike the MCS 1-bit render."""
+    frame_s = 1.0 / play_hz
+    n_frames = max((len(s) for s in pitched), default=0)
+    total = int(n_frames * frame_s * sample_rate) + sample_rate // 2
+    if max_seconds:
+        total = min(total, int(max_seconds * sample_rate))
+    mix = np.zeros(max(total, 1), dtype=np.float32)
+
+    specs = [("square", 0.125, 0.22), ("square", 0.25, 0.22), ("triangle", 0.0, 0.26)]
+    for stream, (kind, duty, amp) in zip(pitched, specs):
+        for start, length, midi in _frames_to_events(stream):
+            pos = int(start * frame_s * sample_rate)
+            ns = min(int(length * frame_s * sample_rate), total - pos)
+            if ns <= 0:
+                continue
+            t = np.arange(ns, dtype=np.float64) / sample_rate
+            phase = midi_to_freq(midi) * t
+            wave = (_wave(phase, "triangle") if kind == "triangle"
+                    else _pulse_wave(phase, duty))
+            f = min(int(0.004 * sample_rate), ns // 2)          # de-click fades
+            if f > 0:
+                wave[:f] *= np.linspace(0.0, 1.0, f)
+                wave[-f:] *= np.linspace(1.0, 0.0, f)
+            mix[pos:pos + ns] += amp * wave.astype(np.float32)
+
+    burst = int(0.035 * sample_rate)
+    env = np.linspace(1.0, 0.0, burst, dtype=np.float32) ** 2   # percussive decay
+    rng = np.random.default_rng(0)
+    for fr in noise_frames:
+        pos = int(fr * frame_s * sample_rate)
+        ns = min(burst, total - pos)
+        if ns > 0:
+            noise = rng.uniform(-1.0, 1.0, ns).astype(np.float32)
+            mix[pos:pos + ns] += 0.18 * noise * env[:ns]
+
+    peak = float(np.max(np.abs(mix))) or 1.0
+    if peak > 0.95:
+        mix *= 0.95 / peak
+    return mix, sample_rate
+
+
 def _render_voice_bits(events: List[Tuple[int, int, int]], sr: int, step: float,
                        total: int) -> np.ndarray:
     """One voice's own 1-bit square (±0.6 while sounding, 0 when silent) — the scope's
