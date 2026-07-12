@@ -58,6 +58,20 @@ def test_percussion_never_reaches_the_pitched_staff(tmp_path):
     assert _sounding(got) == sorted(_note_events(mel.notes))
 
 
+def test_parse_bytes_matches_file_parse(tmp_path):
+    # parse_bytes decodes an in-memory file identically to parse() off disk — the
+    # dialog preview auditions these exact bytes so it matches the exported file
+    # (previewing the raw source instead sustained/sounded notes the cap drops).
+    from mcs_convert.mcs.reader import parse_bytes
+    src = [(0, 8, 72), (8, 8, 74), (16, 16, 79), (0, 32, 48)]
+    data = encode_song(_mk(src), cap=True)
+    (tmp_path / "b.mcs").write_bytes(data)
+    from_file = parse_mcs(str(tmp_path / "b.mcs"))
+    from_bytes = parse_bytes(data)
+    assert ([_note_events(t.notes) for t in from_bytes.tracks]
+            == [_note_events(t.notes) for t in from_file.tracks])
+
+
 def test_gap_becomes_a_rest(tmp_path):
     # a note, silence, a note: the gap must be explicit rest time, not stretch
     src = [(0, 4, 72), (12, 4, 72)]

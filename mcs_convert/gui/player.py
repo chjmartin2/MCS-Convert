@@ -866,10 +866,24 @@ class ImportPreview(tk.Toplevel):
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:
-        """Play the first seconds of the given channels through the synth."""
+        """Play the first seconds of the given channels through the synth.
+
+        Auditions the ACTUAL encoded output (round-tripped through the MCS
+        writer, cap and all), not the idealized source — so what you hear is
+        what the exported file / tracker plays. Previewing the raw extraction
+        instead let the preview sustain and sound notes the capped export drops,
+        which read as 'notes cut short' once loaded in MCS."""
         if not indices:
             return
+        from ..mcs.encode import encode_song
+        from ..mcs.reader import parse_bytes
         sel = self.selected_song(indices)
+        try:
+            data = encode_song(sel, tempo_byte0=self._tempo_byte0(), cap=True)
+            sel = parse_bytes(data)
+        except Exception:
+            pass                        # fall back to the raw selection on any
+            #                             encode hiccup rather than kill preview
         step = tick_seconds_for(self._tempo_byte0())
         master, _, sr = render_song(sel, step_seconds=step, waveform="pcspeaker")
         pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])

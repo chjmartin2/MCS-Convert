@@ -389,7 +389,15 @@ def parse(path: str) -> Song:
     staff's) is front-padded by the measure's deficit."""
     with open(path, "rb") as fh:
         d = fh.read()
-    song = Song(title="", source=f"mcs:{path}")
+    return parse_bytes(d, source=f"mcs:{path}")
+
+
+def parse_bytes(d: bytes, source: str = "mcs:bytes") -> Song:
+    """Parse raw .MCS/.MCD bytes into a Song (see parse). Lets callers decode an
+    in-memory file — e.g. auditioning the exact bytes the encoder will write, so
+    a preview matches the exported/tracker playback rather than the idealized
+    source."""
+    song = Song(title="", source=source)
 
     staff_recs = split_staves(parse_records(d))
     decoded: List[Tuple[str, List[List[_Slot]]]] = []
