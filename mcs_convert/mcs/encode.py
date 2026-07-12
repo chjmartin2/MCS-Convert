@@ -214,9 +214,14 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     treble_ev, bass_ev = [], []
     total = 0
     for tr in song.tracks:
+        # Percussion (noise/DPCM drum hits) has no home on MCS's pitched grand
+        # staff — including it dumps every click onto the bass staff as a low
+        # note, which floods the 32-entry measure buffer and drops REAL notes
+        # (Dr. Wily's 392 noise hits were knocking out 288 slots of music).
+        pitched = [n for n in tr.notes if not n.percussive]
         # merge tied chains first: the encoder re-splits sustains itself, so a
         # pre-tied input (e.g. a re-encoded MCS file) must arrive as whole notes
-        for start, dur, midi in _note_events(tr.notes):
+        for start, dur, midi in _note_events(pitched):
             if dur <= 0:
                 continue
             total = max(total, start + dur)

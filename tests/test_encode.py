@@ -39,6 +39,25 @@ def test_simple_melody_roundtrips(tmp_path):
     assert _sounding(got) == sorted(src)
 
 
+def test_percussion_never_reaches_the_pitched_staff(tmp_path):
+    # A dense percussion track (noise/DPCM drum hits) must NOT be written onto the
+    # grand staff. It used to land as low bass notes and flood the 32-entry
+    # measure buffer, dropping real melody/bass (Dr. Wily lost ~40% of its notes).
+    song = Song(title="drums")
+    mel = Track(name="Treble")
+    for i in range(8):
+        mel.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=72 + i % 4))
+    song.add_track(mel)
+    drums = Track(name="Noise")
+    for i in range(200):                              # a hit on every tick
+        drums.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=55,
+                            percussive=True))
+    song.add_track(drums)
+    got = _roundtrip(song, tmp_path, cap=True)
+    # every melody note survives; no drum pitch (55 = G3) contaminates the staff
+    assert _sounding(got) == sorted(_note_events(mel.notes))
+
+
 def test_gap_becomes_a_rest(tmp_path):
     # a note, silence, a note: the gap must be explicit rest time, not stretch
     src = [(0, 4, 72), (12, 4, 72)]
