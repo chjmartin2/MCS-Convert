@@ -232,5 +232,7 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     clef_t = [make_entry(_G_CLEF, 16, 14)]
     clef_b = [make_entry(_F_CLEF, 32, 14)]
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
+    # meter code from the bar length: 16=2/4, 24=3/4, 32=4/4 (48=6/8). Default 4/4.
+    time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)
     return build_file([[clef_t] + tre, [clef_b] + bas],
-                      tempo_level=2, scroll=scroll)
+                      time_sig=time_sig, scroll=scroll)

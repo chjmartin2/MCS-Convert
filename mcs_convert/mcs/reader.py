@@ -116,10 +116,18 @@ def _note_value(sym: int) -> tuple[str, int]:
         return "rest", sym - 7
     return "", 0
 
-# Tempo: the 0x05 header word is 0x3AF9 + 3*level; the engine feeds `level` into its
-# note-timing multiply (image 0x1535). The corpus uses levels 0..3 only.
-TEMPO_BASE = 0x3AF9
-TEMPO_STEP = 3
+# TIME SIGNATURE: the 0x05 header word is 0x3AF9 + 3*code — NOT tempo (that's byte 0).
+# Proven by diffing one song saved from MCS as 4/4 vs 6/8: only byte 0x05 changed
+# (0xFC -> 0xFF). The code selects the meter; the corpus uses 0..3. (The old "tempo
+# word" reading was wrong — a length-derived meter can't tell 6/8 from 3/4, but this
+# field can: they are codes 2 and 3 with the same 24-tick bars.)
+TIMESIG_BASE = 0x3AF9
+TIMESIG_STEP = 3
+TIMESIG_CODES = {0: "2/4", 1: "4/4", 2: "6/8", 3: "3/4"}
+_TIMESIG_TO_CODE = {v: k for k, v in TIMESIG_CODES.items()}
+# Back-compat aliases (this word was long mislabelled "tempo").
+TEMPO_BASE = TIMESIG_BASE
+TEMPO_STEP = TIMESIG_STEP
 
 # The REAL playback tempo is set by header byte 0 (0x77..0x92, in steps of 3), NOT the
 # 0x05 word. Measured from DOSBox-X captures: seconds per SIXTEENTH =
@@ -432,12 +440,16 @@ def parse(path: str) -> Song:
     song.events.sort()
 
     # --- display metadata --------------------------------------------------
-    if len(d) >= 0x07:
-        song.tempo_raw = _u16(d, 0x05)
-        song.tempo_level = max(0, (song.tempo_raw - TEMPO_BASE) // TEMPO_STEP)
     if d:
         song.tempo_tick_seconds = tick_seconds_for(d[0])      # real tempo from byte 0
-    song.time_signature = _time_signature(measure_len)
+    # Time signature: prefer the stored 0x05 code (authoritative — distinguishes
+    # 6/8 from 3/4), fall back to the modal measure length for unknown codes.
+    if len(d) >= 0x07:
+        song.timesig_code = max(0, (_u16(d, 0x05) - TIMESIG_BASE) // TIMESIG_STEP)
+        song.time_signature = TIMESIG_CODES.get(song.timesig_code,
+                                                _time_signature(measure_len))
+    else:
+        song.time_signature = _time_signature(measure_len)
     if staves:
         treble = next((s for s in staves if s.clef == CLEF_TREBLE), staves[0])
         song.key_signature = _key_name(treble.keysig)

@@ -7,7 +7,7 @@ MartyPC is the ground-truth check that our encoding matches MCS's own.
 
 File layout (see docs/mcs-format.md):
   0x00..0x04  scroll/view bytes (display state; pitch-independent)
-  0x05        uint16 tempo word = 0x3AF9 + 3*level
+  0x05        uint16 TIME-SIGNATURE word = 0x3AF9 + 3*code (0=2/4,1=4/4,2=6/8,3=3/4)
   0x07        uint16 (usually 0)
   0x09        uint16 staff-1 section size   = serialized length of staff 1 up to but
   0x0B        uint16 staff-2 section size      NOT including its (0,0) separator
@@ -21,7 +21,7 @@ import struct
 from typing import List, Sequence, Tuple
 
 from .reader import (
-    MIDI_ANCHOR, Record, TEMPO_BASE, TEMPO_STEP, _BASS_WINDOW, _TREBLE_WINDOW,
+    MIDI_ANCHOR, Record, TIMESIG_BASE, TIMESIG_STEP, _BASS_WINDOW, _TREBLE_WINDOW,
     parse_records,
 )
 
@@ -79,10 +79,17 @@ def _link_prev(measures: List[List[Entry]]) -> List[Record]:
     return records
 
 
-def build_file(staves: List[List[List[Entry]]], *, tempo_level: int = 1,
-               scroll: bytes = DEFAULT_SCROLL, word7: int = 0) -> bytes:
+def build_file(staves: List[List[List[Entry]]], *, time_sig: int = 1,
+               scroll: bytes = DEFAULT_SCROLL, word7: int = 0,
+               tempo_level: int = None) -> bytes:
     """Assemble a complete .MCS from staves (each a list of measures, each a list of
-    entries). Section sizes, total length, and the (0,0) staff separators are computed."""
+    entries). Section sizes, total length, and the (0,0) staff separators are computed.
+
+    `time_sig` is the meter CODE written at 0x05 (0=2/4, 1=4/4, 2=6/8, 3=3/4) — the
+    real tempo lives in scroll[0], not here. (`tempo_level` is the old, wrong name
+    for this argument, kept so existing callers don't break.)"""
+    if tempo_level is not None:
+        time_sig = tempo_level
     body = bytearray()
     sizes: List[int] = []
     for measures in staves:
@@ -96,7 +103,7 @@ def build_file(staves: List[List[List[Entry]]], *, tempo_level: int = 1,
 
     header = bytearray(0x0F)
     header[0:5] = scroll
-    struct.pack_into("<H", header, 0x05, TEMPO_BASE + TEMPO_STEP * tempo_level)
+    struct.pack_into("<H", header, 0x05, TIMESIG_BASE + TIMESIG_STEP * time_sig)
     struct.pack_into("<H", header, 0x07, word7)
     struct.pack_into("<H", header, 0x09, s1)
     struct.pack_into("<H", header, 0x0B, s2)

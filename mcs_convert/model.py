@@ -61,8 +61,7 @@ class Song:
     # Extracted display metadata (populated by the MCS reader; see docs/mcs-format.md).
     time_signature: str = ""                    # e.g. "3/4", derived from measure length
     key_signature: str = ""                     # e.g. "G major", from the clef-record accidentals
-    tempo_level: Optional[int] = None           # MCS stored speed index (0..3), None if unknown
-    tempo_raw: Optional[int] = None             # the raw 0x05 header word
+    timesig_code: Optional[int] = None          # 0x05 meter code: 0=2/4,1=4/4,2=6/8,3=3/4
     tempo_tick_seconds: float = 0.042           # real seconds per 32nd-tick (from header byte0)
     # Positional annotations for the tracker's event column: (start_tick, staff_name, label),
     # e.g. a mid-staff clef change. Not sounded — a diagnostic marker.

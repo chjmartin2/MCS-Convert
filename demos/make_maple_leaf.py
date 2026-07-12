@@ -251,8 +251,9 @@ def build_song():
         [make_entry(SYM_FLAT, v, 15 + i) for i, v in enumerate((33, 37, 34, 38))]
 
     # Header byte 0 = 0x89 -> ~92 BPM: "It is never right to play Ragtime fast."
+    # Maple Leaf Rag is in 2/4 (meter code 0); the tempo is scroll[0] = 0x89.
     return build_file([[rh_clef] + rh_meas, [lh_clef] + lh_meas],
-                      tempo_level=2, scroll=bytes([0x89, 0x86, 0x86, 0x77, 0x77]))
+                      time_sig=0, scroll=bytes([0x89, 0x86, 0x86, 0x77, 0x77]))
 
 
 def main() -> int:

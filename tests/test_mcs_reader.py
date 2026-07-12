@@ -248,10 +248,9 @@ def test_metadata_tempo_time_key(tmp_path):
     p = tmp_path / "meta.mcs"
     p.write_bytes(bytes(header) + body)
     song = parse(str(p))
-    assert song.time_signature == "3/4"
+    assert song.time_signature == "3/4"          # from the 0x05 meter code (0x3B02)
     assert song.key_signature == "G major"
-    assert song.tempo_level == 3
-    assert song.tempo_raw == 0x3B02
+    assert song.timesig_code == 3
 
 
 def test_metadata_four_four_c_major(tmp_path):
@@ -269,7 +268,7 @@ def test_metadata_four_four_c_major(tmp_path):
     song = parse(str(p))
     assert song.time_signature == "4/4"
     assert song.key_signature == "C major"
-    assert song.tempo_level == 1
+    assert song.timesig_code == 1
 
 
 def test_whole_rest_fills_the_measure(tmp_path):

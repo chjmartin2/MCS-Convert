@@ -55,11 +55,28 @@ def parse_bytes(data):
         os.remove(path)
 
 
+def test_time_signature_code_round_trips():
+    # the 0x05 word is the meter code (0=2/4,1=4/4,2=6/8,3=3/4) — write each and
+    # confirm the reader reports the right time signature
+    from mcs_convert.mcs.reader import parse as parse_file
+    clef = make_entry(CLEF_TREBLE, 16, 14)
+    note = make_entry(3, v_for_midi(72, 1), 5)
+    for code, meter in ((0, "2/4"), (1, "4/4"), (2, "6/8"), (3, "3/4")):
+        data = build_file([[[clef], [note]]], time_sig=code)
+        assert data[0x05] | (data[0x06] << 8) == 0x3AF9 + 3 * code
+        import tempfile, os
+        p = os.path.join(tempfile.gettempdir(), f"ts{code}.mcs")
+        with open(p, "wb") as fh:
+            fh.write(data)
+        song = parse_file(p)
+        assert song.timesig_code == code and song.time_signature == meter
+
+
 def test_build_file_headers_and_sizes():
     clef = make_entry(CLEF_TREBLE, 16, 14)
     note = make_entry(3, v_for_midi(72, 1), 5)
-    data = build_file([[[clef], [note]]], tempo_level=2, word7=18)
-    assert data[0x05] | (data[0x06] << 8) == 0x3AF9 + 3 * 2      # tempo word
+    data = build_file([[[clef], [note]]], time_sig=2, word7=18)
+    assert data[0x05] | (data[0x06] << 8) == 0x3AF9 + 3 * 2      # time-sig word (6/8)
     assert data[0x07] | (data[0x08] << 8) == 18                  # word7
     assert data[0x0D] | (data[0x0E] << 8) == len(data)          # total length
     assert data[0x0F] == 0x00                                    # pad byte

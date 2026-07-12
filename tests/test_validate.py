@@ -29,7 +29,7 @@ def test_overflowing_measure_is_flagged():
     # a measure crammed past the 32-entry buffer must be caught
     entries = [make_entry(0x06, 16, 14)]                  # clef
     fat = [make_entry(0x01, 20, x % 30) for x in range(MAX_ENTRIES_PER_MEASURE + 5)]
-    data = build_file([[entries, fat]], tempo_level=1)
+    data = build_file([[entries, fat]], time_sig=1)
     issues = validate(data)
     assert any(i.severity == "corrupt" and "buffer" in i.detail for i in issues)
 

@@ -25,7 +25,7 @@ Ground-truth edits are made on the self-booting test disk
 |--------|------|-------|
 | **0x00** | **1** | **TEMPO** — byte 0 (0x77..0x92, steps of 3) sets the real playback speed. **CALIBRATED AGAINST AUDIO:** seconds per sixteenth-tick = `0.067 + 0.016·step`, `step = (byte0−0x77)//3`. Fits ENTERTAN 0x7a→83ms/181BPM, AXEL/YANKEE 0x80→115ms/130BPM, MINUETG 0x83→131ms, DIXIE 0x89→163ms/92BPM. (Both ENTERTAN and AXEL share 0x05 word 0x3AFC yet play at different speeds — byte 0 is what differs.) |
 | 0x01–0x04 | 4 | vertical scroll/view bytes; display state only, pitch-independent. |
-| 0x05   | 2 | word `0x3AF9 + 3·n`. Read by the engine but does **not** determine playback tempo (byte 0 does); role unclear — a CPU-speed calibration or fine adjust. |
+| **0x05** | 2 | **TIME SIGNATURE** — word `0x3AF9 + 3·code`, `code` = 0→2/4, 1→4/4, 2→6/8, 3→3/4. **Proven** by saving one song from MCS as 4/4 vs 6/8 and diffing: only this byte changed (0xFC↔0xFF). Does NOT set tempo (byte 0 does). This is the field a length-derived meter can't recover — 6/8 and 3/4 share 24-tick bars but are codes 2 vs 3. |
 | 0x07   | 2 | ? (often 0; a few songs hold 16/18/20 — likely the clef+key-sig pixel width, not meter) |
 | 0x09   | 2 | byte size of the staff-1 section (confirmed by SCALE4: +2/−2 when a note moved between staves) |
 | 0x0B   | 2 | byte size of the staff-2 section |
@@ -37,10 +37,13 @@ The reader surfaces three display values; a fourth (volume) provably isn't in th
   Earlier attempts keyed tempo to the 0x05 word; that was wrong (two 0x3AFC songs,
   ENTERTAN and AXEL, play at 83 vs 115 ms/tick — byte 0 is what differs). The absolute
   value is approximate (repeat structure blurs the total-duration estimate).
-- **Time signature** — **not stored**; the engine just plays measures back to back, so
-  meter is emergent. We report the modal measure length in thirty-second-ticks
-  (24→3/4, 32→4/4, 16→2/4…). Corpus: 4/4 ×39, 3/4 ×12, 2/4 ×11, 1/4 ×5, 6/8 ×3, plus a
-  handful of pickup/irregular songs. MINUETG → 3/4 ✓. Two timing conventions matter
+- **Time signature** — **stored explicitly** in the 0x05 word as a meter code
+  (0→2/4, 1→4/4, 2→6/8, 3→3/4); see the header table. (An earlier revision claimed it
+  wasn't stored and derived meter from the modal measure length — that can't tell 6/8
+  from 3/4, and it's why the writer was accidentally stamping every file 6/8 by writing
+  code 2.) The reader now trusts the code and falls back to measure length only for
+  codes outside 0–3. Corpus by code: 4/4 ×42, 3/4 ×15, 2/4 ×13, 6/8 ×8. Two timing
+  conventions still matter
   when laying measures on a grid: a measure holding a **lone whole rest means "rest
   the whole measure"** whatever the meter (BUMBLE's 2/4 bass opens with four), and the
   grid must be the **modal** measure length, not the maximum — one long finale bar
