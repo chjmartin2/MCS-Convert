@@ -58,6 +58,46 @@ def test_percussion_never_reaches_the_pitched_staff(tmp_path):
     assert _sounding(got) == sorted(_note_events(mel.notes))
 
 
+def test_fit_meter_keeps_more_notes_on_dense_input(tmp_path):
+    # A bar too dense for 4/4's 32-entry buffer must lose fewer notes when
+    # fit_meter drops to a shorter meter (more measures = more total buffer),
+    # and the result must still validate clean.
+    from mcs_convert.mcs.validate import validate
+    song = Song(title="dense")
+    tr = Track(name="T")
+    for i in range(60):                               # 60 sixteenths over 4 bars
+        tr.add(NoteEvent(start_tick=i * 2, duration_ticks=2, midi_note=60 + i % 12))
+    song.add_track(tr)
+    fixed = _roundtrip_bytes(song, bar_ticks=32, cap=True)
+    auto = _roundtrip_bytes(song, cap=True, fit_meter=True)
+    assert _count(auto) >= _count(fixed)
+    assert not [i for i in validate(encode_song(song, cap=True, fit_meter=True))
+                if i.severity == "corrupt"]
+
+
+def test_fit_meter_keeps_natural_meter_when_it_fits(tmp_path):
+    # A sparse song fits 4/4 with zero drops, so fit_meter must NOT needlessly
+    # shorten it: 15 measures of 4/4, not 30 of 2/4.
+    from mcs_convert.mcs.reader import parse_records, split_staves
+    song = _mk([(i * 8, 8, 72 + i % 5) for i in range(60)])   # one note per beat
+    data = encode_song(song, cap=True, fit_meter=True)
+    auto_meas = max(len(st) for st in split_staves(parse_records(data)))
+    half_meas = max(len(st) for st in
+                    split_staves(parse_records(encode_song(song, bar_ticks=16,
+                                                            cap=True))))
+    assert data[0x05] | (data[0x06] << 8) == 0x3AF9 + 3 * 1     # 4/4, not shortened
+    assert auto_meas < half_meas                               # didn't drop to 2/4
+
+
+def _count(song):
+    return sum(len([n for n in t.notes if not n.is_rest]) for t in song.tracks)
+
+
+def _roundtrip_bytes(song, **kw):
+    from mcs_convert.mcs.reader import parse_bytes
+    return parse_bytes(encode_song(song, **kw))
+
+
 def test_parse_bytes_matches_file_parse(tmp_path):
     # parse_bytes decodes an in-memory file identically to parse() off disk — the
     # dialog preview auditions these exact bytes so it matches the exported file

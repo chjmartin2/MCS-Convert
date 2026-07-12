@@ -202,15 +202,43 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
     return measures
 
 
+# Meters we can notate, shortest measure (most capacity) last. Real MCS reads a
+# fixed 32-entry buffer PER MEASURE, so a shorter meter — more, smaller measures
+# — gives more total buffer and drops far fewer notes on dense imports (Dr.
+# Wily's busiest track keeps 544/611 in 2/4 vs 381 in 4/4). Same tempo, same
+# timing; only the barline spacing changes. 6/8 is omitted: its 48-tick measure
+# has the LEAST capacity, and we never want to auto-pick it.
+_FIT_METERS = (32, 24, 16)                       # 4/4, 3/4, 2/4 (natural first)
+
+
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
-                split: int = 67, cap: bool = False) -> bytes:
+                split: int = 67, cap: bool = False,
+                fit_meter: bool = False) -> bytes:
     """Song (32nd-note ticks) -> .MCS bytes on a treble+bass grand staff (the
     2-staff layout every corpus song uses, so real MCS always loads it).
 
     `cap=True` (used by automated imports) limits each measure to real MCS's
     32-entry buffer, dropping the densest overflow rather than corrupting
     playback. The default path stays lossless for hand-authoring/round-trips;
-    the validator flags any overflow there instead of silently dropping."""
+    the validator flags any overflow there instead of silently dropping.
+
+    `fit_meter=True` picks the meter that fits the most notes: the longest (most
+    natural) meter that overflows NOTHING, or the shortest (2/4, max capacity) if
+    even that must drop some. Meter only moves barlines — tempo and timing are
+    unchanged — so this is free note-capacity, the real lever for dense imports
+    (playback speed can't recover a note the buffer already dropped)."""
+    if fit_meter:
+        best = None
+        for bt in _FIT_METERS:
+            data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
+                               split=split, cap=cap)
+            dropped = encode_song.last_dropped
+            if dropped == 0:
+                return data                      # this natural meter loses nothing
+            if best is None or dropped < best[1]:
+                best = (data, dropped)
+        return best[0]                           # none lossless: fewest-drop (2/4)
+
     treble_ev, bass_ev = [], []
     total = 0
     for tr in song.tracks:
@@ -232,8 +260,10 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
     tre = _emit_staff(_staff_slots(treble_ev, total, bar_ticks), True, cap=cap,
                       bar_ticks=bar_ticks)
+    dropped = _emit_staff.last_dropped
     bas = _emit_staff(_staff_slots(bass_ev, total, bar_ticks), False, cap=cap,
                       bar_ticks=bar_ticks)
+    encode_song.last_dropped = dropped + _emit_staff.last_dropped
     clef_t = [make_entry(_G_CLEF, 16, 14)]
     clef_b = [make_entry(_F_CLEF, 32, 14)]
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
