@@ -97,8 +97,14 @@ def build_file(staves: List[List[List[Entry]]], *, time_sig: int = 1,
         sizes.append(len(staff_bytes))           # size excludes the (0,0) separator
         body += staff_bytes
         body += b"\xff\xff\x00\x00"               # staff separator
+    # 0x09 = staff-1 size; 0x0B = EVERYTHING after staff-1's separator up to the
+    # final one (= body - s1 - the two 4-byte separators). For two staves this is
+    # exactly staff-2's size, so the corpus round-trip is unchanged; for 3-4
+    # staves it correctly spans staves 2..N (writing only s2 here is what made an
+    # earlier multi-staff attempt load as "Not an MCS song"). Verified against the
+    # 3-staff PRETTY6 (522) and 4-staff GOOD.
     s1 = sizes[0] if len(sizes) > 0 else 0
-    s2 = sizes[1] if len(sizes) > 1 else 0
+    s2 = (len(body) - s1 - 8) if len(sizes) > 1 else 0
     total = 0x0F + 1 + len(body)                  # header + pad + records
 
     header = bytearray(0x0F)
