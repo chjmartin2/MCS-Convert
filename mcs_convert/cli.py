@@ -54,7 +54,7 @@ def _cmd_convert(args) -> int:
                 song, byte0 = parse_pt3(fh.read(), percussion=args.percussion,
                                         drum_sound=args.drum_sound,
                                         shape_durations=args.shape_durations)
-            data = encode_song(song, tempo_byte0=byte0)
+            data = encode_song(song, tempo_byte0=byte0, by_track=True)
         elif ext == "nsf":
             from .nsf.extract import extract_song
             byte0 = 0x77 + 3 * max(0, min(9, args.slow))
@@ -62,7 +62,7 @@ def _cmd_convert(args) -> int:
                                        percussion=args.percussion,
                                        drum_sound=args.drum_sound,
                                        tempo_byte0=byte0)
-            data = encode_song(song, tempo_byte0=byte0)
+            data = encode_song(song, tempo_byte0=byte0, by_track=True)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
@@ -78,7 +78,20 @@ def _cmd_convert(args) -> int:
     notes = sum(1 for t in song.tracks for n in t.notes if not n.is_rest)
     print(f"wrote {args.output} ({len(data)} bytes, {notes} notes, "
           f"'{song.title}')")
+    from .mcs.validate import validate
+    corrupt = [i for i in validate(data) if i.severity == "corrupt"]
+    if corrupt:
+        print(f"WARNING: {len(corrupt)} issue(s) may corrupt playback in real "
+              f"MCS — run 'mcs-convert validate {args.output}'", file=sys.stderr)
     return 0
+
+
+def _cmd_validate(args) -> int:
+    from .mcs.validate import summary, validate
+    with open(args.file, "rb") as fh:
+        data = fh.read()
+    print(f"{args.file}: {summary(data)}")
+    return 1 if any(i.severity == "corrupt" for i in validate(data)) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_play = sub.add_parser("play", help="open the MCS/MCD viewer + player GUI")
     p_play.add_argument("file", nargs="?", help="optional .mcs/.mcd file to open")
     p_play.set_defaults(func=_cmd_play)
+
+    p_val = sub.add_parser("validate",
+                           help="check a .MCS against real-MCS playback limits")
+    p_val.add_argument("file", help="path to a .mcs/.mcd file")
+    p_val.set_defaults(func=_cmd_validate)
 
     p_conv = sub.add_parser("convert",
                             help="convert a chiptune module (.pt3, .nsf) to .MCS")

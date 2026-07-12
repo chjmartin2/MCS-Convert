@@ -1,0 +1,47 @@
+"""The validator must pass every real MCS song and catch the overflow that
+corrupts playback."""
+
+import glob
+import os
+
+from mcs_convert.mcs.encode import encode_song
+from mcs_convert.mcs.validate import (
+    MAX_ENTRIES_PER_MEASURE, summary, validate,
+)
+from mcs_convert.mcs.writer import build_file, make_entry
+from mcs_convert.model import NoteEvent, Song, Track
+
+CORPUS = glob.glob(os.path.join(os.path.dirname(__file__), "..", "samples",
+                                "ia_1984", "extracted", "whmcs", "*.MC[SD]"))
+
+
+def test_every_corpus_song_validates():
+    # ground truth: real MCS songs play, so none may report a corrupting issue
+    assert CORPUS, "corpus not present"
+    for path in CORPUS:
+        with open(path, "rb") as fh:
+            data = fh.read()
+        corrupt = [i for i in validate(data) if i.severity == "corrupt"]
+        assert not corrupt, f"{os.path.basename(path)}: {summary(data)}"
+
+
+def test_overflowing_measure_is_flagged():
+    # a measure crammed past the 32-entry buffer must be caught
+    entries = [make_entry(0x06, 16, 14)]                  # clef
+    fat = [make_entry(0x01, 20, x % 30) for x in range(MAX_ENTRIES_PER_MEASURE + 5)]
+    data = build_file([[entries, fat]], tempo_level=1)
+    issues = validate(data)
+    assert any(i.severity == "corrupt" and "buffer" in i.detail for i in issues)
+
+
+def test_by_track_import_stays_within_limits():
+    # a deliberately dense multi-track song (four channels of steady 16ths, all
+    # overlapping) must encode to a valid file when imported by_track
+    song = Song(title="dense")
+    for ch, base in enumerate((72, 76, 55, 48)):
+        tr = Track(name=f"ch{ch}")
+        for i in range(64):
+            tr.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=base + i % 5))
+        song.add_track(tr)
+    data = encode_song(song, by_track=True)
+    assert not [i for i in validate(data) if i.severity == "corrupt"]
