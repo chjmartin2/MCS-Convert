@@ -18,11 +18,15 @@ from typing import List
 
 from .reader import parse_records, split_staves, symbol, vertical, x_slot
 
-# Empirical maxima across all 80 corpus songs (see scratchpad/mcs_envelope.py).
+# Empirical bounds across all 80 corpus songs (see scratchpad/mcs_envelope.py).
 MAX_ENTRIES_PER_MEASURE = 32     # the fixed per-measure buffer — the hard one
+MIN_X_SLOT = 2                   # notes never sit at x 0/1 (barline/clef region);
+#                                  a note there is mis-drawn and mis-timed by MCS
 MAX_X_SLOT = 30                  # horizontal slot never exceeds this on screen
 MAX_STAVES = 4
 EDITOR_MAX_BYTES = 4246          # the editor's save buffer (playback tolerates more)
+
+_NOTE_OR_REST = set(range(0, 6)) | set(range(7, 13)) | set(range(0x14, 0x19))
 
 
 @dataclass
@@ -48,10 +52,17 @@ def validate(data: bytes) -> List[Issue]:
                     f"{n} entries > {MAX_ENTRIES_PER_MEASURE}-entry measure buffer "
                     f"(overflows and garbles playback)"))
             for b0, b1 in rec.entries:
-                if x_slot(b1) > MAX_X_SLOT:
+                x = x_slot(b1)
+                if x > MAX_X_SLOT:
                     issues.append(Issue(
                         "warn", f"staff {si} measure {mi}",
-                        f"x-slot {x_slot(b1)} > {MAX_X_SLOT} (off the staff width)"))
+                        f"x-slot {x} > {MAX_X_SLOT} (off the staff width)"))
+                    break
+                if mi > 0 and x < MIN_X_SLOT and symbol(b0) in _NOTE_OR_REST:
+                    issues.append(Issue(
+                        "corrupt", f"staff {si} measure {mi}",
+                        f"note at x-slot {x} < {MIN_X_SLOT} (barline/clef region — "
+                        f"MCS mis-draws and mis-times it)"))
                     break
     if len(data) > EDITOR_MAX_BYTES:
         issues.append(Issue("warn", "file",

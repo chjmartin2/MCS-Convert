@@ -134,8 +134,21 @@ def _staff_slots(events: List[Tuple[int, int, int]], total: int, bar: int,
 # under, so notes + their accidentals/ties always land as a complete unit.
 _MAX_ENTRIES_PER_MEASURE = 32
 
+# The horizontal note area of a measure. Real corpus notes NEVER use x-slot 0 or 1
+# (reserved for the barline/clef); the first note sits at x 2-5 and a full bar
+# spreads to about x 25. A note at x 0 is mishandled by real MCS (mis-drawn and
+# mis-timed). So we map the within-measure tick position into this range, never
+# the raw tick (which put every downbeat at x 0).
+_X_BASE, _X_END = 2, 25
 
-def _emit_staff(bars, treble: bool, cap: bool = False):
+
+def _tick_to_x(tick: int, bar_ticks: int) -> int:
+    """Within-measure tick (0..bar_ticks) -> a valid corpus-range x-slot."""
+    x = _X_BASE + round(tick * (_X_END - _X_BASE) / max(1, bar_ticks))
+    return max(_X_BASE, min(_MAX_X_SLOT, x))
+
+
+def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
     """Slot lists -> MCS measure entry lists (notes, rests, accidentals, dots, ties).
     With `cap`, a measure is limited to the real-MCS buffer size; once full, further
     onsets in that bar are dropped (whole slot at a time) rather than overflow and
@@ -152,9 +165,7 @@ def _emit_staff(bars, treble: bool, cap: bool = False):
         for tick, advance, midis, ties in bar:
             slot = []
             for base, dotted in _decompose(advance, allow_dot=bool(midis)):
-                # x-slots max out at 30 in the corpus; x=31 pushes byte1 toward
-                # 0xFF, where an entry can collide with the FF FF record marker.
-                x = min(_MAX_X_SLOT, tick)
+                x = _tick_to_x(tick, bar_ticks)
                 if not midis:
                     slot.append(make_entry(_REST_SYM[base], rest_v, x))
                 else:
@@ -207,8 +218,10 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
             else:
                 bass_ev.append((start, dur, _fit(midi, BASS_LO, BASS_HI)))
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
-    tre = _emit_staff(_staff_slots(treble_ev, total, bar_ticks), True, cap=cap)
-    bas = _emit_staff(_staff_slots(bass_ev, total, bar_ticks), False, cap=cap)
+    tre = _emit_staff(_staff_slots(treble_ev, total, bar_ticks), True, cap=cap,
+                      bar_ticks=bar_ticks)
+    bas = _emit_staff(_staff_slots(bass_ev, total, bar_ticks), False, cap=cap,
+                      bar_ticks=bar_ticks)
     clef_t = [make_entry(_G_CLEF, 16, 14)]
     clef_b = [make_entry(_F_CLEF, 32, 14)]
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
