@@ -162,12 +162,19 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
     for bar in bars:
         entries = []
         acc_state: Dict[int, int] = {}
+        # x-slots must strictly increase across distinct time positions, or the
+        # reader (and real MCS) group different notes into one chord. `last_x`
+        # keeps them apart: dense measures pack tight left-to-right, sparse ones
+        # keep their proportional spacing.
+        last_x = _X_BASE - 1
         for tick, advance, midis, ties in bar:
             slot = []
             for base, dotted in _decompose(advance, allow_dot=bool(midis)):
-                x = _tick_to_x(tick, bar_ticks)
+                x = min(_MAX_X_SLOT, max(_tick_to_x(tick, bar_ticks), last_x + 1))
+                aux_x = min(_MAX_X_SLOT, x + 1)     # dot / tie sit just after
                 if not midis:
                     slot.append(make_entry(_REST_SYM[base], rest_v, x))
+                    last_x = x
                 else:
                     for midi in sorted(midis, reverse=True):
                         v, acc = _v_and_acc(midi, treble)
@@ -177,13 +184,13 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
                             acc_state[v] = acc
                         slot.append(make_entry(_NOTE_SYM[base], v, x))
                         if dotted:
-                            slot.append(make_entry(_SYM_DOT, v,
-                                                   min(_MAX_X_SLOT, x + 1)))
+                            slot.append(make_entry(_SYM_DOT, v, aux_x))
                     piece_end = tick + base + (base // 2 if dotted else 0)
                     piece_ties = midis if piece_end < tick + advance else ties
                     for m in piece_ties:            # one tie glyph per tied member,
                         tv, _ = _v_and_acc(m, treble)   # at that note's own v
-                        slot.append(make_entry(_SYM_TIE, tv, min(_MAX_X_SLOT, x + 1)))
+                        slot.append(make_entry(_SYM_TIE, tv, aux_x))
+                    last_x = aux_x if (dotted or piece_ties) else x
                 tick += base + (base // 2 if dotted else 0)
             # add the whole slot only if it fits the measure buffer intact
             if len(entries) + len(slot) <= limit:

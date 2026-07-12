@@ -49,3 +49,21 @@ def test_capped_import_stays_within_limits_and_2_staves():
     # exactly 2 staves — the grand-staff layout real MCS loads (not the 4-staff
     # structure it rejects as "Not an MCS song")
     assert len(split_staves(parse_records(data))) == 2
+
+
+def test_dense_measure_notes_get_distinct_x_slots():
+    from mcs_convert.mcs.reader import (parse_records, split_staves, symbol,
+                                        x_slot, _note_value)
+    # 16 sixteenth notes filling a bar: each distinct onset must get its own
+    # x-slot (a shared x is read as a chord, so collisions corrupt the rhythm)
+    song = Song(title="run")
+    tr = Track(name="m")
+    for i in range(16):
+        tr.add(NoteEvent(start_tick=i * 2, duration_ticks=2, midi_note=72 + i % 6))
+    song.add_track(tr)
+    data = encode_song(song, cap=True)
+    for st in split_staves(parse_records(data)):
+        for rec in st[1:]:
+            xs = [x_slot(b1) for b0, b1 in rec.entries if _note_value(symbol(b0))[0]]
+            assert len(xs) == len(set(xs)), f"x-slot collision: {xs}"
+            assert all(x >= 2 for x in xs)         # and none in the barline region
