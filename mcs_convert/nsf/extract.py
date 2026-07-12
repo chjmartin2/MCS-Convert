@@ -198,6 +198,29 @@ def fit_grid(onsets: List[int], play_hz: float) -> Tuple[float, int]:
     return fpt_real, byte0
 
 
+def _quantize_channel(events, fpt: float):
+    """Quantize one channel's frame-domain notes to ticks with ONSETS ANCHORED
+    to their true position — never pushed later (pushing accumulates into a
+    drift that desyncs the whole song). Overlaps from rounding truncate the
+    earlier note; two notes landing on the same tick (a sub-tick arpeggio or
+    grace note that MCS can't resolve) keep the longer one. Returns
+    [(start, end, midi)] with 0 < start-spacing."""
+    out = []                                        # [start, end, midi]
+    for n in events:
+        start = round(n.start_tick / fpt)
+        end = round((n.start_tick + n.duration_ticks) / fpt)
+        if end <= start:
+            end = start + 1                         # a real note is worth >=1 tick
+        if out and start <= out[-1][0]:             # same onset tick: keep longer
+            if end - start > out[-1][1] - out[-1][0]:
+                out[-1] = [start, end, n.midi_note]
+            continue
+        if out and start < out[-1][1]:              # rounding overlap: truncate prev
+            out[-1][1] = start
+        out.append([start, end, n.midi_note])
+    return [(s, e, m) for s, e, m in out if e > s]
+
+
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                    percussion: str = "clicks", drum_sound: str = "cluster",
                    tempo_byte0: Optional[int] = None) -> Tuple[Song, int]:
@@ -217,19 +240,16 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
     for name, events in zip(_CHANNEL_NAMES, runs):
         track = Track(name=name)
-        prev_end = -1
-        for n in events:
-            start = round(n.start_tick / fpt)
-            end = round((n.start_tick + n.duration_ticks) / fpt)
-            start = max(start, prev_end)            # keep the voice monotone
-            if end <= start:
-                end = start + 1                     # a real note is worth >=1 tick
+        for start, end, midi in _quantize_channel(events, fpt):
             track.add(NoteEvent(start_tick=start, duration_ticks=end - start,
-                                midi_note=n.midi_note))
-            prev_end = end
+                                midi_note=midi))
         song.add_track(track)                       # kept even when empty: the
         #                                             import dialog shows 5 rows
-    song.dropped_short = 0                           # song-grid quantize never drops
+    song.dropped_short = 0
+    # raw per-frame streams so the dialog can play the true NES render for A/B
+    song.nsf_preview = {"pitched": log.pitched,
+                        "noise": [f for f, _ in log.noise_hits],
+                        "play_hz": header.play_rate_hz}
 
     for name, hits in (("Noise", [f for f, _ in log.noise_hits]),
                        ("DPCM", log.dpcm_hits)):

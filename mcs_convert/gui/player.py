@@ -734,6 +734,9 @@ class ImportPreview(tk.Toplevel):
         tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
             [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
+        if self.is_nsf:
+            tk.Button(bar, text="▶ Original (NES)",
+                      command=self._preview_original).pack(side="left", padx=(4, 0))
         tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
             side="left", padx=(4, 0))
 
@@ -864,6 +867,35 @@ class ImportPreview(tk.Toplevel):
         sel = self.selected_song(indices)
         step = tick_seconds_for(self._tempo_byte0())
         master, _, sr = render_song(sel, step_seconds=step, waveform="pcspeaker")
+        pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
+        if pcm:
+            self.app.player.play(pcm, sr,
+                                 volume=self.app.volume.get() / 100.0)
+
+    def _preview_original(self) -> None:
+        """Play the true NES render: the raw per-frame emulation at 60 Hz,
+        BEFORE any quantization — the reference to A/B the conversion against."""
+        prev = getattr(self.song, "nsf_preview", None)
+        if not prev:
+            return
+        # one tick = one NES frame; no rounding, real frame durations
+        orig = Song(title="original")
+        for name, stream in zip(("Pulse 1", "Pulse 2", "Triangle"), prev["pitched"]):
+            tr = Track(name=name)
+            run_note, run_start = None, 0
+            for i, m in enumerate(stream + [None]):
+                if m != run_note:
+                    if run_note is not None:
+                        tr.add(NoteEvent(run_start, i - run_start, run_note))
+                    run_note, run_start = m, i
+            orig.add_track(tr)
+        drums = Track(name="Noise")
+        for f in prev["noise"]:
+            for midi in (55, 56):
+                drums.add(NoteEvent(f, 1, midi, percussive=True))
+        orig.add_track(drums)
+        master, _, sr = render_song(orig, step_seconds=1.0 / prev["play_hz"],
+                                    waveform="pcspeaker")
         pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
         if pcm:
             self.app.player.play(pcm, sr,
