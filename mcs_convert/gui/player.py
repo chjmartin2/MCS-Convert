@@ -718,9 +718,11 @@ class ImportPreview(tk.Toplevel):
                  bg=_BG, fg=_ACCENT).pack(side="left")
         self._tempos = [0x77 + 3 * s for s in range(10)]
         if self.is_nsf:
-            labels = ["fastest (real NES)"] + \
-                [f"{round(100 * tick_seconds_for(0x77) / tick_seconds_for(b))}% speed"
-                 for b in self._tempos[1:]]
+            # The auto-detected byte0 IS the real NES speed; label the rest as a
+            # percentage of it (slower = slow-motion study, faster = sped up).
+            labels = [f"{round(100 * tick_seconds_for(byte0) / tick_seconds_for(b))}%"
+                      + (" (real NES)" if b == byte0 else " speed")
+                      for b in self._tempos]
         else:
             labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
                       for b in self._tempos]

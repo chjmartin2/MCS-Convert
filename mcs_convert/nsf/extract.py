@@ -161,31 +161,57 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
 _CLICKS = {"cluster": (55, 56), "block": (62,)}
 _CHANNEL_NAMES = ("Pulse 1", "Pulse 2", "Triangle")
 
-# MCS's finest tick (byte0 0x77) is ~33.5 ms; that's the shortest note the format
-# can play, and it's the ceiling on how much timing detail we can keep.
-_FINEST_TICK_S = 0.0335
+# MCS's tick lands between ~33.5 ms (byte0 0x77) and ~105 ms (0x92); at 60 Hz
+# that's a window of ~2.0 to ~6.3 NES frames per tick.
+_MIN_TICK_FRAMES, _MAX_TICK_FRAMES = 2.0, 6.3
 
 
-def finest_fpt(play_hz: float) -> int:
-    """NES frames that fit in one MCS 32nd-tick at the finest MCS tempo — the
-    resolution we always quantize at, so no fast note is thrown away."""
-    return max(1, round(_FINEST_TICK_S * play_hz))
+def detect_base_unit(onsets: List[int]) -> int:
+    """The song's fundamental note spacing, in NES frames — the most common gap
+    between note onsets, ignoring the sub-grid jitter of arpeggios and grace
+    notes (gaps of 1-2 frames). Dr. Wily's theme is 227 gaps of exactly 6."""
+    from collections import Counter
+    gaps = Counter(b - a for a, b in zip(onsets, onsets[1:]) if b - a >= 3)
+    if not gaps:
+        return 6
+    return gaps.most_common(1)[0][0]
+
+
+def fit_grid(onsets: List[int], play_hz: float) -> Tuple[float, int]:
+    """(frames_per_tick, mcs_tempo_byte0) that quantizes to the SONG's own grid.
+
+    The base unit (a 16th note ≈ 6 frames for Wily) must map to a whole number of
+    MCS 32nd-ticks or every rhythm distorts. We treat it as a 16th = 2 ticks when
+    the tempo allows (fast, and the notation reads right), else 1 tick, choosing
+    the fastest tick that still lands in MCS's tempo range so a busy theme plays
+    quick and clean."""
+    unit = detect_base_unit(sorted(onsets))
+    for ticks_per_unit in (4, 2, 1):                 # prefer more ticks = faster
+        fpt = unit / ticks_per_unit
+        if _MIN_TICK_FRAMES <= fpt <= _MAX_TICK_FRAMES:
+            break
+    else:
+        fpt = min(max(unit, _MIN_TICK_FRAMES), _MAX_TICK_FRAMES)
+    step = max(0, min(9, round((2 * fpt / play_hz - 0.067) / 0.016)))
+    byte0 = 0x77 + 3 * step
+    fpt_real = (0.067 + 0.016 * step) / 2.0 * play_hz    # the tempo we actually got
+    return fpt_real, byte0
 
 
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                    percussion: str = "clicks", drum_sound: str = "cluster",
-                   tempo_byte0: int = 0x77) -> Tuple[Song, int]:
+                   tempo_byte0: Optional[int] = None) -> Tuple[Song, int]:
     """Frame-domain log -> (Song in 32nd ticks, mcs_tempo_byte0).
 
-    Timing is decoupled from tempo. We ALWAYS quantize at MCS's finest resolution
-    (~2 NES frames per tick) so every note survives; `tempo_byte0` is then a pure
-    playback-speed dial. At the fastest byte0 (0x77) a tick is ~33.5 ms ≈ 2 NES
-    frames, so the song plays at the real NES speed; a slower byte0 just stretches
-    every note in lockstep (the note COUNT in ticks never changes), which studies
-    the tune in slow motion without dropping anything. This is why a fast tempo
-    renders Dr. Wily's 16th-note runs where a coarse grid could not."""
-    fpt = finest_fpt(header.play_rate_hz)
+    Timing is quantized to the SONG's detected grid (see fit_grid) so note
+    durations keep their real 1:2:4:8 ratios. `tempo_byte0`, if given, overrides
+    the auto tempo purely as a playback-speed dial — the tick COUNTS never change,
+    a slower byte0 just stretches everything to study the tune in slow motion."""
     runs = [segment_frames(ch) for ch in log.pitched]
+    onsets = [n.start_tick for ch in runs for n in ch]
+    onsets += [f for f, _ in log.noise_hits] + list(log.dpcm_hits)
+    fpt, auto_byte0 = fit_grid(onsets, header.play_rate_hz)
+    byte0 = tempo_byte0 if tempo_byte0 is not None else auto_byte0
 
     title = header.song_name or "NSF"
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
@@ -203,7 +229,7 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
             prev_end = end
         song.add_track(track)                       # kept even when empty: the
         #                                             import dialog shows 5 rows
-    song.dropped_short = 0                           # finest grid never drops
+    song.dropped_short = 0                           # song-grid quantize never drops
 
     for name, hits in (("Noise", [f for f, _ in log.noise_hits]),
                        ("DPCM", log.dpcm_hits)):
@@ -220,13 +246,13 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                                         midi_note=midi, percussive=True))
         track.meta["drum_notes"] = len(track.notes)
         song.add_track(track)
-    return song, tempo_byte0
+    return song, byte0
 
 
 def extract_song(path: str, subsong: Optional[int] = None,
                  max_seconds: float = 180.0, percussion: str = "clicks",
                  drum_sound: str = "cluster", detect_end: bool = True,
-                 tempo_byte0: int = 0x77) -> Tuple[Song, int]:
+                 tempo_byte0: Optional[int] = None) -> Tuple[Song, int]:
     """Emulate an NSF subsong and return (Song, mcs_tempo_byte0)."""
     with open(path, "rb") as fh:
         data = fh.read()
