@@ -185,12 +185,16 @@ def fit_grid(onsets: List[int], play_hz: float) -> Tuple[float, int]:
     """(frames_per_tick, mcs_tempo_byte0) that quantizes to the SONG's own grid.
 
     The base unit (a 16th note ≈ 6 frames for Wily) must map to a whole number of
-    MCS 32nd-ticks or every rhythm distorts. We treat it as a 16th = 2 ticks when
-    the tempo allows (fast, and the notation reads right), else 1 tick, choosing
-    the fastest tick that still lands in MCS's tempo range so a busy theme plays
-    quick and clean."""
+    MCS 32nd-ticks or every rhythm distorts. We map it to a 16th = 2 TICKS first:
+    that's the natural reading (the shortest common note is a 16th, leaving 1 tick
+    for the odd 32nd) and it keeps durations on clean note-values. Mapping it to
+    an 8th = 4 ticks instead (finer) over-refines — a song with off-grid 5-7 frame
+    notes (Zelda's dungeon theme) smears into muddy 3-tick, tie-ridden rhythms
+    (dropped from 50% to 77% clean note-values by preferring 2). We fall to 4
+    ticks only for a slow song too coarse for 2, and to 1 tick for a fast one too
+    quick — whichever lands in MCS's tempo range."""
     unit = detect_base_unit(sorted(onsets))
-    for ticks_per_unit in (4, 2, 1):                 # prefer more ticks = faster
+    for ticks_per_unit in (2, 4, 1):                 # 16th=2 ticks first (see above)
         fpt = unit / ticks_per_unit
         if _MIN_TICK_FRAMES <= fpt <= _MAX_TICK_FRAMES:
             break
