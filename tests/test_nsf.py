@@ -96,23 +96,17 @@ def test_grid_maps_base_unit_to_whole_ticks():
     assert abs(6 / fpt - round(6 / fpt)) < 0.1    # 6 frames -> whole ticks
 
 
-def test_tempo_requantizes_but_preserves_real_time(nsf_path):
-    # Choosing a tempo REQUANTIZES the music to that grid — a faster tempo maps it
-    # onto more, finer ticks — while real playback time is preserved (the tick
-    # count and the tick's duration are inverses).
-    from mcs_convert.mcs.reader import tick_seconds_for
-    fast, b_fast = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
-                                tempo_byte0=0x77)
-    slow, b_slow = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
-                                tempo_byte0=0x92)
-    assert b_fast == 0x77 and b_slow == 0x92
-
-    def span(song):
-        return max((n.start_tick + n.duration_ticks
-                    for t in song.tracks for n in t.notes), default=0)
-    # more ticks at the faster tempo (finer grid)
-    assert span(fast) > span(slow)
-    # but the same real duration, within a tick
-    real_fast = span(fast) * tick_seconds_for(0x77)
-    real_slow = span(slow) * tick_seconds_for(0x92)
-    assert abs(real_fast - real_slow) < 2 * tick_seconds_for(0x92)
+def test_grid_is_beat_aligned_and_optimizer_finds_it():
+    # A perfectly on-grid melody (onsets every 9 frames from an offset) must
+    # quantize so every onset lands on an exact tick — the base unit maps to a
+    # whole tick count. The old bug quantized at the rounded tempo's frame-rate,
+    # drifting onsets a tick off the beat.
+    from mcs_convert.nsf.extract import fit_grid, optimize_grid
+    onsets = [3 + 9 * k for k in range(40)]          # clean 9-frame beat, phase 3
+    fpt, byte0 = fit_grid(onsets, 60.0)
+    off = [abs((o - onsets[0]) / fpt - round((o - onsets[0]) / fpt)) for o in onsets]
+    assert max(off) < 0.01                           # every beat on an exact tick
+    assert abs(fpt - 4.5) < 0.01                     # 9-frame unit -> a 16th (2 ticks)
+    # the exhaustive optimizer agrees, at a small speed nudge to a real MCS tempo
+    ofpt, obyte0, err, speed = optimize_grid(onsets, 60.0)
+    assert err < 0.01 and 0x77 <= obyte0 <= 0x92 and speed < 0.1

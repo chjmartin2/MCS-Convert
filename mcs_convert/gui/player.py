@@ -600,11 +600,7 @@ class ImportPreview(tk.Toplevel):
 
     def __init__(self, app: PlayerApp, src: str, song: Song, byte0: int) -> None:
         super().__init__(app.root)
-        # _base_song is the extraction at its auto tempo; self.song is that
-        # REQUANTIZED to the chosen tempo (a faster tempo spreads the music over
-        # more, finer ticks — fewer notes per measure). Kept apart so re-picking
-        # the tempo re-quantizes from the frame log, never accumulating rounding.
-        self.app, self.src, self._base_song, self.song = app, src, song, song
+        self.app, self.src, self.song = app, src, song
         self.is_nsf = src.lower().endswith(".nsf")
         self.title(f"Import Preview — {os.path.basename(src)}")
         self.configure(bg=_BG)
@@ -713,12 +709,10 @@ class ImportPreview(tk.Toplevel):
                            activebackground=_BG, activeforeground=_FG,
                            selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
-        # MCS tempo — for NSF this REQUANTIZES the music (not just playback
-        # speed): a faster tempo maps it onto more, finer ticks, so a measure
-        # spans less music and holds fewer notes (the max-tempo + 2/4 combo packs
-        # the fewest notes per measure). Fewer notes/measure can mean fewer drops
-        # — but a non-power-of-2 grid adds ties, so the dropped-note readout is
-        # the truth. Real playback time is preserved across tempos.
+        # Tempo/Speed — for NSF this is a PURE PLAYBACK-SPEED dial: the import
+        # already quantizes onto a beat-aligned grid (base note = a 16th), and
+        # this just re-stamps the tempo byte the file plays at. To re-fit the grid
+        # for the tightest beat alignment, use "Exhaustive Optimize".
         bar = tk.Frame(self, bg=_BG)
         bar.grid(row=base + 1, column=0, columnspan=9, sticky="w",
                  padx=10, pady=(8, 2))
@@ -726,8 +720,8 @@ class ImportPreview(tk.Toplevel):
                  bg=_BG, fg=_ACCENT).pack(side="left")
         self._tempos = [0x77 + 3 * s for s in range(10)]
         # MCS's ten tempos, labelled by their actual BPM. For NSF the auto-
-        # detected one is flagged as the real NES speed; picking another
-        # requantizes the music to that tempo (see _on_tempo).
+        # detected one is flagged as the real NES speed; picking another just
+        # changes the playback speed (see _on_tempo).
         labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
                   + (" (real NES)" if self.is_nsf and b == byte0 else "")
                   for b in self._tempos]
@@ -769,8 +763,19 @@ class ImportPreview(tk.Toplevel):
         tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
             side="left", padx=(4, 0))
 
+        # Exhaustive Optimize: re-fit the grid (every tempo × ticks-per-unit) for
+        # the tightest beat alignment, nudging the speed by the minimal amount.
+        optbar = tk.Frame(self, bg=_BG)
+        optbar.grid(row=base + 2, column=0, columnspan=9, sticky="w",
+                    padx=10, pady=(2, 2))
+        self.opt_label = tk.Label(optbar, bg=_BG, fg=_FG, font=("TkDefaultFont", 8))
+        if self.is_nsf:
+            tk.Button(optbar, text="⌖ Exhaustive Optimize",
+                      command=self._optimize).pack(side="left")
+            self.opt_label.pack(side="left", padx=(10, 0))
+
         btns = tk.Frame(self, bg=_BG)
-        btns.grid(row=base + 2, column=0, columnspan=9, sticky="e",
+        btns.grid(row=base + 3, column=0, columnspan=9, sticky="e",
                   padx=10, pady=(6, 10))
         self.drop_label = tk.Label(btns, bg=_BG, fg=_FG)
         self.drop_label.pack(side="left", padx=(0, 14))
@@ -824,17 +829,14 @@ class ImportPreview(tk.Toplevel):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            self._base_song, self._byte0 = self.app._load_module(
+            self.song, self._byte0 = self.app._load_module(
                 self.src, **self._load_kwargs())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
         finally:
             self.configure(cursor="")
-        self.song = self._base_song                  # re-apply the chosen tempo
-        if self.is_nsf:
-            from ..nsf.extract import requantize
-            self.song = requantize(self._base_song, self._tempo_byte0())
+        self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
         self._update_stats()
         self._update_size()
 
@@ -844,17 +846,31 @@ class ImportPreview(tk.Toplevel):
         self._on_percussion()
         for tr, keep in zip(self.song.tracks, self.include):
             keep.set(channel_stats(tr)["verdict"] != "empty")
-        self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
         self._update_size()
 
     def _on_tempo(self) -> None:
-        """Tempo REQUANTIZES an NSF import to the chosen grid (from the stashed
-        frame log — no re-emulation), so note lengths, measures and per-measure
-        density all adapt. Then refresh the readouts."""
+        """The BPM dial is PURE PLAYBACK SPEED — it re-stamps the tempo byte the
+        file plays at, without re-quantizing (so the beat-alignment is never
+        disturbed). Only Exhaustive Optimize re-fits the grid."""
         self.app.player.stop()
-        if self.is_nsf:
-            from ..nsf.extract import requantize
-            self.song = requantize(self._base_song, self._tempo_byte0())
+        self._update_stats()
+        self._update_size()
+
+    def _optimize(self) -> None:
+        """Exhaustive Optimize: re-quantize the NSF onto its best-aligning grid
+        (search every MCS tempo × ticks-per-unit for the fewest off-beat notes),
+        nudging the playback tempo by the minimal amount for exact beats. Updates
+        the BPM dial to the chosen tempo and reports the alignment."""
+        if not self.is_nsf:
+            return
+        self.app.player.stop()
+        from ..nsf.extract import optimize_song
+        self.song, self._byte0, off, speed = optimize_song(self.song)
+        if self._byte0 in self._tempos:
+            self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
+        self.opt_label.configure(
+            text=f"aligned · {off:.2f} avg off-beat · {speed * 100:.0f}% speed nudge",
+            fg=_ACCENT)
         self._update_stats()
         self._update_size()
 
