@@ -725,18 +725,15 @@ class ImportPreview(tk.Toplevel):
         tk.Label(bar, text="Tempo" if not self.is_nsf else "Speed",
                  bg=_BG, fg=_ACCENT).pack(side="left")
         self._tempos = [0x77 + 3 * s for s in range(10)]
-        if self.is_nsf:
-            # The auto-detected byte0 IS the real NES speed; label the rest as a
-            # percentage of it (slower = slow-motion study, faster = sped up).
-            labels = [f"{round(100 * tick_seconds_for(byte0) / tick_seconds_for(b))}%"
-                      + (" (real NES)" if b == byte0 else " speed")
-                      for b in self._tempos]
-        else:
-            labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
-                      for b in self._tempos]
+        # MCS's ten tempos, labelled by their actual BPM. For NSF the auto-
+        # detected one is flagged as the real NES speed; picking another
+        # requantizes the music to that tempo (see _on_tempo).
+        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
+                  + (" (real NES)" if self.is_nsf and b == byte0 else "")
+                  for b in self._tempos]
         self._tempo_labels = labels
         self.tempo = tk.StringVar(value=labels[self._tempos.index(byte0)])
-        tempo_box = ttk.Combobox(bar, textvariable=self.tempo, width=16,
+        tempo_box = ttk.Combobox(bar, textvariable=self.tempo, width=20,
                                  state="readonly", values=labels)
         tempo_box.pack(side="left", padx=(6, 16))
         tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
