@@ -12,7 +12,7 @@ program plays, note for note — tested against the 12 songs from the
 original retail disk plus dozens of user-made songs collected over the
 years (86 files in all, every one round-tripping byte-identically).
 
-## The Player + Importer (v0.2)
+## The Player + Importer (v0.3)
 
 Open a song, watch it scroll by in a tracker-style grid, and listen:
 
@@ -27,13 +27,23 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
 - **Oscilloscope window** — the four voices on scopes plus a master mix,
   phosphor green on black, resizable.
 - **Export** — decoded playback as WAV, or the full tracker grid as text.
-- **Import (new in 0.2)** — convert **Vortex Tracker `.pt3` modules** (the ZX
-  Spectrum AY-3-8910 scene format) to MCS, with a preview dialog: per-channel
-  stats and solo audition, percussion detection with three handling modes
-  (synthesized clicks — a dissonant-cluster or wood-block timbre — played as
-  written pitches, or dropped), per-channel octave shift, MCS tempo picker,
-  and optional decay shaping that recovers plucks and staccato from the
-  modules' volume tables.
+- **Import** — convert chiptunes to MCS through a preview dialog with
+  per-channel stats, solo audition, percussion handling, per-channel octave
+  shift, and an MCS tempo picker:
+  - **NES chiptunes (`.nsf`) — new in 0.3.** A cycle-checked 6502 core (all
+    151 official opcodes, validated against `nestest`) runs the game's own
+    sound driver; the APU model logs the pulse/triangle/noise stream, detects
+    the loop, and quantizes onto MCS's beat-aligned grid. Output targets:
+    **Tandy** (3 square voices), **PC Speaker 1-Note**, and **PC Speaker
+    4-Note** (adds a percussion voice). Noise percussion is read two-tone —
+    kick vs hi-hat by NES period — and mapped to drum clicks, with an
+    **Exhaustive Optimize** that searches tempo × subdivision for the tightest
+    beat alignment.
+  - **Vortex Tracker `.pt3` modules** (the ZX Spectrum AY-3-8910 scene format)
+    — percussion detection with three handling modes (synthesized clicks — a
+    dissonant-cluster or wood-block timbre — played as written pitches, or
+    dropped), and optional decay shaping that recovers plucks and staccato
+    from the modules' volume tables.
 
 ### Just want to listen? (Windows, no Python)
 
@@ -103,9 +113,16 @@ tempo; the general `Song → MCS` encoder handles staff split, voice capping,
 rests, tied sustains across barlines, and accidental spelling. (The encoder
 is verified by re-encoding our Maple Leaf Rag demo losslessly.)
 
-Work has also started on importing **NES chiptunes (`.nsf`)** — the
-6502 + APU emulation is partially built. See
-[docs/architecture.md](docs/architecture.md).
+**NES chiptunes (`.nsf`, new in 0.3)** import the same way — from source:
+
+```powershell
+python -m mcs_convert convert SONG.nsf SONG.MCS
+```
+
+A full 6502 core executes the game's sound driver frame by frame while the
+APU model captures the pulse/triangle/noise registers; the emulation detects
+the song loop, quantizes onto MCS's grid, and converts to Tandy or PC-speaker
+voicing. See [docs/architecture.md](docs/architecture.md).
 
 ## Layout
 
@@ -117,10 +134,10 @@ mcs_convert/
   mcs/reader.py     .MCS/.MCD -> Song   (the decoded format lives here)
   mcs/writer.py     Song -> .MCS        (round-trips all samples byte-identically)
   model.py          Song / Track / NoteEvent  (the neutral middle)
-  nsf/              NSF header/APU/6502 (converter input, in progress)
+  nsf/              NSF header/APU/6502 emulation (NES converter input)
 docs/               the format spec + architecture notes
 tools/              disk-image and test-song utilities
-tests/              58 tests, including engine ground-truth checks
+tests/              106 tests, including engine ground-truth checks
 ```
 
 ## Development
