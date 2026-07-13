@@ -894,17 +894,22 @@ class ImportPreview(tk.Toplevel):
             return
         from ..mcs.encode import encode_song
         from ..mcs.reader import parse_bytes
+        mode = self.out_mode.get()
         sel = self.selected_song(indices)
         try:
             data = encode_song(sel, tempo_byte0=self._tempo_byte0(), cap=True,
                                fit_meter=True, balance=True,
-                               voices=self._out_modes[self.out_mode.get()])
+                               voices=self._out_modes[mode])
             sel = parse_bytes(data)
         except Exception:
             pass                        # fall back to the raw selection on any
             #                             encode hiccup rather than kill preview
         step = tick_seconds_for(self._tempo_byte0())
-        master, _, sr = render_song(sel, step_seconds=step, waveform="pcspeaker")
+        # Match the TARGET chip's timbre so the preview A/Bs what you'll hear:
+        # Tandy/PCjr = three independent square voices (clean polyphony); the PC
+        # speaker = one 1-bit channel (voices summed into the gritty multiplex).
+        waveform = "square" if "Tandy" in mode else "pcspeaker"
+        master, _, sr = render_song(sel, step_seconds=step, waveform=waveform)
         pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
         if pcm:
             self.app.player.play(pcm, sr,
