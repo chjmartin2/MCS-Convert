@@ -61,13 +61,20 @@ def _fit(midi: int, lo: int, hi: int) -> int:
     return midi
 
 
-def _v_and_acc(midi: int, treble: bool) -> Tuple[int, int]:
-    """Staff position v and accidental (-1/0/+1) for a MIDI note, sharp-spelled."""
+def _v_and_acc(midi: int, treble: bool, v_base: int = None) -> Tuple[int, int]:
+    """Staff position v and accidental (-1/0/+1) for a MIDI note, sharp-spelled.
+
+    `treble` picks the pitch WINDOW (the clef); `v_base` picks the screen
+    POSITION (1 = top staff, 21 = bottom). These are independent — a bass clef
+    can sit on the TOP staff (v_base 1), which is exactly how two same-clef staves
+    stack as two separate staves instead of overlapping in one position."""
+    if v_base is None:
+        v_base = 1 if treble else 21             # default: treble on top, bass below
     letter, acc = _SPELL[midi % 12]
     octave = (midi - acc) // 12 - 1
     di = octave * 7 + _LETTERS.index(letter)
-    v = (1 + _E7_DI - di) if treble else (21 + _G5_DI - di)
-    return v, acc
+    top_di = _E7_DI if treble else _G5_DI        # top of the chosen clef's window
+    return v_base + top_di - di, acc
 
 
 def _decompose(ticks: int, allow_dot: bool = True) -> List[Tuple[int, bool]]:
@@ -149,13 +156,19 @@ def _tick_to_x(tick: int, bar_ticks: int) -> int:
     return max(_X_BASE, min(_MAX_X_SLOT, x))
 
 
-def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
+def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
+                v_base: int = None):
     """Slot lists -> MCS measure entry lists (notes, rests, accidentals, dots, ties).
-    With `cap`, a measure is limited to the real-MCS buffer size; once full, further
-    onsets in that bar are dropped (whole slot at a time) rather than overflow and
-    corrupt playback. Automated imports cap; hand-authoring/round-trip do not (the
-    validator flags any overflow there instead of silently dropping)."""
-    rest_v = 13 if treble else 33
+    `treble` is the clef (pitch window); `v_base` is the screen position (1 = top
+    staff, 21 = bottom), which defaults to top-for-treble/bottom-for-bass but can
+    be set so a bass-clef staff sits on top. With `cap`, a measure is limited to
+    the real-MCS buffer size; once full, further onsets in that bar are dropped
+    (whole slot at a time) rather than overflow and corrupt playback. Automated
+    imports cap; hand-authoring/round-trip do not (the validator flags any
+    overflow there instead of silently dropping)."""
+    if v_base is None:
+        v_base = 1 if treble else 21
+    rest_v = 13 if v_base == 1 else 33           # rest sits in the staff's position
     key_state_default = 0                        # C major: naturals by default
     measures = []
     dropped = 0
@@ -178,7 +191,7 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
                     last_x = x
                 else:
                     for midi in sorted(midis, reverse=True):
-                        v, acc = _v_and_acc(midi, treble)
+                        v, acc = _v_and_acc(midi, treble, v_base)
                         if acc_state.get(v, key_state_default) != acc:
                             sym = _SYM_SHARP if acc > 0 else _SYM_NAT
                             slot.append(make_entry(sym, v, x))
@@ -189,7 +202,7 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
                     piece_end = tick + base + (base // 2 if dotted else 0)
                     piece_ties = midis if piece_end < tick + advance else ties
                     for m in piece_ties:            # one tie glyph per tied member,
-                        tv, _ = _v_and_acc(m, treble)   # at that note's own v
+                        tv, _ = _v_and_acc(m, treble, v_base)   # at that note's own v
                         slot.append(make_entry(_SYM_TIE, tv, aux_x))
                     last_x = aux_x if (dotted or piece_ties) else x
                 tick += base + (base // 2 if dotted else 0)
@@ -260,21 +273,53 @@ def _balanced_split(events, bar_ticks, a_treble, b_treble):
     return a, b
 
 
-def _staff_for(events, total, bar_ticks, treble, cap):
-    """One channel's (start,dur,midi) events -> (clef record, measure lists),
-    fitting pitches into the chosen clef's window and reporting drops via
-    _emit_staff.last_dropped."""
+def _monophonic(events):
+    """Collapse overlapping voices to a single melodic line: at every tick the
+    highest sounding pitch wins (the melody usually rides on top), and lower
+    notes are silenced while it sounds. For the PC-speaker 1-voice target, where
+    MCS can only sound one note at a time. (A first cut — 'highest wins' loses an
+    inner melody that dips below an accompaniment; smarter voice-leading later.)"""
+    if not events:
+        return []
+    end = max(s + d for s, d, m in events)
+    pitch = [None] * end
+    for s, d, m in events:
+        for t in range(s, min(end, s + d)):
+            if pitch[t] is None or m > pitch[t]:
+                pitch[t] = m
+    out, i = [], 0
+    while i < end:
+        if pitch[i] is None:
+            i += 1
+            continue
+        j = i
+        while j < end and pitch[j] == pitch[i]:
+            j += 1
+        out.append((i, j - i, pitch[i]))
+        i = j
+    return out
+
+
+def _staff_for(events, total, bar_ticks, treble, cap, v_base=None):
+    """(start,dur,midi) events -> a staff (clef record + measure lists), fitting
+    pitches into the clef's window at screen position `v_base` (1 = top, 21 =
+    bottom). The clef GLYPH follows the clef (G/F) but sits at the position's
+    height (v 16 top, 32 bottom), so a bass-clef top staff draws correctly.
+    Drops reported via _emit_staff.last_dropped."""
+    if v_base is None:
+        v_base = 1 if treble else 21
     lo, hi = (TREBLE_LO, TREBLE_HI) if treble else (BASS_LO, BASS_HI)
     fitted = [(s, d, _fit(m, lo, hi)) for s, d, m in events]
     measures = _emit_staff(_staff_slots(fitted, total, bar_ticks), treble,
-                           cap=cap, bar_ticks=bar_ticks)
-    clef = make_entry(_G_CLEF if treble else _F_CLEF, 16 if treble else 32, 14)
+                           cap=cap, bar_ticks=bar_ticks, v_base=v_base)
+    clef = make_entry(_G_CLEF if treble else _F_CLEF, 16 if v_base == 1 else 32, 14)
     return [[clef]] + measures                   # clef is its own opening measure
 
 
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 split: int = 67, cap: bool = False,
-                fit_meter: bool = False, balance: bool = False) -> bytes:
+                fit_meter: bool = False, balance: bool = False,
+                voices: int = 6) -> bytes:
     """Song (32nd-note ticks) -> .MCS bytes on a two-staff grand staff — the
     layout real MCS renders (a top and a bottom staff, each its own voice/chord
     lane with its own 32-entry measure buffer). Both staves' clefs are free, so
@@ -287,6 +332,11 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     instead of piling a low song's notes onto one overflowing bass staff. Dr.
     Wily goes from ~62% of notes kept to ~100%, with no octave-folding.
 
+    `voices` targets an output chip's polyphony: 1 collapses to a single melodic
+    line (PC-speaker 1-voice), 3 suits a Tandy/PCjr (3 tones), 4 the PC-speaker
+    4-voice multiplex. Our chiptune sources are already <=3 voices, so 3/4 keep
+    everything; only 1 actually reduces.
+
     `cap=True` limits each measure to MCS's 32-entry buffer, dropping the densest
     overflow rather than corrupting playback. `fit_meter=True` picks the meter
     that keeps the most notes: the longest (most natural) meter that overflows
@@ -296,7 +346,7 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=balance)
+                               split=split, cap=cap, balance=balance, voices=voices)
             dropped = encode_song.last_dropped
             if dropped == 0:
                 return data                      # this natural meter loses nothing
@@ -308,12 +358,17 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     events = [(s, d, m) for tr in song.tracks
               for s, d, m in _note_events([n for n in tr.notes if not n.percussive])
               if d > 0]
+    if voices <= 1:
+        events = _monophonic(events)
     total = max((s + d for s, d, m in events), default=0)
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
     time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)   # else 4/4
 
-    if balance:
+    if voices <= 1:                              # single melodic line -> one staff
+        a_treble = b_treble = _pick_clefs(events)[0]
+        a_ev, b_ev = events, []
+    elif balance:
         a_treble, b_treble = _pick_clefs(events)
         a_ev, b_ev = _balanced_split(events, bar_ticks, a_treble, b_treble)
     else:                                        # fixed treble/bass pitch-split
@@ -321,8 +376,10 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         a_ev = [(s, d, m) for s, d, m in events if m >= split]
         b_ev = [(s, d, m) for s, d, m in events if m < split]
 
-    top = _staff_for(a_ev, total, bar_ticks, a_treble, cap)
+    # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM (21..41) —
+    # independent of clef, so two bass staves stack as two staves, not one heap.
+    top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
     dropped = _emit_staff.last_dropped
-    bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap)
+    bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
     encode_song.last_dropped = dropped + _emit_staff.last_dropped
     return build_file([top, bottom], time_sig=time_sig, scroll=scroll)

@@ -108,15 +108,35 @@ def test_balance_keeps_more_of_a_low_dense_song(tmp_path):
         _count(_roundtrip_bytes(song, cap=True))                # beats pitch-split
 
 
-def test_balance_uses_two_bass_staves_for_a_low_song():
+def test_balance_uses_two_bass_staves_at_top_and_bottom():
     # A song entirely in the bass window must become two BASS-clef staves (so
-    # notes can balance with no octave-folding), not a treble-over-bass split.
+    # notes balance with no octave-folding) that sit at DIFFERENT positions — one
+    # top (v_base 1), one bottom (v_base 21). Both landing at v21+ is the bug that
+    # piled every note onto the bottom staff as a garbled heap.
     from mcs_convert.mcs.reader import parse_records, split_staves, _read_staff, CLEF_BASS
     song = _mk([(i * 4, 4, 48 + i % 12) for i in range(32)])    # B2..bass only
     data = encode_song(song, cap=True, balance=True)
     staves = split_staves(parse_records(data))
     assert len(staves) == 2
     assert all(_read_staff(st).clef == CLEF_BASS for st in staves)
+    assert sorted(_read_staff(st).v_base for st in staves) == [1, 21]
+
+
+def test_voices_one_collapses_to_a_single_line():
+    # The PC-speaker 1-voice target must leave at most one note sounding at a time
+    # (highest wins), and keep that melodic line intact.
+    song = Song(title="chords")
+    for base in (72, 64, 55):                         # a 3-note chord every beat
+        tr = Track(name=str(base))
+        for i in range(8):
+            tr.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=base))
+        song.add_track(tr)
+    got = _roundtrip_bytes(song, cap=True, voices=1)
+    ev = _sounding(got)
+    for a in ev:                                      # no two notes overlap in time
+        assert not any(b is not a and b[0] < a[0] + a[1] and a[0] < b[0] + b[1]
+                       for b in ev)
+    assert all(m == 72 for _, _, m in ev)             # highest voice (C5) survives
 
 
 def test_multi_staff_header_sizes_are_consistent():
