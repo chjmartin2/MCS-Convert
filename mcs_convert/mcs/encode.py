@@ -299,10 +299,21 @@ def _balanced_split(events, bar_ticks, a_treble, b_treble):
     goes to the staff whose window holds it, and only the overlap is balanced."""
     a, b = [], []
     ca, cb = defaultdict(int), defaultdict(int)
+    lo, hi = (TREBLE_LO, TREBLE_HI) if a_treble else (BASS_LO, BASS_HI)
+    third = (hi - lo) / 3
     for s, d, m in sorted(events):
         meas = s // bar_ticks
-        if a_treble == b_treble:                     # same window: free choice
-            use_a = ca[meas] <= cb[meas]
+        if a_treble == b_treble:                     # two stacked same-clef staves
+            # Keep the register split: the top third of the window goes to the TOP
+            # staff (A), the bottom third to the BOTTOM (B) — else a low note lands
+            # at an unreadable v on the top staff (below it, colliding with the
+            # bottom staff). Only the middle is balanced by load.
+            if m >= hi - third:
+                use_a = True
+            elif m <= lo + third:
+                use_a = False
+            else:
+                use_a = ca[meas] <= cb[meas]
         else:
             a_lo, a_hi = (TREBLE_LO, TREBLE_HI) if a_treble else (BASS_LO, BASS_HI)
             b_lo, b_hi = (TREBLE_LO, TREBLE_HI) if b_treble else (BASS_LO, BASS_HI)
@@ -439,8 +450,14 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
             return staff, _emit_staff.last_dropped
         _staff_for(mel_ev, total, bar_ticks, treble, cap, v_base=v_base)  # pass 1
         counts = _emit_staff.last_note_counts
+        # A click on the SAME onset+pitch as a melody note would overwrite it and
+        # shorten that note to a 32nd — skip it (the pitch already sounds there).
+        lo, hi = (TREBLE_LO, TREBLE_HI) if treble else (BASS_LO, BASS_HI)
+        mel_onsets = {(s, _fit(m, lo, hi)) for s, d, m in mel_ev}
         used, kept = defaultdict(int), []
         for t, d, m in sorted(perc_ev):
+            if (t, m) in mel_onsets:
+                continue                             # don't clobber the melody note
             mi = t // bar_ticks
             room = _MAX_NOTES_PER_STAFF - (counts[mi] if mi < len(counts) else 0)
             if used[mi] < room:
@@ -462,8 +479,17 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         b_win = (TREBLE_LO, TREBLE_HI) if b_treble else (BASS_LO, BASS_HI)
         a_perc, b_perc = [], []
         for t, d, m in percussion:
-            win = a_win if _dist(m, a_win) <= _dist(m, b_win) else b_win
-            (a_perc if win is a_win else b_perc).append(
+            da, db = _dist(m, a_win), _dist(m, b_win)
+            if da != db:
+                to_a = da < db                   # the window that actually holds it
+            else:
+                # tie (two same-clef staves): A is the TOP staff, B the BOTTOM, so
+                # a low kick belongs low (B) and a high hat high (A). Sending a low
+                # click to the top staff puts it at an extreme-low v the editor
+                # won't draw (it collides with the bottom staff).
+                to_a = m > (a_win[0] + a_win[1]) / 2
+            win = a_win if to_a else b_win
+            (a_perc if to_a else b_perc).append(
                 (t, d, max(win[0], min(win[1], m))))
         top, da = _build_staff(a_ev, a_perc, a_treble, 1)
         bottom, db = _build_staff(b_ev, b_perc, b_treble, 21)

@@ -88,6 +88,22 @@ def test_note_cap_holds_32_per_staff_and_drums_yield_first():
     assert len([m for _, _, m in got if m == 47]) < 20      # some drums yielded
 
 
+def test_drum_click_does_not_overwrite_same_pitch_melody():
+    # a click on the exact tick+pitch of a melody note must be SKIPPED, not
+    # overwrite and shorten the melody note (the pitch already sounds there).
+    song = Song(title="collide")
+    mel = Track(name="mel")
+    mel.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=55))   # a quarter G3
+    mel.add(NoteEvent(start_tick=8, duration_ticks=8, midi_note=60))
+    song.add_track(mel)
+    dr = Track(name="Noise")
+    dr.add(NoteEvent(start_tick=0, duration_ticks=1, midi_note=55, percussive=True))
+    song.add_track(dr)
+    got = _sounding(_roundtrip_bytes(song, cap=True, voices=4))
+    g3 = [(s, d, m) for s, d, m in got if m == 55]
+    assert g3 and g3[0][1] == 8                        # G3 keeps its full length
+
+
 def test_hi_hat_rides_the_treble_top_not_folded():
     # A hi-hat click (E7=100) must land at its true top pitch on the treble staff
     # when one exists — clamped into the window, never octave-folded down.
