@@ -66,6 +66,24 @@ def _dist(midi: int, window) -> int:
     return 0 if lo <= midi <= hi else min(abs(midi - lo), abs(midi - hi))
 
 
+# Note/rest events per staff per measure. NOT the x-slot limit (that's positions);
+# this is the count of noteheads+rests the real 1984 engine keeps up with. The
+# 80-song corpus never exceeds 32 on one staff; past it the player "gives up time"
+# and the beat slips — which is what stacking percussion onto a dense staff did.
+_MAX_NOTES_PER_STAFF = 32
+
+
+def _keep_order(midis, tick, perc_set):
+    """Chord members ordered most-important first (so trimming to fit the note cap
+    drops the least important). Melody outweighs percussion, and within the melody
+    the OUTER voices (top line + bass) outrank the inner ones. So a crowded slot
+    sheds its drum click first, then inner harmony, and never the melody edges."""
+    mel = sorted((m for m in midis if (tick, m) not in perc_set), reverse=True)
+    perc = [m for m in midis if (tick, m) in perc_set]
+    outer_first = ([mel[0], mel[-1]] + mel[1:-1]) if len(mel) > 2 else mel
+    return outer_first + perc                    # percussion last = dropped first
+
+
 def _v_and_acc(midi: int, treble: bool, v_base: int = None) -> Tuple[int, int]:
     """Staff position v and accidental (-1/0/+1) for a MIDI note, sharp-spelled.
 
@@ -162,14 +180,15 @@ def _tick_to_x(tick: int, bar_ticks: int, x_base: int, x_end: int) -> int:
 
 
 def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
-                v_base: int = None, x_range=_POS_DEFAULT):
+                v_base: int = None, x_range=_POS_DEFAULT, note_cap=None,
+                perc_set=frozenset()):
     """Slot lists -> MCS measure entry lists (notes, rests, accidentals, dots, ties).
     `treble` is the clef (pitch window); `v_base` is the screen position (1 = top
-    staff, 21 = bottom). `x_range` = (x_base, x_placement_end, x_cap) bounds the
-    horizontal slots. With `cap`, onsets past `x_cap` are dropped (24 positions by
-    default, 32 in force mode); WITHOUT cap (round-trip / hand-authoring) onsets
-    bump right up to the 5-bit field max so nothing is lost. Entries themselves
-    are NOT limited — chords stack on one slot freely."""
+    staff, 21 = bottom). `x_range` bounds the horizontal slots (positions); with
+    `cap`, onsets past that edge are dropped. `note_cap` limits noteHEADS+rests
+    per measure (the real engine's ~32-per-staff ceiling): a crowded slot sheds
+    its members in _keep_order (drum click first, then inner voices), so drums
+    yield before melody. `perc_set` flags which (tick, pitch) are drum clicks."""
     if v_base is None:
         v_base = 1 if treble else 21
     x_base, x_place_end, x_cap = x_range
@@ -178,9 +197,11 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
     key_state_default = 0                        # C major: naturals by default
     measures = []
     dropped = 0
+    note_counts = []
     for bar in bars:
         entries = []
         acc_state: Dict[int, int] = {}
+        note_count = 0                           # noteheads+rests this measure
         # x-slots must strictly increase across distinct time positions, or the
         # reader (and real MCS) group different notes into one chord. `last_x`
         # keeps them apart: dense measures pack tight left-to-right, sparse ones
@@ -191,8 +212,24 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
                 if cap:
                     dropped += 1
                     continue                     # drop the whole onset
+            pieces = _decompose(advance, allow_dot=bool(midis))
+            n_this = len(pieces) * (len(midis) if midis else 1)
+            if cap and note_cap is not None and note_count + n_this > note_cap:
+                if not midis:                    # a rest over budget -> drop it
+                    dropped += 1
+                    continue
+                # trim chord members to the measure's remaining note budget,
+                # shedding drum clicks then inner voices first (see _keep_order)
+                fit = max(0, note_cap - note_count) // len(pieces)
+                midis = _keep_order(midis, tick, perc_set)[:fit]
+                ties = [m for m in ties if m in midis]   # no tie for a dropped note
+                if not midis:
+                    dropped += 1
+                    continue                     # nothing fits the note budget
+                n_this = len(pieces) * len(midis)
+            note_count += n_this
             slot = []
-            for base, dotted in _decompose(advance, allow_dot=bool(midis)):
+            for base, dotted in pieces:
                 x = min(ceiling, max(_tick_to_x(tick, bar_ticks, x_base, x_place_end),
                                      last_x + 1))
                 aux_x = min(ceiling, x + 1)        # dot / tie sit just after
@@ -216,9 +253,11 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
                         slot.append(make_entry(_SYM_TIE, tv, aux_x))
                     last_x = aux_x if (dotted or piece_ties) else x
                 tick += base + (base // 2 if dotted else 0)
-            entries.extend(slot)                 # entries are unlimited (chords free)
+            entries.extend(slot)                 # chords stack on one x-slot freely
         measures.append(entries)
+        note_counts.append(note_count)
     _emit_staff.last_dropped = dropped
+    _emit_staff.last_note_counts = note_counts
     return measures
 
 
@@ -307,20 +346,22 @@ def _monophonic(events):
 
 
 def _staff_for(events, total, bar_ticks, treble, cap, v_base=None,
-               x_range=_POS_DEFAULT):
+               x_range=_POS_DEFAULT, perc_set=frozenset()):
     """(start,dur,midi) events -> a staff (clef record + measure lists), fitting
     pitches into the clef's window at screen position `v_base` (1 = top, 21 =
     bottom). The clef GLYPH follows the clef (G/F) but sits at the position's
     height (v 16 top, 32 bottom), so a bass-clef top staff draws correctly.
-    `x_range` bounds the horizontal slots (see _emit_staff). Drops reported via
-    _emit_staff.last_dropped."""
+    `x_range` bounds the horizontal slots; `cap` also enforces the per-staff note
+    cap, shedding the drum clicks in `perc_set` first. Drops via last_dropped."""
     if v_base is None:
         v_base = 1 if treble else 21
     lo, hi = (TREBLE_LO, TREBLE_HI) if treble else (BASS_LO, BASS_HI)
     fitted = [(s, d, _fit(m, lo, hi)) for s, d, m in events]
     measures = _emit_staff(_staff_slots(fitted, total, bar_ticks), treble,
                            cap=cap, bar_ticks=bar_ticks, v_base=v_base,
-                           x_range=x_range)
+                           x_range=x_range,
+                           note_cap=_MAX_NOTES_PER_STAFF if cap else None,
+                           perc_set=perc_set)
     clef = make_entry(_G_CLEF if treble else _F_CLEF, 16 if v_base == 1 else 32, 14)
     return [[clef]] + measures                   # clef is its own opening measure
 
@@ -390,6 +431,26 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
     time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)   # else 4/4
 
+    def _build_staff(mel_ev, perc_ev, treble, v_base):
+        # Melody first; drum clicks then fill each measure's LEFTOVER note budget
+        # (32 per staff), so drums yield to melody globally — never the reverse.
+        if not perc_ev:
+            staff = _staff_for(mel_ev, total, bar_ticks, treble, cap, v_base=v_base)
+            return staff, _emit_staff.last_dropped
+        _staff_for(mel_ev, total, bar_ticks, treble, cap, v_base=v_base)  # pass 1
+        counts = _emit_staff.last_note_counts
+        used, kept = defaultdict(int), []
+        for t, d, m in sorted(perc_ev):
+            mi = t // bar_ticks
+            room = _MAX_NOTES_PER_STAFF - (counts[mi] if mi < len(counts) else 0)
+            if used[mi] < room:
+                kept.append((t, d, m))
+                used[mi] += 1
+        pset = frozenset((t, m) for t, d, m in kept)
+        staff = _staff_for(mel_ev + kept, total, bar_ticks, treble, cap,
+                           v_base=v_base, perc_set=pset)           # pass 2
+        return staff, _emit_staff.last_dropped
+
     def emit(a_ev, b_ev, a_treble, b_treble):
         # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM
         # (21..41) — independent of clef, so two bass staves stack as two staves,
@@ -404,10 +465,9 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
             win = a_win if _dist(m, a_win) <= _dist(m, b_win) else b_win
             (a_perc if win is a_win else b_perc).append(
                 (t, d, max(win[0], min(win[1], m))))
-        top = _staff_for(a_ev + a_perc, total, bar_ticks, a_treble, cap, v_base=1)
-        d = _emit_staff.last_dropped
-        bottom = _staff_for(b_ev + b_perc, total, bar_ticks, b_treble, cap, v_base=21)
-        return [top, bottom], d + _emit_staff.last_dropped
+        top, da = _build_staff(a_ev, a_perc, a_treble, 1)
+        bottom, db = _build_staff(b_ev, b_perc, b_treble, 21)
+        return [top, bottom], da + db
 
     if voices <= 1:                              # single melodic line -> one staff
         treble = _pick_clefs(events)[0]

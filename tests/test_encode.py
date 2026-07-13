@@ -62,6 +62,32 @@ def test_percussion_excluded_below_four_voices(tmp_path):
         assert not any(m == 62 for _, _, m in _sounding(got)), f"voices={v}"
 
 
+def test_note_cap_holds_32_per_staff_and_drums_yield_first():
+    # A staff crammed with 20 bass notes AND a drum click on each tick (40 events
+    # on one staff) must be trimmed to <=32 note/rest events — and the DRUMS drop,
+    # not the melody.
+    from mcs_convert.mcs.reader import (parse_records, split_staves, symbol,
+                                        _note_value)
+    song = Song(title="crammed")
+    mel = Track(name="mel")
+    for i in range(20):
+        mel.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=50 + i % 7))
+    dr = Track(name="Noise")
+    for i in range(20):                              # a click on every melody tick
+        dr.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=47,
+                         percussive=True))
+    song.add_track(mel)
+    song.add_track(dr)
+    from mcs_convert.mcs.reader import parse_bytes
+    data = encode_song(song, cap=True, voices=4)
+    counts = [sum(1 for b0, b1 in r.entries if _note_value(symbol(b0))[0])
+              for st in split_staves(parse_records(data)) for r in st[1:]]
+    assert max(counts) <= 32                          # the per-staff ceiling holds
+    got = _sounding(parse_bytes(data))
+    assert len([m for _, _, m in got if m != 47]) == 20     # every melody note kept
+    assert len([m for _, _, m in got if m == 47]) < 20      # some drums yielded
+
+
 def test_hi_hat_rides_the_treble_top_not_folded():
     # A hi-hat click (E7=100) must land at its true top pitch on the treble staff
     # when one exists — clamped into the window, never octave-folded down.

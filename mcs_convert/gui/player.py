@@ -898,16 +898,22 @@ class ImportPreview(tk.Toplevel):
         self._update_size()
 
     def _update_size(self) -> None:
-        """Live size + dropped-note readout for the current selection. Encoding
-        once tells us both the byte size and how many note-slots the chosen
-        tempo/meter/target forced MCS's per-measure buffer to drop."""
+        """Live readouts for the current selection: byte size, dropped onsets, and
+        the DENSEST staff-measure (note/rest events) against the corpus ceiling of
+        32 — the reference for how close this import runs to what MCS handles."""
         from ..mcs.encode import encode_song
+        from ..mcs.reader import parse_records, split_staves, symbol, _note_value
         try:
-            size = len(self.encode_selection())
+            data = self.encode_selection()
             dropped = encode_song.last_dropped
+            staves = split_staves(parse_records(data))
+            busiest = max((sum(1 for b0, b1 in r.entries if _note_value(symbol(b0))[0])
+                           for st in staves for r in st[1:]), default=0)
         except Exception:  # noqa: BLE001 - e.g. nothing selected
-            size, dropped = 0, 0
-        self.size_label.configure(text=f"{size:,} bytes", fg=_ACCENT)
+            data, dropped, busiest = b"", 0, 0
+        self.size_label.configure(
+            text=f"{len(data):,} bytes · busiest staff {busiest}/32 events",
+            fg=("#e0a030" if busiest >= 32 else _ACCENT))
         if dropped:
             self.drop_label.configure(text=f"⚠ {dropped} slot(s) dropped",
                                       fg="#e0a030")
