@@ -109,13 +109,19 @@ def test_balance_keeps_more_of_a_low_dense_song(tmp_path):
 
 
 def test_balance_uses_two_bass_staves_at_top_and_bottom():
-    # A song entirely in the bass window must become two BASS-clef staves (so
-    # notes balance with no octave-folding) that sit at DIFFERENT positions — one
-    # top (v_base 1), one bottom (v_base 21). Both landing at v21+ is the bug that
-    # piled every note onto the bottom staff as a garbled heap.
+    # A DENSE low song (one that overflows a single bass staff) must rebalance
+    # onto two BASS-clef staves at DIFFERENT positions — one top (v_base 1), one
+    # bottom (v_base 21). Both landing at v21+ is the bug that piled every note
+    # onto the bottom staff as a garbled heap.
     from mcs_convert.mcs.reader import parse_records, split_staves, _read_staff, CLEF_BASS
-    song = _mk([(i * 4, 4, 48 + i % 12) for i in range(32)])    # B2..bass only
-    data = encode_song(song, cap=True, balance=True)
+    song = Song(title="low-dense")
+    for vi in range(2):                               # two low chromatic voices
+        tr = Track(name=str(vi))
+        for i in range(48):
+            tr.add(NoteEvent(start_tick=i * 2 + vi, duration_ticks=2,
+                             midi_note=48 + (i + vi) % 12))
+        song.add_track(tr)
+    data = encode_song(song, cap=True, fit_meter=True, balance=True)
     staves = split_staves(parse_records(data))
     assert len(staves) == 2
     assert all(_read_staff(st).clef == CLEF_BASS for st in staves)

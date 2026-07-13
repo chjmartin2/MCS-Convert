@@ -343,16 +343,24 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     NOTHING, else the shortest (2/4, max capacity). Meter only moves barlines —
     tempo and timing are unchanged — so it's free note-capacity."""
     if fit_meter:
+        # Phase 1: prefer a LOSSLESS natural pitch-split (each voice in its own
+        # register, no cross-staff reshuffling) at the longest meter that fits.
+        # A sparse song (a Zelda theme) lands here — 2/4 pitch-split, untouched.
+        for bt in _FIT_METERS:
+            data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
+                               split=split, cap=cap, balance=False, voices=voices)
+            if encode_song.last_dropped == 0:
+                return data
+        # Phase 2: nothing fits naturally (a dense song like Dr. Wily) — allow
+        # rebalancing across two register-matched staves; take the fewest drops.
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
                                split=split, cap=cap, balance=balance, voices=voices)
             dropped = encode_song.last_dropped
-            if dropped == 0:
-                return data                      # this natural meter loses nothing
             if best is None or dropped < best[1]:
                 best = (data, dropped)
-        return best[0]                           # none lossless: fewest-drop (2/4)
+        return best[0]                           # fewest-drop (2/4 balanced)
 
     # All sounding events (percussion excluded — no home on a pitched staff).
     events = [(s, d, m) for tr in song.tracks
@@ -365,21 +373,32 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
     time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)   # else 4/4
 
-    if voices <= 1:                              # single melodic line -> one staff
-        a_treble = b_treble = _pick_clefs(events)[0]
-        a_ev, b_ev = events, []
-    elif balance:
-        a_treble, b_treble = _pick_clefs(events)
-        a_ev, b_ev = _balanced_split(events, bar_ticks, a_treble, b_treble)
-    else:                                        # fixed treble/bass pitch-split
-        a_treble, b_treble = True, False
-        a_ev = [(s, d, m) for s, d, m in events if m >= split]
-        b_ev = [(s, d, m) for s, d, m in events if m < split]
+    def emit(a_ev, b_ev, a_treble, b_treble):
+        # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM
+        # (21..41) — independent of clef, so two bass staves stack as two staves,
+        # not one heap. Returns (staves, dropped-slot count).
+        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
+        d = _emit_staff.last_dropped
+        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
+        return [top, bottom], d + _emit_staff.last_dropped
 
-    # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM (21..41) —
-    # independent of clef, so two bass staves stack as two staves, not one heap.
-    top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
-    dropped = _emit_staff.last_dropped
-    bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
-    encode_song.last_dropped = dropped + _emit_staff.last_dropped
-    return build_file([top, bottom], time_sig=time_sig, scroll=scroll)
+    if voices <= 1:                              # single melodic line -> one staff
+        treble = _pick_clefs(events)[0]
+        staves, dropped = emit(events, [], treble, treble)
+    else:
+        # The natural treble-over-bass pitch-split (clean, each note in its own
+        # register). Only if it OVERFLOWS a measure do we rebalance — spreading a
+        # low, dense song across two register-matched staves. A sparse song like
+        # a Zelda theme keeps the pitch-split untouched (rebalancing would only
+        # reshuffle voices across staves and muddle its tie chains for nothing).
+        staves, dropped = emit([e for e in events if e[2] >= split],
+                               [e for e in events if e[2] < split], True, False)
+        if balance and dropped > 0:
+            at, bt = _pick_clefs(events)
+            ba, bb = _balanced_split(events, bar_ticks, at, bt)
+            bstaves, bdropped = emit(ba, bb, at, bt)
+            if bdropped < dropped:               # keep balance only if it helps
+                staves, dropped = bstaves, bdropped
+
+    encode_song.last_dropped = dropped
+    return build_file(staves, time_sig=time_sig, scroll=scroll)
