@@ -47,6 +47,7 @@ def _cmd_convert(args) -> int:
     from .mcs.encode import encode_song
 
     ext = args.input.lower().rsplit(".", 1)[-1]
+    target = _com_target(args)                       # tandy/1voice/4voice or None
     try:
         if ext == "pt3":
             from .pt3 import parse_pt3
@@ -54,7 +55,6 @@ def _cmd_convert(args) -> int:
                 song, byte0 = parse_pt3(fh.read(), percussion=args.percussion,
                                         drum_sound=args.drum_sound,
                                         shape_durations=args.shape_durations)
-            data = encode_song(song, tempo_byte0=byte0, cap=True)
         elif ext == "nsf":
             from .nsf.extract import extract_song
             byte0 = 0x77 + 3 * max(0, min(9, args.slow))
@@ -62,11 +62,20 @@ def _cmd_convert(args) -> int:
                                        percussion=args.percussion,
                                        drum_sound=args.drum_sound,
                                        tempo_byte0=byte0)
-            data = encode_song(song, tempo_byte0=byte0, cap=True)
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
             return 1
+
+        if target:                                   # standalone DOS .COM player
+            if target == "4voice":
+                raise NotImplementedError(
+                    "the 4-voice PC-speaker player is phase 2; use --tandy or "
+                    "--1voice for now")
+            from .dosplayer import build_com
+            data = build_com(song, target, byte0)
+        else:                                        # the default .MCS song file
+            data = encode_song(song, tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
         print(f"not yet implemented: {exc}", file=sys.stderr)
         return 2
@@ -76,14 +85,27 @@ def _cmd_convert(args) -> int:
     with open(args.output, "wb") as fh:
         fh.write(data)
     notes = sum(1 for t in song.tracks for n in t.notes if not n.is_rest)
+    kind = f"{target} .COM player" if target else ".MCS song"
     print(f"wrote {args.output} ({len(data)} bytes, {notes} notes, "
-          f"'{song.title}')")
-    from .mcs.validate import validate
-    corrupt = [i for i in validate(data) if i.severity == "corrupt"]
-    if corrupt:
-        print(f"WARNING: {len(corrupt)} issue(s) may corrupt playback in real "
-              f"MCS — run 'mcs-convert validate {args.output}'", file=sys.stderr)
+          f"'{song.title}') - {kind}")
+    if not target:
+        from .mcs.validate import validate
+        corrupt = [i for i in validate(data) if i.severity == "corrupt"]
+        if corrupt:
+            print(f"WARNING: {len(corrupt)} issue(s) may corrupt playback in real "
+                  f"MCS — run 'mcs-convert validate {args.output}'", file=sys.stderr)
     return 0
+
+
+def _com_target(args) -> "str | None":
+    """Which standalone-player target the flags select, if any. An output ending
+    in .com defaults to Tandy; --tandy/--1voice/--4voice force it explicitly."""
+    for mode in ("tandy", "1voice", "4voice"):
+        if getattr(args, mode, False):
+            return mode
+    if args.output.lower().endswith(".com"):
+        return "tandy"
+    return None
 
 
 def _cmd_validate(args) -> int:
@@ -111,19 +133,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_val.add_argument("file", help="path to a .mcs/.mcd file")
     p_val.set_defaults(func=_cmd_validate)
 
-    p_conv = sub.add_parser("convert",
-                            help="convert a chiptune module (.pt3, .nsf) to .MCS")
+    p_conv = sub.add_parser(
+        "convert",
+        help="convert a chiptune (.pt3, .nsf) to a .MCS song or a .COM player")
     p_conv.add_argument("input", help="path to a .pt3 (Vortex Tracker) or .nsf file")
-    p_conv.add_argument("output", help="output .mcs path")
+    p_conv.add_argument("output", help="output path (.mcs song, or .com player)")
+    # Standalone-player target: emit a self-contained DOS .COM instead of a .MCS.
+    target = p_conv.add_mutually_exclusive_group()
+    target.add_argument("--tandy", action="store_true",
+                        help="output a .COM that plays on Tandy/PCjr (SN76489, "
+                             "3 square voices)")
+    target.add_argument("--1voice", dest="1voice", action="store_true",
+                        help="output a .COM that plays on the PC speaker "
+                             "(monophonic, top line)")
+    target.add_argument("--4voice", dest="4voice", action="store_true",
+                        help="output a 4-voice PC-speaker .COM (phase 2 — not yet)")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
                         default="clicks",
                         help="drum-note handling: synthesize clicks (default), "
                              "play written pitches, or drop them")
-    p_conv.add_argument("--drum-sound", choices=("cluster", "block"),
-                        default="cluster",
-                        help="click timbre: G3+Ab3 dissonant cluster (default) "
-                             "or a single D4 wood-block tick")
+    p_conv.add_argument("--drum-sound",
+                        choices=("auto", "low bass", "hi-hat", "block", "cluster"),
+                        default="auto",
+                        help="click pitch: two-tone auto (default), low bass (B2), "
+                             "hi-hat (E7), wood block (D4), or legacy cluster")
     p_conv.add_argument("--shape-durations", action="store_true",
                         help="truncate notes to their sample's audible decay "
                              "(recovers plucks/staccato; MCS has no volume)")

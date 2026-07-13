@@ -124,6 +124,21 @@ APU model captures the pulse/triangle/noise registers; the emulation detects
 the song loop, quantizes onto MCS's grid, and converts to Tandy or PC-speaker
 voicing. See [docs/architecture.md](docs/architecture.md).
 
+### Standalone player (`.COM`)
+
+Convert to a self-contained DOS executable that plays the song with no runtime —
+just a `.COM` you run in DOSBox (or on a real PC):
+
+```powershell
+python -m mcs_convert convert SONG.nsf SONG.COM --tandy    # 3 square voices
+python -m mcs_convert convert SONG.pt3 SONG.COM --1voice   # PC-speaker melody
+```
+
+`--tandy` targets the Tandy 1000 / PCjr SN76489 (three real square channels — run
+DOSBox with `machine=tandy`); `--1voice` uses the PC speaker (monophonic, the top
+line). The `.COM` reprograms the timer, plays once, and quits on any keypress,
+restoring everything. (`--4voice`, a 1-bit PC-speaker multiplex, is coming.)
+
 ## Layout
 
 ```
@@ -133,11 +148,12 @@ mcs_convert/
   audio.py          synth (square/triangle/sine/PC-speaker) + waveOut transport
   mcs/reader.py     .MCS/.MCD -> Song   (the decoded format lives here)
   mcs/writer.py     Song -> .MCS        (round-trips all samples byte-identically)
+  dosplayer.py      Song -> standalone DOS .COM (Tandy SN76489 / PC speaker)
   model.py          Song / Track / NoteEvent  (the neutral middle)
   nsf/              NSF header/APU/6502 emulation (NES converter input)
 docs/               the format spec + architecture notes
 tools/              disk-image and test-song utilities
-tests/              106 tests, including engine ground-truth checks
+tests/              115 tests, including engine ground-truth checks
 ```
 
 ## Development
