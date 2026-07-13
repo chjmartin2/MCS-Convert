@@ -734,13 +734,13 @@ class ImportPreview(tk.Toplevel):
                                  state="readonly", values=labels)
         tempo_box.pack(side="left", padx=(6, 16))
         tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
-        # Tandy/PCjr optimized: one monophonic staff per channel instead of the
-        # merged grand staff. A chiptune's 3 voices map to 3 staves = the chip's
-        # 3 tone voices, and each staff's measure holds only that voice's notes,
-        # so dense songs (Dr. Wily) stop overflowing MCS's per-measure buffer.
-        self.tandy = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="Tandy optimized (staff per voice)",
-                       variable=self.tandy, command=self._update_size, bg=_BG,
+        # Balance the two staves for capacity: pick both clefs to match the
+        # song's register (a low song -> two bass staves) and deal notes evenly,
+        # so dense material uses the full 64-entry two-staff budget instead of
+        # piling onto one overflowing staff. Keeps ~all of Dr. Wily's notes.
+        self.balance = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text="Balance staves (max notes)",
+                       variable=self.balance, command=self._update_size, bg=_BG,
                        fg=_FG, activebackground=_BG, activeforeground=_FG,
                        selectcolor="#2a2e3a").pack(side="left", padx=(12, 0))
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
@@ -874,7 +874,7 @@ class ImportPreview(tk.Toplevel):
         # capacity lever, worth ~40% more notes on dense material.
         return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0(),
                            cap=True, fit_meter=True,
-                           per_channel=self.tandy.get())
+                           balance=self.balance.get())
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:
@@ -892,7 +892,7 @@ class ImportPreview(tk.Toplevel):
         sel = self.selected_song(indices)
         try:
             data = encode_song(sel, tempo_byte0=self._tempo_byte0(), cap=True,
-                               fit_meter=True, per_channel=self.tandy.get())
+                               fit_meter=True, balance=self.balance.get())
             sel = parse_bytes(data)
         except Exception:
             pass                        # fall back to the raw selection on any

@@ -89,38 +89,43 @@ def test_fit_meter_keeps_natural_meter_when_it_fits(tmp_path):
     assert auto_meas < half_meas                               # didn't drop to 2/4
 
 
-def test_per_channel_emits_one_staff_per_track_and_fits_more(tmp_path):
-    # per_channel puts each track on its own monophonic staff: N tracks -> N
-    # staves, each holding only that voice's onsets, so a song too dense for a
-    # merged staff keeps more notes and still validates.
+def test_balance_keeps_more_of_a_low_dense_song(tmp_path):
+    # A dense song crammed into one register overflows a pitch-split (everything
+    # on the bass staff) but fits when balance spreads it across both staves.
+    # Still a 2-staff file, still valid.
     from mcs_convert.mcs.reader import parse_records, split_staves
     from mcs_convert.mcs.validate import validate
-    song = Song(title="3ch")
-    for base in (72, 60, 48):                         # treble, mid, bass voices
+    song = Song(title="low")
+    for base in (55, 52, 48):                         # all low: bass register
         tr = Track(name=f"v{base}")
-        for i in range(48):
+        for i in range(64):
             tr.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=base + i % 5))
         song.add_track(tr)
-    data = encode_song(song, cap=True, per_channel=True)
-    assert len(split_staves(parse_records(data))) == 3          # one staff per track
+    data = encode_song(song, cap=True, balance=True)
+    assert len(split_staves(parse_records(data))) == 2          # still a grand staff
     assert not [i for i in validate(data) if i.severity == "corrupt"]
-    # denser-per-staff-merged grand staff drops more than per-channel keeps
-    merged = _count(_roundtrip_bytes(song, cap=True))
-    split = _count(_roundtrip_bytes(song, cap=True, per_channel=True))
-    assert split >= merged
+    assert _count(_roundtrip_bytes(song, cap=True, balance=True)) >= \
+        _count(_roundtrip_bytes(song, cap=True))                # beats pitch-split
+
+
+def test_balance_uses_two_bass_staves_for_a_low_song():
+    # A song entirely in the bass window must become two BASS-clef staves (so
+    # notes can balance with no octave-folding), not a treble-over-bass split.
+    from mcs_convert.mcs.reader import parse_records, split_staves, _read_staff, CLEF_BASS
+    song = _mk([(i * 4, 4, 48 + i % 12) for i in range(32)])    # B2..bass only
+    data = encode_song(song, cap=True, balance=True)
+    staves = split_staves(parse_records(data))
+    assert len(staves) == 2
+    assert all(_read_staff(st).clef == CLEF_BASS for st in staves)
 
 
 def test_multi_staff_header_sizes_are_consistent():
     # 0x09 = staff-1 size, 0x0B = everything after it up to the final separator;
     # the two must bracket the body so real MCS locates staves 3+ (writing only
     # staff-2's size is what made an earlier multi-staff file fail to load).
-    song = Song(title="h")
-    for base in (72, 55, 43):
-        tr = Track(name=str(base))
-        for i in range(8):
-            tr.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=base))
-        song.add_track(tr)
-    data = encode_song(song, per_channel=True)
+    from mcs_convert.mcs.writer import build_file, make_entry
+    staff = [[make_entry(0x06, 16, 14)], [make_entry(0x03, 16, 4)]]   # clef + a note
+    data = build_file([staff, staff, staff])          # three staves
     s1 = data[0x09] | (data[0x0A] << 8)
     s2 = data[0x0B] | (data[0x0C] << 8)
     total = data[0x0D] | (data[0x0E] << 8)

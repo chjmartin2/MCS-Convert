@@ -20,6 +20,7 @@ decisions MCS's format forces:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Dict, List, Tuple
 
 from ..audio import _note_events
@@ -211,17 +212,52 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32):
 _FIT_METERS = (32, 24, 16)                       # 4/4, 3/4, 2/4 (natural first)
 
 
-def _clef_for(events) -> bool:
-    """True (treble) if the treble window fits this channel with the least
-    octave-folding, else False (bass). Counting notes already inside each window
-    (not just the median) matters for a channel that straddles the boundary —
-    Dr. Wily's Pulse 2 spans B2..A5, which the bass window holds almost whole but
-    the treble window would shove its lower half up an octave."""
+def _pick_clefs(events) -> Tuple[bool, bool]:
+    """Choose the clef (True=treble G, False=bass F) for the TWO staves of the
+    grand staff to match the music's register. If one window already holds ~all
+    the notes, use TWO of that clef — both staves then share the same pitch
+    window, so notes can be balanced between them with NO octave-folding (Dr.
+    Wily lives in B2..A5, so it becomes two bass staves). Only a genuinely
+    wide-range song falls back to the classic treble-over-bass split."""
     if not events:
-        return True
-    in_treble = sum(TREBLE_LO <= m <= TREBLE_HI for _, _, m in events)
-    in_bass = sum(BASS_LO <= m <= BASS_HI for _, _, m in events)
-    return in_treble >= in_bass
+        return True, False
+    ms = [m for _, _, m in events]
+    n = len(ms)
+    in_bass = sum(BASS_LO <= m <= BASS_HI for m in ms)
+    in_treble = sum(TREBLE_LO <= m <= TREBLE_HI for m in ms)
+    if in_bass >= 0.9 * n and in_bass >= in_treble:
+        return False, False                          # two bass staves
+    if in_treble >= 0.9 * n:
+        return True, True                            # two treble staves
+    return True, False                               # wide range: treble + bass
+
+
+def _balanced_split(events, bar_ticks, a_treble, b_treble):
+    """Deal (start,dur,midi) events onto two staves, keeping each measure's load
+    even so neither overflows its own 32-entry buffer (two staves = 64 entries a
+    measure, but only if they're filled evenly — a pitch-split dumps a low song
+    entirely on the bass staff). When the staves share a clef any note can go on
+    either, so the balance is exact and lossless; on a treble+bass split a note
+    goes to the staff whose window holds it, and only the overlap is balanced."""
+    a, b = [], []
+    ca, cb = defaultdict(int), defaultdict(int)
+    for s, d, m in sorted(events):
+        meas = s // bar_ticks
+        if a_treble == b_treble:                     # same window: free choice
+            use_a = ca[meas] <= cb[meas]
+        else:
+            a_lo, a_hi = (TREBLE_LO, TREBLE_HI) if a_treble else (BASS_LO, BASS_HI)
+            b_lo, b_hi = (TREBLE_LO, TREBLE_HI) if b_treble else (BASS_LO, BASS_HI)
+            in_a, in_b = a_lo <= m <= a_hi, b_lo <= m <= b_hi
+            if in_a and not in_b:
+                use_a = True
+            elif in_b and not in_a:
+                use_a = False
+            else:                                    # both fit (overlap): balance
+                use_a = ca[meas] <= cb[meas]
+        (a if use_a else b).append((s, d, m))
+        (ca if use_a else cb)[meas] += 1
+    return a, b
 
 
 def _staff_for(events, total, bar_ticks, treble, cap):
@@ -238,28 +274,29 @@ def _staff_for(events, total, bar_ticks, treble, cap):
 
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 split: int = 67, cap: bool = False,
-                fit_meter: bool = False, per_channel: bool = False) -> bytes:
-    """Song (32nd-note ticks) -> .MCS bytes. Two layouts:
+                fit_meter: bool = False, balance: bool = False) -> bytes:
+    """Song (32nd-note ticks) -> .MCS bytes on a two-staff grand staff — the
+    layout real MCS renders (a top and a bottom staff, each its own voice/chord
+    lane with its own 32-entry measure buffer). Both staves' clefs are free, so
+    they need not be treble-over-bass.
 
-    * default — a treble+bass grand staff (the 2-staff layout every corpus song
-      uses, so real MCS always loads it), pitch-split at `split`.
-    * `per_channel=True` — ONE monophonic staff per (non-percussion) track. Each
-      staff's measure then carries only that channel's onsets, so the density
-      that overflows a merged staff (Dr. Wily's 3 NES channels stacked) fits
-      easily — and 3 staves = exactly a Tandy/PCjr chip's 3 tone voices. Multi-
-      staff is a real MCS structure (corpus songs PRETTY6/GOOD have 3-4 staves).
+    Default: a fixed treble+bass pitch-split (clean notation, used for round-trip
+    and hand-authoring). `balance=True` (automated imports) instead picks BOTH
+    clefs to match the register (a low song becomes two bass staves) and deals
+    notes so each measure fills evenly — using the full 64-entry two-staff budget
+    instead of piling a low song's notes onto one overflowing bass staff. Dr.
+    Wily goes from ~62% of notes kept to ~100%, with no octave-folding.
 
-    `cap=True` (automated imports) limits each measure to real MCS's 32-entry
-    buffer, dropping overflow rather than corrupting playback. `fit_meter=True`
-    picks the meter that keeps the most notes: the longest (most natural) meter
-    that overflows NOTHING, else the shortest (2/4, max capacity). Meter only
-    moves barlines — tempo and timing are unchanged — so it's free note-capacity
-    (playback speed can't recover a note the buffer already dropped)."""
+    `cap=True` limits each measure to MCS's 32-entry buffer, dropping the densest
+    overflow rather than corrupting playback. `fit_meter=True` picks the meter
+    that keeps the most notes: the longest (most natural) meter that overflows
+    NOTHING, else the shortest (2/4, max capacity). Meter only moves barlines —
+    tempo and timing are unchanged — so it's free note-capacity."""
     if fit_meter:
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, per_channel=per_channel)
+                               split=split, cap=cap, balance=balance)
             dropped = encode_song.last_dropped
             if dropped == 0:
                 return data                      # this natural meter loses nothing
@@ -267,42 +304,25 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 best = (data, dropped)
         return best[0]                           # none lossless: fewest-drop (2/4)
 
-    # Per-track sounding events (percussion excluded — no home on a pitched staff).
-    per_track = []
-    total = 0
-    for tr in song.tracks:
-        ev = [(s, d, m) for s, d, m in
-              _note_events([n for n in tr.notes if not n.percussive]) if d > 0]
-        if ev:
-            total = max(total, max(s + d for s, d, m in ev))
-            per_track.append(ev)
+    # All sounding events (percussion excluded — no home on a pitched staff).
+    events = [(s, d, m) for tr in song.tracks
+              for s, d, m in _note_events([n for n in tr.notes if not n.percussive])
+              if d > 0]
+    total = max((s + d for s, d, m in events), default=0)
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
     time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)   # else 4/4
 
-    if per_channel:
-        staves, dropped = [], 0
-        for ev in per_track or [[]]:
-            staves.append(_staff_for(ev, total, bar_ticks, _clef_for(ev), cap))
-            dropped += _emit_staff.last_dropped
-        encode_song.last_dropped = dropped
-        return build_file(staves, time_sig=time_sig, scroll=scroll)
+    if balance:
+        a_treble, b_treble = _pick_clefs(events)
+        a_ev, b_ev = _balanced_split(events, bar_ticks, a_treble, b_treble)
+    else:                                        # fixed treble/bass pitch-split
+        a_treble, b_treble = True, False
+        a_ev = [(s, d, m) for s, d, m in events if m >= split]
+        b_ev = [(s, d, m) for s, d, m in events if m < split]
 
-    # Grand staff: split every channel's notes by pitch onto two shared staves.
-    treble_ev, bass_ev = [], []
-    for ev in per_track:
-        for start, dur, midi in ev:
-            if midi >= split:
-                treble_ev.append((start, dur, _fit(midi, TREBLE_LO, TREBLE_HI)))
-            else:
-                bass_ev.append((start, dur, _fit(midi, BASS_LO, BASS_HI)))
-    tre = _emit_staff(_staff_slots(treble_ev, total, bar_ticks), True, cap=cap,
-                      bar_ticks=bar_ticks)
+    top = _staff_for(a_ev, total, bar_ticks, a_treble, cap)
     dropped = _emit_staff.last_dropped
-    bas = _emit_staff(_staff_slots(bass_ev, total, bar_ticks), False, cap=cap,
-                      bar_ticks=bar_ticks)
+    bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap)
     encode_song.last_dropped = dropped + _emit_staff.last_dropped
-    clef_t = [make_entry(_G_CLEF, 16, 14)]
-    clef_b = [make_entry(_F_CLEF, 32, 14)]
-    return build_file([[clef_t] + tre, [clef_b] + bas],
-                      time_sig=time_sig, scroll=scroll)
+    return build_file([top, bottom], time_sig=time_sig, scroll=scroll)
