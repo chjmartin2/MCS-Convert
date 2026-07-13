@@ -600,7 +600,11 @@ class ImportPreview(tk.Toplevel):
 
     def __init__(self, app: PlayerApp, src: str, song: Song, byte0: int) -> None:
         super().__init__(app.root)
-        self.app, self.src, self.song = app, src, song
+        # _base_song is the extraction at its auto tempo; self.song is that
+        # REQUANTIZED to the chosen tempo (a faster tempo spreads the music over
+        # more, finer ticks — fewer notes per measure). Kept apart so re-picking
+        # the tempo re-quantizes from the frame log, never accumulating rounding.
+        self.app, self.src, self._base_song, self.song = app, src, song, song
         self.is_nsf = src.lower().endswith(".nsf")
         self.title(f"Import Preview — {os.path.basename(src)}")
         self.configure(bg=_BG)
@@ -709,10 +713,12 @@ class ImportPreview(tk.Toplevel):
                            activebackground=_BG, activeforeground=_FG,
                            selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
-        # MCS tempo — a pure playback-speed dial. For NSF the note timing is
-        # already fixed at the finest resolution, so tempo just stretches the
-        # whole song: the fastest setting plays it at the real NES speed, slower
-        # settings study it in slow motion without losing any notes.
+        # MCS tempo — for NSF this REQUANTIZES the music (not just playback
+        # speed): a faster tempo maps it onto more, finer ticks, so a measure
+        # spans less music and holds fewer notes (the max-tempo + 2/4 combo packs
+        # the fewest notes per measure). Fewer notes/measure can mean fewer drops
+        # — but a non-power-of-2 grid adds ties, so the dropped-note readout is
+        # the truth. Real playback time is preserved across tempos.
         bar = tk.Frame(self, bg=_BG)
         bar.grid(row=base + 1, column=0, columnspan=9, sticky="w",
                  padx=10, pady=(8, 2))
@@ -748,6 +754,16 @@ class ImportPreview(tk.Toplevel):
                                state="readonly", values=list(self._out_modes))
         out_box.pack(side="left")
         out_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
+        # Meter: Auto picks the longest meter that fits (2/4 if a dense song needs
+        # it); or force one. Shorter measures = more per-measure buffer = fewer
+        # drops, at the cost of more barlines.
+        tk.Label(bar, text="Meter", bg=_BG, fg=_ACCENT).pack(side="left", padx=(12, 4))
+        self._meters = {"Auto": None, "2/4": 16, "3/4": 24, "4/4": 32}
+        self.meter = tk.StringVar(value="Auto")
+        meter_box = ttk.Combobox(bar, textvariable=self.meter, width=5,
+                                 state="readonly", values=list(self._meters))
+        meter_box.pack(side="left")
+        meter_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
             [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
         if self.is_nsf:
@@ -759,6 +775,8 @@ class ImportPreview(tk.Toplevel):
         btns = tk.Frame(self, bg=_BG)
         btns.grid(row=base + 2, column=0, columnspan=9, sticky="e",
                   padx=10, pady=(6, 10))
+        self.drop_label = tk.Label(btns, bg=_BG, fg=_FG)
+        self.drop_label.pack(side="left", padx=(0, 14))
         self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
         self.size_label.pack(side="left", padx=(0, 14))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
@@ -809,13 +827,17 @@ class ImportPreview(tk.Toplevel):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            self.song, self._byte0 = self.app._load_module(self.src,
-                                                           **self._load_kwargs())
+            self._base_song, self._byte0 = self.app._load_module(
+                self.src, **self._load_kwargs())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Cannot re-import", str(exc), parent=self)
             return
         finally:
             self.configure(cursor="")
+        self.song = self._base_song                  # re-apply the chosen tempo
+        if self.is_nsf:
+            from ..nsf.extract import requantize
+            self.song = requantize(self._base_song, self._tempo_byte0())
         self._update_stats()
         self._update_size()
 
@@ -829,20 +851,32 @@ class ImportPreview(tk.Toplevel):
         self._update_size()
 
     def _on_tempo(self) -> None:
-        """Tempo is pure playback speed — the note timing is already fixed — so
-        no re-import is needed, just refresh the duration and size readouts."""
+        """Tempo REQUANTIZES an NSF import to the chosen grid (from the stashed
+        frame log — no re-emulation), so note lengths, measures and per-measure
+        density all adapt. Then refresh the readouts."""
         self.app.player.stop()
+        if self.is_nsf:
+            from ..nsf.extract import requantize
+            self.song = requantize(self._base_song, self._tempo_byte0())
         self._update_stats()
         self._update_size()
 
     def _update_size(self) -> None:
-        """Live size readout for the current selection. Purely informational —
-        the 1984 editor saved at most ~4.2KB, but its player handles more."""
+        """Live size + dropped-note readout for the current selection. Encoding
+        once tells us both the byte size and how many note-slots the chosen
+        tempo/meter/target forced MCS's per-measure buffer to drop."""
+        from ..mcs.encode import encode_song
         try:
             size = len(self.encode_selection())
+            dropped = encode_song.last_dropped
         except Exception:  # noqa: BLE001 - e.g. nothing selected
-            size = 0
+            size, dropped = 0, 0
         self.size_label.configure(text=f"{size:,} bytes", fg=_ACCENT)
+        if dropped:
+            self.drop_label.configure(text=f"⚠ {dropped} slot(s) dropped",
+                                      fg="#e0a030")
+        else:
+            self.drop_label.configure(text="✓ all notes fit", fg=_ACCENT)
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:
@@ -874,11 +908,12 @@ class ImportPreview(tk.Toplevel):
     def encode_selection(self) -> bytes:
         from ..mcs.encode import encode_song
         # cap: hold each measure to real MCS's 32-entry buffer so a busy import
-        # never overflows and corrupts playback. fit_meter: pick the meter (2/4
-        # if needed) whose per-measure buffers hold the most notes — the real
-        # capacity lever, worth ~40% more notes on dense material.
+        # never overflows. Meter: an explicit choice forces bar length, else
+        # fit_meter picks the longest meter that fits. balance rescues density.
+        bar_ticks = self._meters[self.meter.get()]
         return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0(),
-                           cap=True, fit_meter=True, balance=True,
+                           cap=True, fit_meter=bar_ticks is None,
+                           bar_ticks=bar_ticks or 32, balance=True,
                            voices=self._out_modes[self.out_mode.get()])
 
     # -- actions ----------------------------------------------------------------

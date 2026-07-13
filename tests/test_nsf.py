@@ -96,16 +96,23 @@ def test_grid_maps_base_unit_to_whole_ticks():
     assert abs(6 / fpt - round(6 / fpt)) < 0.1    # 6 frames -> whole ticks
 
 
-def test_tempo_is_decoupled_from_note_timing(nsf_path):
-    # A slower tempo byte must NOT change the note timing in ticks — only the
-    # playback speed. Same tick counts, different byte0.
+def test_tempo_requantizes_but_preserves_real_time(nsf_path):
+    # Choosing a tempo REQUANTIZES the music to that grid — a faster tempo maps it
+    # onto more, finer ticks — while real playback time is preserved (the tick
+    # count and the tick's duration are inverses).
+    from mcs_convert.mcs.reader import tick_seconds_for
     fast, b_fast = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
                                 tempo_byte0=0x77)
     slow, b_slow = extract_song(nsf_path, max_seconds=4.0, detect_end=False,
                                 tempo_byte0=0x92)
     assert b_fast == 0x77 and b_slow == 0x92
-    fast_ticks = [(n.start_tick, n.duration_ticks)
-                  for t in fast.tracks for n in t.notes]
-    slow_ticks = [(n.start_tick, n.duration_ticks)
-                  for t in slow.tracks for n in t.notes]
-    assert fast_ticks == slow_ticks              # identical timing, only speed differs
+
+    def span(song):
+        return max((n.start_tick + n.duration_ticks
+                    for t in song.tracks for n in t.notes), default=0)
+    # more ticks at the faster tempo (finer grid)
+    assert span(fast) > span(slow)
+    # but the same real duration, within a tick
+    real_fast = span(fast) * tick_seconds_for(0x77)
+    real_slow = span(slow) * tick_seconds_for(0x92)
+    assert abs(real_fast - real_slow) < 2 * tick_seconds_for(0x92)

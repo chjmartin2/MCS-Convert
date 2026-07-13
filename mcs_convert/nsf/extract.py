@@ -225,20 +225,36 @@ def _quantize_channel(events, fpt: float):
     return [(s, e, m) for s, e, m in out if e > s]
 
 
+def fpt_for_byte0(byte0: int, play_hz: float) -> float:
+    """Frames-per-tick that an MCS tempo byte implies: an MCS 32nd-tick lasts
+    (0.067 + 0.016*step)/2 s (step = (byte0-0x77)//3), so at `play_hz` frames a
+    second that's this many NES frames. A FASTER byte0 (smaller) => fewer frames
+    per tick => each note spans MORE ticks => a fixed passage fills more measures
+    => fewer notes per measure."""
+    step = max(0, min(9, (byte0 - 0x77) // 3))
+    return (0.067 + 0.016 * step) / 2.0 * play_hz
+
+
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
                    percussion: str = "clicks", drum_sound: str = "cluster",
                    tempo_byte0: Optional[int] = None) -> Tuple[Song, int]:
     """Frame-domain log -> (Song in 32nd ticks, mcs_tempo_byte0).
 
-    Timing is quantized to the SONG's detected grid (see fit_grid) so note
-    durations keep their real 1:2:4:8 ratios. `tempo_byte0`, if given, overrides
-    the auto tempo purely as a playback-speed dial — the tick COUNTS never change,
-    a slower byte0 just stretches everything to study the tune in slow motion."""
+    Timing is quantized to a grid. With no `tempo_byte0` the grid is auto-fit to
+    the song (see fit_grid) so durations keep clean 1:2:4:8 ratios. If a
+    `tempo_byte0` IS given, the grid is REQUANTIZED to that tempo — the whole
+    point of the tempo dial: a faster tempo maps the music onto more, finer ticks
+    (more measures, fewer notes each), a slower one onto fewer. Real playback time
+    is preserved either way (fpt and the tick's duration are inverses)."""
     runs = [segment_frames(ch) for ch in log.pitched]
     onsets = [n.start_tick for ch in runs for n in ch]
     onsets += [f for f, _ in log.noise_hits] + list(log.dpcm_hits)
     fpt, auto_byte0 = fit_grid(onsets, header.play_rate_hz)
-    byte0 = tempo_byte0 if tempo_byte0 is not None else auto_byte0
+    if tempo_byte0 is not None:
+        byte0 = tempo_byte0
+        fpt = fpt_for_byte0(byte0, header.play_rate_hz)      # requantize to it
+    else:
+        byte0 = auto_byte0
 
     title = header.song_name or "NSF"
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
@@ -254,6 +270,9 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
     song.nsf_preview = {"freqs": log.freqs,
                         "noise": [f for f, _ in log.noise_hits],
                         "play_hz": header.play_rate_hz}
+    # keep the frame log so changing the tempo can REQUANTIZE (frames_to_song
+    # again) instead of re-running the whole emulation
+    song.nsf_frames = (header, log, subsong, percussion, drum_sound)
 
     for name, hits in (("Noise", [f for f, _ in log.noise_hits]),
                        ("DPCM", log.dpcm_hits)):
@@ -271,6 +290,19 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
         track.meta["drum_notes"] = len(track.notes)
         song.add_track(track)
     return song, byte0
+
+
+def requantize(song: Song, tempo_byte0: int) -> Song:
+    """Re-derive an NSF-imported Song's timing at a new MCS tempo, reusing the
+    stashed frame log (no re-emulation). Returns a fresh Song; if the song wasn't
+    NSF-imported (no frame log) it's returned unchanged."""
+    frames = getattr(song, "nsf_frames", None)
+    if not frames:
+        return song
+    header, log, subsong, percussion, drum_sound = frames
+    new, _ = frames_to_song(header, log, subsong, percussion, drum_sound,
+                            tempo_byte0=tempo_byte0)
+    return new
 
 
 def extract_song(path: str, subsong: Optional[int] = None,
