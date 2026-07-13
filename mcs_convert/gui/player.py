@@ -697,8 +697,8 @@ class ImportPreview(tk.Toplevel):
         tk.Label(perc, text="sound", bg=_BG, fg=_ACCENT).pack(side="left",
                                                               padx=(18, 4))
         self.drum = tk.StringVar(value="wood block")
-        snd = ttk.Combobox(perc, textvariable=self.drum, width=10,
-                           state="readonly", values=("cluster", "wood block"))
+        snd = ttk.Combobox(perc, textvariable=self.drum, width=10, state="readonly",
+                           values=("cluster", "wood block", "low bass"))
         snd.pack(side="left")
         snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
         # MCS has no volume: a decaying sample can only be expressed as TIME.
@@ -812,10 +812,11 @@ class ImportPreview(tk.Toplevel):
                 text=verdict,
                 fg="#e0b060" if st["verdict"] == "percussion" else _ACCENT)
 
+    _DRUM_KEYS = {"cluster": "cluster", "wood block": "block", "low bass": "low bass"}
+
     def _load_kwargs(self) -> dict:
         kw = dict(percussion=self.perc.get(),
-                  drum_sound="block" if self.drum.get() == "wood block"
-                  else "cluster",
+                  drum_sound=self._DRUM_KEYS.get(self.drum.get(), "block"),
                   shape_durations=self.shape.get())
         if self.is_nsf:
             kw["subsong"] = int(self.track.get())
