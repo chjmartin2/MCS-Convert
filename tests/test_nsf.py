@@ -110,3 +110,21 @@ def test_grid_is_beat_aligned_and_optimizer_finds_it():
     # the exhaustive optimizer agrees, at a small speed nudge to a real MCS tempo
     ofpt, obyte0, err, speed = optimize_grid(onsets, 60.0)
     assert err < 0.01 and 0x77 <= obyte0 <= 0x92 and speed < 0.1
+
+
+def test_silent_noise_keyon_is_not_a_drum_hit():
+    """A $400F key-on with volume 0 (constant-volume mode, low nibble 0) is a
+    note-OFF/mute, not an audible drum — counting it spawns phantom hits that
+    turn SMB's 18/9 shuffle into a triplet buzz. Envelope mode (bit 4 clear)
+    keys on at level 15, so it IS a hit."""
+    from mcs_convert.nsf.apu import APUState
+    apu = APUState()
+    apu.write(0x4015, 0x08)                          # enable noise
+    apu.write(0x400E, 0x03)                          # period index 3
+    apu.write(0x400C, 0x1C)                          # constant volume, level 12
+    apu.write(0x400F, 0x18)                          # audible key-on
+    apu.write(0x400C, 0x10)                          # constant volume, level 0
+    apu.write(0x400F, 0x18)                          # SILENT key-on -> ignored
+    apu.write(0x400C, 0x03)                          # envelope mode (starts at 15)
+    apu.write(0x400F, 0x18)                          # audible key-on
+    assert [p for _, p in apu.noise_hits] == [3, 3]  # two hits, the mute skipped

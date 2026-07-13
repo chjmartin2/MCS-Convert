@@ -144,6 +144,62 @@ def _pulse_wave(phase: np.ndarray, duty: float = 0.5) -> np.ndarray:
     return np.where(np.mod(phase, 1.0) < duty, 1.0, -1.0).astype(np.float32)
 
 
+# NES noise timer periods (NTSC), index 0..15. The LFSR is clocked at
+# 1.789773 MHz / period, so a SMALL index (short period) is a fast clock = bright
+# high-frequency hiss (snare/hi-hat), and a LARGE index is a slow clock = dark
+# low-frequency rumble (kick). SMB's drum line alternates period ~3-4 (tss) with
+# period ~12 (boom) — that two-tone contrast is the shuffle's groove.
+_NOISE_PERIODS = (4, 8, 16, 32, 64, 96, 128, 160,
+                  202, 254, 380, 508, 762, 1016, 2034, 4068)
+_NES_CLOCK = 1789773.0
+
+
+def _lowpass(sig: np.ndarray, cutoff: float, sr: int) -> np.ndarray:
+    """One-pole IIR low-pass. cutoff >= nyquist -> passthrough (bright noise)."""
+    if cutoff >= sr / 2:
+        return sig
+    import math
+    dt = 1.0 / sr
+    rc = 1.0 / (2 * math.pi * cutoff)
+    a = dt / (rc + dt)
+    out = np.empty_like(sig)
+    y = 0.0
+    for i in range(len(sig)):
+        y += a * (sig[i] - y)
+        out[i] = y
+    return out
+
+
+def _render_noise(mix, noise_frames, frame_len, total, sample_rate) -> None:
+    """Mix in the noise/drum hits. `noise_frames` may be bare frame indices OR
+    (frame, period_index) pairs; with the period we color each burst by tone
+    (bright hat vs dark kick) so SMB's two-tone shuffle survives instead of
+    collapsing to one undifferentiated hiss."""
+    rng = np.random.default_rng(0)
+    for item in noise_frames:
+        if isinstance(item, (tuple, list)):
+            fr, period = item[0], int(item[1])
+        else:
+            fr, period = item, 3                     # legacy: bright default
+        pos = int(fr * frame_len)
+        # dark tones (high period) ring a touch longer, like a kick body
+        secs = 0.03 if period <= 7 else 0.06
+        burst = int(secs * sample_rate)
+        ns = min(burst, total - pos)
+        if ns <= 0:
+            continue
+        env = np.linspace(1.0, 0.0, burst, dtype=np.float32)[:ns] ** 2
+        noise = rng.uniform(-1.0, 1.0, ns).astype(np.float32)
+        cutoff = _NES_CLOCK / _NOISE_PERIODS[max(0, min(15, period))]
+        shaped = _lowpass(noise, cutoff, sample_rate).astype(np.float32)
+        # a low sine "boom" gives the dark (kick) hits a pitched body
+        if period > 7:
+            t = np.arange(ns, dtype=np.float32) / sample_rate
+            shaped = shaped * 0.6 + 0.9 * np.sin(2 * np.pi * 70.0 * t).astype(np.float32)
+        peak = float(np.max(np.abs(shaped))) or 1.0
+        mix[pos:pos + ns] += 0.20 * (shaped / peak) * env
+
+
 def render_nes(freqs, noise_frames, play_hz: float, sample_rate: int = 22050,
                max_seconds: float = None) -> Tuple[np.ndarray, int]:
     """Render the raw NES per-frame CONTINUOUS-frequency streams to PCM with
@@ -182,15 +238,7 @@ def render_nes(freqs, noise_frames, play_hz: float, sample_rate: int = 22050,
             g[1:] = 0.5 * g[1:] + 0.5 * g[:-1]
         mix += amp * (wave.astype(np.float32) * g)
 
-    burst = int(0.035 * sample_rate)
-    env = np.linspace(1.0, 0.0, burst, dtype=np.float32) ** 2   # percussive decay
-    rng = np.random.default_rng(0)
-    for fr in noise_frames:
-        pos = int(fr * frame_len)
-        ns = min(burst, total - pos)
-        if ns > 0:
-            noise = rng.uniform(-1.0, 1.0, ns).astype(np.float32)
-            mix[pos:pos + ns] += 0.18 * noise * env[:ns]
+    _render_noise(mix, noise_frames, frame_len, total, sample_rate)
 
     peak = float(np.max(np.abs(mix))) or 1.0
     if peak > 0.95:

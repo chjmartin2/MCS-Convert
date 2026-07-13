@@ -114,6 +114,7 @@ class APUState:
         self.noise_hits: List[Tuple[int, int]] = []   # (frame, period index)
         self.dpcm_hits: List[int] = []                # frames
         self._noise_period = 0
+        self._noise_ctrl = 0                           # $400C: volume/envelope
         self._noise_enabled = False
         self._dmc_on = False
         self.writes: List[Tuple[int, int]] = []       # this frame's (addr, value)
@@ -163,10 +164,19 @@ class APUState:
                     t.length = _LENGTH_TABLE[value >> 3]
                 t.linear_reload = True
         elif 0x400C <= addr <= 0x400F:                     # noise
-            if addr == 0x400E:
+            if addr == 0x400C:
+                self._noise_ctrl = value
+            elif addr == 0x400E:
                 self._noise_period = value & 0x0F
-            elif addr == 0x400F and self._noise_enabled:   # key-on: a drum hit
-                self.noise_hits.append((self.frame, self._noise_period))
+            elif addr == 0x400F and self._noise_enabled:   # key-on
+                # Only an AUDIBLE key-on is a drum hit. In constant-volume mode
+                # (bit 4) a zero low-nibble is silent — SMB writes $400F with
+                # volume 0 as a note-OFF/mute; counting those spawns phantom hits
+                # that turn the noise's 18/9 shuffle into a triplet buzz. Envelope
+                # mode (bit 4 clear) always keys on at level 15, so it's audible.
+                vol = (self._noise_ctrl & 0x0F) if (self._noise_ctrl & 0x10) else 15
+                if vol > 0:
+                    self.noise_hits.append((self.frame, self._noise_period))
 
     # ---- 60 Hz frame boundary --------------------------------------------------
     def end_frame(self) -> None:

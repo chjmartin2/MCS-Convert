@@ -1,4 +1,15 @@
-from mcs_convert.nsf.extract import segment_frames
+from mcs_convert.nsf.extract import _CLICKS, _drum_pitches, segment_frames
+
+
+def test_auto_drum_splits_by_period():
+    # "auto" maps bright/high NES noise tones (low period) to hi-hat and
+    # dark/low tones (high period) to low bass — SMB's kick/hat two-tone split.
+    assert _drum_pitches("auto", 3) == _CLICKS["hi-hat"]     # bright tss
+    assert _drum_pitches("auto", 4) == _CLICKS["hi-hat"]
+    assert _drum_pitches("auto", 12) == _CLICKS["low bass"]  # dark boom
+    # a fixed choice ignores the period entirely
+    assert _drum_pitches("block", 12) == _CLICKS["block"]
+    assert _drum_pitches("low bass", 3) == _CLICKS["low bass"]
 
 
 def test_segments_a_single_run():

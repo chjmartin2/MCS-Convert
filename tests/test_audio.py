@@ -36,6 +36,21 @@ def test_render_nes_timbres_and_vibrato():
     assert abs(hf(v) - hf(s)) > 1e-4               # the wobble changes the signal
 
 
+def test_render_nes_noise_two_tone():
+    """A bright (low period) noise hit must carry more high-frequency energy than
+    a dark (high period) hit — SMB's two-tone kick/hat shuffle depends on it.
+    Also: legacy bare-frame indices still render (period defaults to bright)."""
+    import numpy as np
+
+    from mcs_convert.audio import render_nes
+    hf = lambda x: float(np.mean(np.abs(np.diff(x))))
+    bright, _ = render_nes([[], [], []], [(5, 3)], 60.0)     # hi-hat "tss"
+    dark, _ = render_nes([[], [], []], [(5, 12)], 60.0)      # kick "boom"
+    assert hf(bright) > hf(dark) * 2                         # clearly distinct
+    legacy, _ = render_nes([[], [], []], [5], 60.0)          # bare index still works
+    assert np.abs(legacy).max() > 0
+
+
 def test_tempo_from_header_byte0():
     # Real tempo is set by header byte 0 (measured from DOSBox-X captures), not the 0x05
     # word: per-sixteenth = 0.067 + 0.016*step, step = (byte0 - 0x77)//3. A tick is a

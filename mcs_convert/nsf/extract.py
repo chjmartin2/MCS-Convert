@@ -169,6 +169,21 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
 _CLICKS = {"cluster": (55, 56), "block": (62,), "low bass": (47,), "hi-hat": (100,)}
 _CHANNEL_NAMES = ("Pulse 1", "Pulse 2", "Triangle")
 
+# "auto" splits the noise line by its NES period index: bright/high tones
+# (period <= 7, snare/hi-hat "tss") become the hi-hat click, dark/low tones
+# (kick "boom") become the low bass. That two-tone mapping is what gives SMB's
+# converted drums the same kick/snare shuffle the hardware plays.
+_DRUM_BRIGHT_MAX = 7
+
+
+def _drum_pitches(drum_sound: str, period: int) -> Tuple[int, ...]:
+    """Pitches for one noise hit of the given NES period index. For "auto",
+    bright periods -> hi-hat, dark periods -> low bass; otherwise the fixed
+    click the user chose."""
+    if drum_sound == "auto":
+        return _CLICKS["hi-hat"] if period <= _DRUM_BRIGHT_MAX else _CLICKS["low bass"]
+    return _CLICKS.get(drum_sound, _CLICKS["block"])
+
 # MCS's tick lands between ~33.5 ms (byte0 0x77) and ~105 ms (0x92); at 60 Hz
 # that's a window of ~2.0 to ~6.3 NES frames per tick.
 _MIN_TICK_FRAMES, _MAX_TICK_FRAMES = 2.0, 6.3
@@ -340,23 +355,26 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
     song.dropped_short = 0
     # raw per-frame streams so the dialog can play the true NES render for A/B
     song.nsf_preview = {"freqs": log.freqs,
-                        "noise": [f for f, _ in log.noise_hits],
+                        "noise": list(log.noise_hits),    # (frame, period) pairs
                         "play_hz": header.play_rate_hz}
     # keep the frame log so changing the tempo can REQUANTIZE (frames_to_song
     # again) instead of re-running the whole emulation
     song.nsf_frames = (header, log, subsong, percussion, drum_sound)
 
-    for name, hits in (("Noise", [f for f, _ in log.noise_hits]),
-                       ("DPCM", log.dpcm_hits)):
+    # Noise carries a per-hit period index -> in "auto" it splits into two drum
+    # tones (kick/hat); DPCM has no period, so it uses low bass under "auto".
+    noise_pairs = [(f, p) for f, p in log.noise_hits]
+    dpcm_pairs = [(f, 15) for f in log.dpcm_hits]   # 15 => dark (low bass) in auto
+    for name, hits in (("Noise", noise_pairs), ("DPCM", dpcm_pairs)):
         track = Track(name=name)
         if percussion != "drop":
             last = -1
-            for f in hits:
+            for f, period in hits:
                 tick = round(f / fpt)
                 if tick == last:                    # one hit per tick is plenty
                     continue
                 last = tick
-                for midi in _CLICKS[drum_sound]:
+                for midi in _drum_pitches(drum_sound, period):
                     track.add(NoteEvent(start_tick=tick, duration_ticks=1,
                                         midi_note=midi, percussive=True))
         track.meta["drum_notes"] = len(track.notes)
