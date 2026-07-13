@@ -25,7 +25,6 @@ from typing import Dict, List, Tuple
 
 from ..audio import _note_events
 from ..model import Song
-from .validate import MAX_X_SLOT as _MAX_X_SLOT
 from .writer import build_file, make_entry
 
 # Symbols (see reader.py / docs/mcs-format.md).
@@ -137,42 +136,44 @@ def _staff_slots(events: List[Tuple[int, int, int]], total: int, bar: int,
     return bars
 
 
-# Real MCS reads each measure into a fixed 32-entry buffer (see mcs/validate.py);
-# more than this overflows it and corrupts playback. We stop a measure a hair
-# under, so notes + their accidentals/ties always land as a complete unit.
-_MAX_ENTRIES_PER_MEASURE = 32
+# The real per-measure limit is HORIZONTAL POSITIONS, not entries. MCS plays 96+
+# entries/measure fine — chords stack vertically on one x-slot for free (proven
+# by test files) — so there is NO 32-entry buffer cap. What's finite is the
+# x-slot: a 5-bit field, x 0..31. The editor renders ~24 positions across a bar
+# cleanly (the 80-song corpus never exceeds 23), so 24 is the default range
+# (x 2..25, keeping clear of the barline/clef at x 0..1). "force 32" opens the
+# full field (x 0..31) — all 32 play, though MCS draws them cramped and the
+# barline-region slots x 0..1 render loosely.
+# (x_base, x_placement_end, x_cap): where the first note sits, how wide onsets
+# spread proportionally, and the position ceiling when capping an import.
+_POS_DEFAULT = (2, 25, 25)           # 24 clean positions
+_POS_FORCE32 = (0, 31, 31)           # the full 5-bit field, 32 positions
+_X_FIELD_MAX = 31                    # the x-slot is 5 bits; this is the hard wall
 
-# The horizontal note area of a measure. Real corpus notes NEVER use x-slot 0 or 1
-# (reserved for the barline/clef); the first note sits at x 2-5 and a full bar
-# spreads to about x 25. A note at x 0 is mishandled by real MCS (mis-drawn and
-# mis-timed). So we map the within-measure tick position into this range, never
-# the raw tick (which put every downbeat at x 0).
-_X_BASE, _X_END = 2, 25
 
-
-def _tick_to_x(tick: int, bar_ticks: int) -> int:
-    """Within-measure tick (0..bar_ticks) -> a valid corpus-range x-slot."""
-    x = _X_BASE + round(tick * (_X_END - _X_BASE) / max(1, bar_ticks))
-    return max(_X_BASE, min(_MAX_X_SLOT, x))
+def _tick_to_x(tick: int, bar_ticks: int, x_base: int, x_end: int) -> int:
+    """Within-measure tick (0..bar_ticks) -> an x-slot in [x_base, x_end]."""
+    x = x_base + round(tick * (x_end - x_base) / max(1, bar_ticks))
+    return max(x_base, min(x_end, x))
 
 
 def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
-                v_base: int = None):
+                v_base: int = None, x_range=_POS_DEFAULT):
     """Slot lists -> MCS measure entry lists (notes, rests, accidentals, dots, ties).
     `treble` is the clef (pitch window); `v_base` is the screen position (1 = top
-    staff, 21 = bottom), which defaults to top-for-treble/bottom-for-bass but can
-    be set so a bass-clef staff sits on top. With `cap`, a measure is limited to
-    the real-MCS buffer size; once full, further onsets in that bar are dropped
-    (whole slot at a time) rather than overflow and corrupt playback. Automated
-    imports cap; hand-authoring/round-trip do not (the validator flags any
-    overflow there instead of silently dropping)."""
+    staff, 21 = bottom). `x_range` = (x_base, x_placement_end, x_cap) bounds the
+    horizontal slots. With `cap`, onsets past `x_cap` are dropped (24 positions by
+    default, 32 in force mode); WITHOUT cap (round-trip / hand-authoring) onsets
+    bump right up to the 5-bit field max so nothing is lost. Entries themselves
+    are NOT limited — chords stack on one slot freely."""
     if v_base is None:
         v_base = 1 if treble else 21
+    x_base, x_place_end, x_cap = x_range
+    ceiling = x_cap if cap else _X_FIELD_MAX      # drop at the cap, else fill the field
     rest_v = 13 if v_base == 1 else 33           # rest sits in the staff's position
     key_state_default = 0                        # C major: naturals by default
     measures = []
     dropped = 0
-    limit = _MAX_ENTRIES_PER_MEASURE if cap else 10 ** 9
     for bar in bars:
         entries = []
         acc_state: Dict[int, int] = {}
@@ -180,12 +181,17 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
         # reader (and real MCS) group different notes into one chord. `last_x`
         # keeps them apart: dense measures pack tight left-to-right, sparse ones
         # keep their proportional spacing.
-        last_x = _X_BASE - 1
+        last_x = x_base - 1
         for tick, advance, midis, ties in bar:
+            if last_x + 1 > ceiling:             # no horizontal room left this bar
+                if cap:
+                    dropped += 1
+                    continue                     # drop the whole onset
             slot = []
             for base, dotted in _decompose(advance, allow_dot=bool(midis)):
-                x = min(_MAX_X_SLOT, max(_tick_to_x(tick, bar_ticks), last_x + 1))
-                aux_x = min(_MAX_X_SLOT, x + 1)     # dot / tie sit just after
+                x = min(ceiling, max(_tick_to_x(tick, bar_ticks, x_base, x_place_end),
+                                     last_x + 1))
+                aux_x = min(ceiling, x + 1)        # dot / tie sit just after
                 if not midis:
                     slot.append(make_entry(_REST_SYM[base], rest_v, x))
                     last_x = x
@@ -206,11 +212,7 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
                         slot.append(make_entry(_SYM_TIE, tv, aux_x))
                     last_x = aux_x if (dotted or piece_ties) else x
                 tick += base + (base // 2 if dotted else 0)
-            # add the whole slot only if it fits the measure buffer intact
-            if len(entries) + len(slot) <= limit:
-                entries.extend(slot)
-            else:
-                dropped += 1
+            entries.extend(slot)                 # entries are unlimited (chords free)
         measures.append(entries)
     _emit_staff.last_dropped = dropped
     return measures
@@ -300,18 +302,21 @@ def _monophonic(events):
     return out
 
 
-def _staff_for(events, total, bar_ticks, treble, cap, v_base=None):
+def _staff_for(events, total, bar_ticks, treble, cap, v_base=None,
+               x_range=_POS_DEFAULT):
     """(start,dur,midi) events -> a staff (clef record + measure lists), fitting
     pitches into the clef's window at screen position `v_base` (1 = top, 21 =
     bottom). The clef GLYPH follows the clef (G/F) but sits at the position's
     height (v 16 top, 32 bottom), so a bass-clef top staff draws correctly.
-    Drops reported via _emit_staff.last_dropped."""
+    `x_range` bounds the horizontal slots (see _emit_staff). Drops reported via
+    _emit_staff.last_dropped."""
     if v_base is None:
         v_base = 1 if treble else 21
     lo, hi = (TREBLE_LO, TREBLE_HI) if treble else (BASS_LO, BASS_HI)
     fitted = [(s, d, _fit(m, lo, hi)) for s, d, m in events]
     measures = _emit_staff(_staff_slots(fitted, total, bar_ticks), treble,
-                           cap=cap, bar_ticks=bar_ticks, v_base=v_base)
+                           cap=cap, bar_ticks=bar_ticks, v_base=v_base,
+                           x_range=x_range)
     clef = make_entry(_G_CLEF if treble else _F_CLEF, 16 if v_base == 1 else 32, 14)
     return [[clef]] + measures                   # clef is its own opening measure
 
@@ -319,36 +324,34 @@ def _staff_for(events, total, bar_ticks, treble, cap, v_base=None):
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 split: int = 67, cap: bool = False,
                 fit_meter: bool = False, balance: bool = False,
-                voices: int = 6) -> bytes:
+                voices: int = 6, force32: bool = False) -> bytes:
     """Song (32nd-note ticks) -> .MCS bytes on a two-staff grand staff — the
-    layout real MCS renders (a top and a bottom staff, each its own voice/chord
-    lane with its own 32-entry measure buffer). Both staves' clefs are free, so
-    they need not be treble-over-bass.
+    layout real MCS renders (a top and a bottom staff). Both staves' clefs are
+    free, so they need not be treble-over-bass.
 
     Default: a fixed treble+bass pitch-split (clean notation, used for round-trip
     and hand-authoring). `balance=True` (automated imports) instead picks BOTH
     clefs to match the register (a low song becomes two bass staves) and deals
-    notes so each measure fills evenly — using the full 64-entry two-staff budget
-    instead of piling a low song's notes onto one overflowing bass staff. Dr.
-    Wily goes from ~62% of notes kept to ~100%, with no octave-folding.
+    notes so each measure fills evenly. Dr. Wily goes from ~62% kept to ~100%.
 
     `voices` targets an output chip's polyphony: 1 collapses to a single melodic
     line (PC-speaker 1-voice), 3 suits a Tandy/PCjr (3 tones), 4 the PC-speaker
-    4-voice multiplex. Our chiptune sources are already <=3 voices, so 3/4 keep
-    everything; only 1 actually reduces.
+    4-voice multiplex. Our chiptune sources are already <=3 voices.
 
-    `cap=True` limits each measure to MCS's 32-entry buffer, dropping the densest
-    overflow rather than corrupting playback. `fit_meter=True` picks the meter
-    that keeps the most notes: the longest (most natural) meter that overflows
-    NOTHING, else the shortest (2/4, max capacity). Meter only moves barlines —
-    tempo and timing are unchanged — so it's free note-capacity."""
+    A measure holds a fixed number of horizontal POSITIONS (onsets), not entries —
+    chords stack on one slot for free. `force32=False` uses the clean 24 the
+    editor renders comfortably; `force32=True` opens the full 32 the x-slot field
+    allows (plays, but MCS draws it cramped). `cap=True` drops onsets past that
+    edge; `fit_meter=True` picks the meter that keeps the most notes."""
+    x_range = _POS_FORCE32 if force32 else _POS_DEFAULT
     if fit_meter:
         # Phase 1: prefer a LOSSLESS natural pitch-split (each voice in its own
         # register, no cross-staff reshuffling) at the longest meter that fits.
         # A sparse song (a Zelda theme) lands here — 2/4 pitch-split, untouched.
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=False, voices=voices)
+                               split=split, cap=cap, balance=False, voices=voices,
+                               force32=force32)
             if encode_song.last_dropped == 0:
                 return data
         # Phase 2: nothing fits naturally (a dense song like Dr. Wily) — allow
@@ -356,7 +359,8 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=balance, voices=voices)
+                               split=split, cap=cap, balance=balance, voices=voices,
+                               force32=force32)
             dropped = encode_song.last_dropped
             if best is None or dropped < best[1]:
                 best = (data, dropped)
@@ -377,9 +381,11 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM
         # (21..41) — independent of clef, so two bass staves stack as two staves,
         # not one heap. Returns (staves, dropped-slot count).
-        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
+        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1,
+                         x_range=x_range)
         d = _emit_staff.last_dropped
-        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
+        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21,
+                            x_range=x_range)
         return [top, bottom], d + _emit_staff.last_dropped
 
     if voices <= 1:                              # single melodic line -> one staff

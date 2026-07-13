@@ -5,9 +5,7 @@ import glob
 import os
 
 from mcs_convert.mcs.encode import encode_song
-from mcs_convert.mcs.validate import (
-    MAX_ENTRIES_PER_MEASURE, summary, validate,
-)
+from mcs_convert.mcs.validate import summary, validate
 from mcs_convert.mcs.writer import build_file, make_entry
 from mcs_convert.model import NoteEvent, Song, Track
 
@@ -25,13 +23,14 @@ def test_every_corpus_song_validates():
         assert not corrupt, f"{os.path.basename(path)}: {summary(data)}"
 
 
-def test_overflowing_measure_is_flagged():
-    # a measure crammed past the 32-entry buffer must be caught
-    entries = [make_entry(0x06, 16, 14)]                  # clef
-    fat = [make_entry(0x01, 20, x % 30) for x in range(MAX_ENTRIES_PER_MEASURE + 5)]
-    data = build_file([[entries, fat]], time_sig=1)
-    issues = validate(data)
-    assert any(i.severity == "corrupt" and "buffer" in i.detail for i in issues)
+def test_many_entries_per_measure_is_not_corrupt():
+    # A measure with far more than 32 ENTRIES (chords stacked on a few x-slots)
+    # is fine — the old 32-entry cap was a corpus artifact; hardware plays 96+.
+    clef = [make_entry(0x06, 16, 14)]
+    # 20 x-slots, 4 notes stacked on each = 80 entries but only 20 positions
+    fat = [make_entry(0x01, 4 + v, x) for x in range(2, 22) for v in range(4)]
+    data = build_file([[clef, fat]], time_sig=1)
+    assert not [i for i in validate(data) if i.severity == "corrupt"]
 
 
 def test_capped_import_stays_within_limits_and_2_staves():

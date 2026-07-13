@@ -1,14 +1,14 @@
 """Check whether a generated .MCS stays within the limits the real 1984 program
-can play, derived empirically from the 80-song retail+collected corpus.
+can play, derived from the 80-song corpus AND direct playback tests on hardware/
+emulator.
 
-The corpus is ground truth: no real MCS song ever exceeds these, and files that
-do exceed them corrupt on playback in the actual program (our own player is more
-tolerant, so it can't catch this — hence a dedicated validator).
-
-The load-bearing one is **entries per measure**: MCS reads each measure into a
-fixed 32-entry / 64-byte buffer, so a measure with more than 32 note/rest/glyph
-entries overflows it and garbles playback. (Observed: MAPLERAG at 18/measure
-plays; a busy NSF conversion at 146/measure corrupts.)
+The old "32 entries per measure" cap turned out to be a corpus artifact, NOT a
+real limit: hand-built test files play measures of 96 entries fine — chords stack
+vertically on one x-slot for free. What IS finite is HORIZONTAL POSITIONS: the
+x-slot is a 5-bit field, so a measure holds at most 32 distinct onsets (x 0..31),
+and a test measure of 32 plays (though MCS renders it cramped and the barline-
+region slots x 0..1 draw loosely). The corpus never exceeds 23 positions; the
+encoder targets 24 by default, 32 in force mode.
 """
 
 from __future__ import annotations
@@ -18,13 +18,10 @@ from typing import List
 
 from .reader import parse_records, split_staves, symbol, vertical, x_slot
 
-# Empirical bounds across all 80 corpus songs (see scratchpad/mcs_envelope.py).
-MAX_ENTRIES_PER_MEASURE = 32     # the fixed per-measure buffer — the hard one
-MIN_X_SLOT = 2                   # corpus notes never sit at x 0/1 (barline/clef
-#                                  region). Our own MAPLERAG uses x 1 and still
-#                                  plays, so this is a corpus-deviation WARNING,
-#                                  not a hard corruption — the encoder targets >=2.
-MAX_X_SLOT = 30                  # horizontal slot never exceeds this on screen
+MIN_X_SLOT = 2                   # x 0/1 are the barline/clef region — notes there
+#                                  play but render loosely (force-32 mode uses them)
+MAX_X_SLOT = 31                  # the 5-bit x-slot field's ceiling
+MAX_POSITIONS = 32               # distinct onsets a measure can hold (= x 0..31)
 MAX_STAVES = 4
 EDITOR_MAX_BYTES = 4246          # the editor's save buffer (playback tolerates more)
 
@@ -45,29 +42,23 @@ def validate(data: bytes) -> List[Issue]:
     if len(staves) > MAX_STAVES:
         issues.append(Issue("warn", "file",
                             f"{len(staves)} staves > {MAX_STAVES} the corpus uses"))
-    low_x = high_x = 0                            # deduped counts (one line each)
+    low_x = 0                                     # deduped count (one line)
     for si, staff in enumerate(staves):
         for mi, rec in enumerate(staff):
-            n = len(rec.entries)
-            if n > MAX_ENTRIES_PER_MEASURE:
-                issues.append(Issue(
+            positions = {x_slot(b1) for b0, b1 in rec.entries
+                         if symbol(b0) in _NOTE_OR_REST}
+            if len(positions) > MAX_POSITIONS:    # impossible in a 5-bit field, but
+                issues.append(Issue(              # a collision would corrupt timing
                     "corrupt", f"staff {si} measure {mi}",
-                    f"{n} entries > {MAX_ENTRIES_PER_MEASURE}-entry measure buffer "
-                    f"(overflows and garbles playback)"))
+                    f"{len(positions)} horizontal positions > {MAX_POSITIONS} "
+                    f"(x-slots collide — notes merge into chords)"))
             for b0, b1 in rec.entries:
-                x = x_slot(b1)
-                if x > MAX_X_SLOT:
-                    high_x += 1
-                elif mi > 0 and x < MIN_X_SLOT and symbol(b0) in _NOTE_OR_REST:
+                if mi > 0 and x_slot(b1) < MIN_X_SLOT and symbol(b0) in _NOTE_OR_REST:
                     low_x += 1
-    if high_x:
-        issues.append(Issue("warn", "file",
-                            f"{high_x} note(s) at x-slot > {MAX_X_SLOT} "
-                            f"(off the staff width)"))
     if low_x:
         issues.append(Issue("warn", "file",
                             f"{low_x} note(s) at x-slot < {MIN_X_SLOT} (barline/clef "
-                            f"region — no corpus song does this; may mis-draw)"))
+                            f"region — plays but renders loosely)"))
     if len(data) > EDITOR_MAX_BYTES:
         issues.append(Issue("warn", "file",
                             f"{len(data)} bytes > {EDITOR_MAX_BYTES} editor buffer "

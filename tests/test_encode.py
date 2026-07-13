@@ -159,6 +159,20 @@ def test_multi_staff_header_sizes_are_consistent():
     assert s2 == body - s1 - 8                         # the two 4-byte end separators
 
 
+def test_position_cap_is_24_by_default_and_32_when_forced():
+    # A single measure of 32 distinct 32nd-note onsets: the default caps to 24
+    # horizontal positions, force32 keeps all 32. (Entries were never the limit.)
+    from mcs_convert.mcs.reader import (parse_records, split_staves, x_slot,
+                                        symbol, _note_value)
+    song = _mk([(i, 1, 72 + i % 7) for i in range(32)])   # 32 onsets in one 4/4 bar
+    for force, want in ((False, 24), (True, 32)):
+        data = encode_song(song, cap=True, force32=force)
+        pos = max(len({x_slot(b1) for b0, b1 in r.entries
+                       if _note_value(symbol(b0))[0]})
+                  for st in split_staves(parse_records(data)) for r in st[1:])
+        assert pos == want
+
+
 def _count(song):
     return sum(len([n for n in t.notes if not n.is_rest]) for t in song.tracks)
 
