@@ -23,8 +23,9 @@ match the row rate best — so converted songs play at their original speed.
 from __future__ import annotations
 
 import struct
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from . import drums
 from .model import NoteEvent, Song, Track
 
 # Two signatures exist in the wild for the same header layout: ProTracker's own,
@@ -35,6 +36,12 @@ _MAGICS = (b"ProTracker 3.", b"Vortex Tracker II")
 _FX_PARAMS = {0x01: 3, 0x02: 5, 0x03: 1, 0x04: 1, 0x05: 2, 0x08: 3, 0x09: 1}
 
 _FX_SET_SPEED = 0x09
+
+# AY noise period is 0..31; a LOW period clocks the LFSR fast = bright high hiss
+# (hi-hat), a high period = dark low rumble (kick). Split the range in half when
+# a drum note carries an explicit noise period (rare — most PT3 drums are
+# sample-driven, so click_pitches falls back to the sample's tone/noise duty).
+_AY_NOISE_BRIGHT = 15
 
 
 class PT3Error(ValueError):
@@ -170,12 +177,34 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
     return ch.row - start_row
 
 
-def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
-    """Map a PT3 row (delay frames at 50 Hz) onto the 32nd-tick grid: returns
-    (ticks_per_row, mcs_tempo_byte0) minimizing the tempo error."""
+def _tick_seconds(byte0: int) -> float:
+    """A 32nd-tick's real duration at MCS tempo byte0 (0x77 fastest .. 0x92)."""
+    step = (byte0 - 0x77) // 3
+    return (0.067 + 0.016 * step) / 2.0
+
+
+# The subdivisions a row may map to. The default (auto-detect) keeps the
+# original power-of-two set so existing conversions are unchanged; Exhaustive
+# Optimize adds 3 and 6 so triplet-feel modules can land on the beat too.
+_TICK_SET = (1, 2, 4, 8)
+_TICK_SET_WIDE = (1, 2, 3, 4, 6, 8)
+
+
+def fit_row_grid(delay: int, target_byte0: Optional[int] = None,
+                 tick_set: Tuple[int, ...] = _TICK_SET) -> Tuple[int, int, float]:
+    """Fit a PT3 row (delay frames at 50 Hz) onto the 32nd-tick grid.
+
+    Returns (ticks_per_row, mcs_tempo_byte0, rel_error). With target_byte0 the
+    tempo is FIXED and only the subdivision is chosen (the "optimize to the
+    selected tempo" case); otherwise both are searched for the least error."""
     row_seconds = max(1, delay) / 50.0
+    if target_byte0 is not None:
+        ts = _tick_seconds(target_byte0)
+        ticks, err = min(((t, abs(t * ts - row_seconds) / row_seconds)
+                          for t in tick_set), key=lambda x: x[1])
+        return ticks, target_byte0, err
     best = (1, 0x77, 1e9)
-    for ticks in (1, 2, 4, 8):
+    for ticks in tick_set:
         want = row_seconds / ticks
         step = round((2 * want - 0.067) / 0.016)
         if not 0 <= step <= 9:
@@ -184,7 +213,13 @@ def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
         err = abs(got - want) / want
         if err < best[2]:
             best = (ticks, 0x77 + 3 * step, err)
-    return best[0], best[1]
+    return best
+
+
+def row_ticks_and_tempo(delay: int) -> Tuple[int, int]:
+    """Back-compat shim: (ticks_per_row, tempo_byte0) for the default grid."""
+    ticks, byte0, _ = fit_row_grid(delay)
+    return ticks, byte0
 
 
 def _sample_audible_ticks(data: bytes, idx: int, ticks_per_row: int,
@@ -213,25 +248,32 @@ def _sample_audible_ticks(data: bytes, idx: int, ticks_per_row: int,
 
 
 def parse_pt3(data: bytes, percussion: str = "clicks",
-              drum_sound: str = "cluster",
-              shape_durations: bool = False) -> Tuple[Song, int]:
+              drum_sound: str = "auto",
+              shape_durations: bool = False,
+              grid: Optional[Tuple[int, int]] = None) -> Tuple[Song, int]:
     """Parse a .pt3 module. Returns (song, mcs_tempo_byte0); song ticks are 32nds.
 
     `percussion` decides what happens to drum-classified notes (see is_drum below):
       "clicks"  — synthesize them as 1-tick percussion hits (default);
       "pitched" — ignore the noise modifier and play their written pitches;
       "drop"    — silence them, keeping the channel's melodic notes.
-    `drum_sound` picks the click timbre when percussion == "clicks":
-      "cluster" — G3+Ab3 beating a minor second apart (roughness ≈ noise);
-      "block"   — a single mid-register D4, the humble wood-block tick.
+    `drum_sound` picks the click pitch when percussion == "clicks":
+      "auto"     — two-tone: bright drums (pure-noise samples / low AY noise
+                   period) -> hi-hat E7, dark drums (tonal body) -> low bass B2;
+      "low bass" — every hit is B2 (47), the lowest note: a kick thud;
+      "hi-hat"   — every hit is E7 (100), the highest note: a bright tick;
+      "block"    — a single mid-register D4 wood-block tick;
+      "cluster"  — legacy G3+Ab3 beating a minor second (roughness ≈ noise).
     `shape_durations` truncates each note to its sample's audible length (the
     frame where its volume table decays to permanent silence) — MCS's only way
     to express a pluck, since it has no volume control.
+    `grid` = (ticks_per_row, tempo_byte0) forces a specific tempo mapping
+    (used by optimize_pt3 / optimize_pt3_at); None auto-fits from the row rate.
     """
     if percussion not in ("clicks", "pitched", "drop"):
         raise ValueError(f"percussion must be clicks/pitched/drop, not {percussion!r}")
-    if drum_sound not in ("cluster", "block"):
-        raise ValueError(f"drum_sound must be cluster/block, not {drum_sound!r}")
+    if drum_sound not in drums.CLICKS and drum_sound != "auto":
+        raise ValueError(f"unknown drum_sound {drum_sound!r}")
     if not any(data.startswith(m) for m in _MAGICS):
         raise PT3Error("not a ProTracker 3 / Vortex Tracker module (bad magic)")
     title = _cstr(data[0x1E:0x3E])
@@ -272,7 +314,7 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
         for ch in chans:
             ch.row = start + covered              # keep channels in lockstep
 
-    ticks_per_row, byte0 = row_ticks_and_tempo(delay)
+    ticks_per_row, byte0 = grid if grid is not None else row_ticks_and_tempo(delay)
 
     song = Song(title=title or "PT3 module", source=f"pt3:{author}" if author else "pt3")
     total_rows = max(c.row for c in chans)
@@ -292,30 +334,43 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
             return False
         return tone_duty <= 0.5 or len(usage.get(sample, ())) <= 3
 
+    def click_pitches(sample: int, noise) -> Tuple[int, ...]:
+        """Click pitch(es) for one drum hit. "auto" splits two-tone by
+        BRIGHTNESS (like the NES noise-period split). The sample's tonal
+        character decides first: a tone+noise sample has a pitched body -> a DARK
+        kick/tom (low bass). A pure-noise sample is bright -> hi-hat, unless the
+        pattern set a HIGH AY noise period (a low rumble), which pulls it dark.
+        Fixed sounds ignore all that."""
+        if drum_sound != "auto":
+            return drums.CLICKS.get(drum_sound, drums.CLICKS["block"])
+        _, tone_duty = _sample_noise(data, sample)
+        if tone_duty >= 0.5:
+            bright = False                       # pitched body = kick/tom
+        elif noise is not None:
+            bright = noise <= _AY_NOISE_BRIGHT    # noise pitch sets hat vs rumble
+        else:
+            bright = True                        # pure noise, no period = hat
+        return drums.two_tone(bright)
+
     drum_sample = [is_drum(s) for s in range(32)]
     for name, ch in zip("ABC", chans):
         track = Track(name=f"AY {name}")
-        drums = 0
+        drum_count = 0
         events = sorted(ch.notes)
         offs = sorted(ch.offs)
         for i, (row, idx, sample, noise) in enumerate(events):
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
             if 0 <= sample < 32 and drum_sample[sample]:
-                drums += 1
+                drum_count += 1
                 if percussion == "drop":
                     continue
                 if percussion == "clicks":
-                    # AY percussion. MCS has no noise generator, and no single
-                    # pitch can be a click either: the shortest note (~60-80ms)
-                    # spans several waveform cycles at any renderable pitch, so
-                    # high ticks dominate (tried E7) and low thuds hum (tried
-                    # B2). "cluster" beats two squares a semitone apart — for
-                    # one tick that is roughness, not pitch: the nearest thing
-                    # to noise square waves can make. "block" is the humble
-                    # single mid-register tick when the cluster is too thick.
-                    hit = (55, 56) if drum_sound == "cluster" else (62,)
-                    for midi in hit:
+                    # AY percussion -> a 32nd-note click at a register-extreme
+                    # pitch (B2 kick thud / E7 hi-hat tick). One note per hit so
+                    # it costs a single position and event; "auto" picks the
+                    # pitch two-tone (see click_pitches).
+                    for midi in click_pitches(sample, noise):
                         track.add(NoteEvent(start_tick=row * ticks_per_row,
                                             duration_ticks=1, midi_note=midi,
                                             percussive=True))
@@ -330,10 +385,41 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
             track.add(NoteEvent(start_tick=row * ticks_per_row,
                                 duration_ticks=dur, midi_note=midi))
         track.meta["noise_cmds"] = ch.noise_cmds
-        track.meta["drum_notes"] = drums
+        track.meta["drum_notes"] = drum_count
         if track.notes:
             song.add_track(track)
     if speed_changes:
         # MCS is fixed-tempo; converted at the initial speed.
         song.source += f" ({len(speed_changes)} speed changes ignored)"
+    # keep the raw bytes + options so the dialog can re-quantize onto another
+    # tempo grid (optimize_pt3 / optimize_pt3_at) without re-decoding by hand
+    song.pt3_source = (data, percussion, drum_sound, shape_durations)
     return song, byte0
+
+
+def optimize_pt3(song: Song):
+    """Re-quantize a PT3-imported Song onto its best-fitting grid — searching a
+    wider subdivision set (incl. triplet 3/6) for the least row-rate error.
+    Returns (new_song, tempo_byte0, rel_error, speed_drift); the song unchanged
+    with (0x80, 0, 0) if it wasn't PT3-imported."""
+    src = getattr(song, "pt3_source", None)
+    if not src:
+        return song, 0x80, 0.0, 0.0
+    data, percussion, drum_sound, shape = src
+    ticks, byte0, err = fit_row_grid(data[0x64], tick_set=_TICK_SET_WIDE)
+    new, byte0 = parse_pt3(data, percussion, drum_sound, shape, grid=(ticks, byte0))
+    return new, byte0, err, err
+
+
+def optimize_pt3_at(song: Song, target_byte0: int):
+    """Re-quantize a PT3-imported Song to a CHOSEN MCS tempo: the row keeps the
+    subdivision that best fits that tempo (finer at faster tempos). Returns
+    (new_song, tempo_byte0, rel_error, speed_drift)."""
+    src = getattr(song, "pt3_source", None)
+    if not src:
+        return song, target_byte0, 0.0, 0.0
+    data, percussion, drum_sound, shape = src
+    ticks, byte0, err = fit_row_grid(data[0x64], target_byte0=target_byte0,
+                                     tick_set=_TICK_SET_WIDE)
+    new, byte0 = parse_pt3(data, percussion, drum_sound, shape, grid=(ticks, byte0))
+    return new, byte0, err, err

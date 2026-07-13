@@ -7,7 +7,9 @@ from mcs_convert.audio import _note_events
 from mcs_convert.mcs.encode import encode_song
 from mcs_convert.mcs.reader import parse as parse_mcs
 from mcs_convert.model import NoteEvent, Song, Track
-from mcs_convert.pt3 import parse_pt3, row_ticks_and_tempo
+from mcs_convert.pt3 import (
+    optimize_pt3, optimize_pt3_at, parse_pt3, row_ticks_and_tempo,
+)
 
 
 def _roundtrip(song, tmp_path, **kw):
@@ -319,11 +321,12 @@ def test_maplerag_reencodes_losslessly(tmp_path):
 
 # ---- PT3 importer -----------------------------------------------------------------
 
-def _build_pt3(delay=3, drums=False, drum_sample=False):
+def _build_pt3(delay=3, drums=False, drum_sample=False, drum_tonal=False):
     """A minimal 1-pattern module: A plays C-4/E-4/G-4/off, B a held C-3, C is
     silent — or, with drums=True, C hammers one low note with noise commands;
     with drum_sample=True, C selects a noise-only sample (tone muted) and hits
-    C-4 then C-1 — the sample-table percussion recipe."""
+    C-4 then C-1 — the sample-table percussion recipe. drum_tonal=True makes that
+    sample tone+noise (a pitched-body kick/tom) instead of pure noise."""
     hdr = bytearray(0xC9)
     hdr[0:13] = b"ProTracker 3."
     hdr[0x0D] = ord("6")
@@ -349,7 +352,7 @@ def _build_pt3(delay=3, drums=False, drum_sample=False):
         0x68,                                      # C-3, held 8 rows (one line)
         0x00,
     ])
-    if drum_sample:                                # sample 2 + noise, C-4 then C-1
+    if drum_sample or drum_tonal:                  # sample 2 + noise, C-4 then C-1
         ch_c = bytes([0xB1, 2, 0xD2, 0x25, 0x74, 0x50, 0xC0, 0xD0, 0x00])
     elif drums:                                    # noise-set + repeated C-1 hits
         ch_c = bytes([0xB1, 2,
@@ -365,11 +368,12 @@ def _build_pt3(delay=3, drums=False, drum_sample=False):
     sam_addr = c_addr + len(ch_c)
     struct.pack_into("<H", hdr, 0x67, pat_table)
     body = struct.pack("<HHH", a_addr, b_addr, c_addr) + ch_a + ch_b + ch_c
-    if drum_sample:
-        # sample 2: loop 0, one frame, byte1 = 0x1F (tone OFF via bit4, noise
-        # ON via clear bit7, full amplitude)
+    if drum_sample or drum_tonal:
+        # sample 2: loop 0, one frame. Pure noise byte1 = 0x1F (tone OFF via
+        # bit4, noise ON via clear bit7); tonal body byte1 = 0x0F (tone ON too).
         struct.pack_into("<H", hdr, 0x69 + 2 * 2, sam_addr)
-        body += bytes([0, 1, 0x00, 0x1F, 0x00, 0x00])
+        byte1 = 0x0F if drum_tonal else 0x1F
+        body += bytes([0, 1, 0x00, byte1, 0x00, 0x00])
     return bytes(hdr) + order + body
 
 
@@ -415,29 +419,30 @@ def test_channel_stats_flag_percussion():
 
 def test_noise_only_samples_become_clicks():
     # A channel playing a noise-only sample (tone mixer muted in the sample
-    # table) is AY percussion; MCS has no noise, so each hit becomes a 1-tick
-    # DISSONANT CLUSTER (G3+Ab3): beating squares read as roughness, not pitch
-    # (single notes failed by ear — E7 ticks dominated, B2 thuds hummed).
+    # table) is AY percussion; MCS has no noise, so each hit becomes a single
+    # 1-tick click at a register extreme. Default "auto" is two-tone: a
+    # pure-noise sample is a BRIGHT hit -> hi-hat E7 (100). One note per hit.
     song, _ = parse_pt3(_build_pt3(drum_sample=True))
     c = {t.name: t for t in song.tracks}["AY C"]
     assert c.meta["drum_notes"] == 2
     hits = [(n.start_tick, n.duration_ticks, n.midi_note) for n in c.notes]
-    assert hits[0:2] == [(0, 1, 55), (0, 1, 56)]
-    assert hits[2][2] == 55 and hits[3][2] == 56
+    assert hits == [(0, 1, 100), (2, 1, 100)]
     assert all(n.percussive for n in c.notes)
-    # the wood-block alternative: one humble D4 tick per hit
-    block, _ = parse_pt3(_build_pt3(drum_sample=True), drum_sound="block")
-    cb = {t.name: t for t in block.tracks}["AY C"]
-    assert [(n.duration_ticks, n.midi_note) for n in cb.notes] == [(1, 62), (1, 62)]
-    assert all(n.percussive for n in cb.notes)
+    # fixed choices ignore the two-tone split: one note per hit at the chosen
+    # pitch — wood block D4 (62), low bass B2 (47), hi-hat E7 (100).
+    for sound, pitch in (("block", 62), ("low bass", 47), ("hi-hat", 100)):
+        s, _ = parse_pt3(_build_pt3(drum_sample=True), drum_sound=sound)
+        cb = {t.name: t for t in s.tracks}["AY C"]
+        assert [(n.duration_ticks, n.midi_note) for n in cb.notes] == [(1, pitch), (1, pitch)]
+        assert all(n.percussive for n in cb.notes)
     # the melodic channels are untouched
     a = {t.name: t for t in song.tracks}["AY A"]
     assert a.meta["drum_notes"] == 0 and a.notes[0].midi_note == 60
 
 
 def test_percussion_modes():
-    # clicks (default): 1-tick C3/E7 hits; pitched: written pitches, full
-    # durations; drop: drum notes silenced, melodic channels untouched.
+    # clicks (default auto): one 1-tick hi-hat (E7) per hit; pitched: written
+    # pitches, full durations; drop: drum notes silenced, melodic untouched.
     mod = _build_pt3(drum_sample=True)
     clicks, _ = parse_pt3(mod)
     pitched, _ = parse_pt3(mod, percussion="pitched")
@@ -450,8 +455,7 @@ def test_percussion_modes():
                 for n in tr.notes] if tr else []
 
     ticks = clicks.tracks[0].notes[1].start_tick // 2
-    assert c_notes(clicks) == [(0, 1, 55), (0, 1, 56),
-                               (2 * ticks, 1, 55), (2 * ticks, 1, 56)]
+    assert c_notes(clicks) == [(0, 1, 100), (2 * ticks, 1, 100)]
     assert c_notes(pitched) == [(0, 2 * ticks, 60), (2 * ticks, 2 * ticks, 24)]
     assert c_notes(dropped) == []                  # drum channel silenced
     # melodic channels identical across all three modes
@@ -465,6 +469,37 @@ def test_percussion_modes():
     assert all(n.percussive for n in c.notes)
     p = {t.name: t for t in pitched.tracks}["AY C"]
     assert not any(n.percussive for n in p.notes)
+
+
+def test_auto_two_tone_splits_bright_and_dark_drums():
+    # "auto" reads a drum sample's character: a pure-noise sample is a BRIGHT
+    # hit -> hi-hat E7 (100); a tone+noise sample has a pitched body -> a DARK
+    # kick -> low bass B2 (47). Same split idea as the NES noise-period two-tone.
+    bright, _ = parse_pt3(_build_pt3(drum_sample=True))     # pure noise
+    dark, _ = parse_pt3(_build_pt3(drum_tonal=True))        # tone + noise
+    bc = {t.name: t for t in bright.tracks}["AY C"]
+    dc = {t.name: t for t in dark.tracks}["AY C"]
+    assert {n.midi_note for n in bc.notes} == {100}         # hi-hat
+    assert {n.midi_note for n in dc.notes} == {47}          # low bass
+    assert all(n.percussive and n.duration_ticks == 1 for n in bc.notes)
+
+
+def test_optimize_pt3_refits_grid_to_a_chosen_tempo():
+    # A module carries a fixed row rate; optimize_pt3_at re-quantizes it onto a
+    # chosen MCS tempo (the row keeps the subdivision that best fits that tempo).
+    # Exhaustive optimize picks the globally least-error tempo instead.
+    song, byte0 = parse_pt3(_build_pt3(delay=3))
+    at_slow, b_slow, err_slow, _ = optimize_pt3_at(song, 0x92)   # slowest tempo
+    assert b_slow == 0x92                                   # honored the choice
+    at_fast, b_fast, err_fast, _ = optimize_pt3_at(song, 0x77)   # fastest tempo
+    assert b_fast == 0x77
+    # forcing a tempo re-stamps the song's byte0 and re-quantizes its ticks
+    best, b_best, err_best, _ = optimize_pt3(song)
+    assert 0x77 <= b_best <= 0x92 and err_best <= err_slow
+    # a non-PT3 song is returned untouched
+    plain = Song(title="x", source="x")
+    same, b, off, sp = optimize_pt3(plain)
+    assert same is plain and (off, sp) == (0.0, 0.0)
 
 
 def test_decay_shaping_truncates_to_audible_length():

@@ -33,6 +33,7 @@ from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
+from .. import drums
 from ..audio import (
     WaveOutPlayer, pcm16, render_nes, render_song, tempo_bpm, wav_bytes,
 )
@@ -696,11 +697,9 @@ class ImportPreview(tk.Toplevel):
                            selectcolor="#2a2e3a").pack(side="left", padx=(10, 0))
         tk.Label(perc, text="sound", bg=_BG, fg=_ACCENT).pack(side="left",
                                                               padx=(18, 4))
-        self.drum = tk.StringVar(value="auto (two-tone)" if self.is_nsf
-                                 else "wood block")
+        self.drum = tk.StringVar(value="auto (two-tone)")
         snd = ttk.Combobox(perc, textvariable=self.drum, width=13, state="readonly",
-                           values=(("auto (two-tone)",) if self.is_nsf else ())
-                           + ("cluster", "wood block", "low bass", "hi-hat"))
+                           values=drums.PICKER_SOUNDS)
         snd.pack(side="left")
         snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
         # MCS has no volume: a decaying sample can only be expressed as TIME.
@@ -774,12 +773,11 @@ class ImportPreview(tk.Toplevel):
         optbar.grid(row=base + 2, column=0, columnspan=9, sticky="w",
                     padx=10, pady=(2, 2))
         self.opt_label = tk.Label(optbar, bg=_BG, fg=_FG, font=("TkDefaultFont", 8))
-        if self.is_nsf:
-            tk.Button(optbar, text="⌖ Exhaustive Optimize",
-                      command=self._optimize).pack(side="left")
-            tk.Button(optbar, text="⌖ Optimize with Current Settings",
-                      command=self._optimize_current).pack(side="left", padx=(4, 0))
-            self.opt_label.pack(side="left", padx=(10, 0))
+        tk.Button(optbar, text="⌖ Exhaustive Optimize",
+                  command=self._optimize).pack(side="left")
+        tk.Button(optbar, text="⌖ Optimize with Current Settings",
+                  command=self._optimize_current).pack(side="left", padx=(4, 0))
+        self.opt_label.pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(self, bg=_BG)
         btns.grid(row=base + 3, column=0, columnspan=9, sticky="e",
@@ -866,35 +864,42 @@ class ImportPreview(tk.Toplevel):
         self._update_size()
 
     def _optimize(self) -> None:
-        """Exhaustive Optimize: re-quantize the NSF onto its best-aligning grid
-        (search every MCS tempo × ticks-per-unit for the fewest off-beat notes),
-        nudging the playback tempo by the minimal amount for exact beats. Updates
-        the BPM dial to the chosen tempo and reports the alignment."""
-        if not self.is_nsf:
-            return
+        """Exhaustive Optimize: re-quantize onto the best-aligning grid, searching
+        every MCS tempo × subdivision for the tightest fit, then nudging the
+        playback tempo by the minimal amount. Updates the BPM dial to the chosen
+        tempo and reports the alignment. (NSF searches note onsets; PT3 fits the
+        row rate onto the tick grid.)"""
         self.app.player.stop()
-        from ..nsf.extract import optimize_song
-        self.song, self._byte0, off, speed = optimize_song(self.song)
+        if self.is_nsf:
+            from ..nsf.extract import optimize_song
+            self.song, self._byte0, off, speed = optimize_song(self.song)
+        else:
+            from ..pt3 import optimize_pt3
+            self.song, self._byte0, off, speed = optimize_pt3(self.song)
         self._show_optimized(off, speed)
 
     def _optimize_current(self) -> None:
-        """Re-sequence the NSF to the BPM currently picked in the dial: the base
-        note takes as many ticks as fit that tempo (faster = finer grid), and the
-        speed is nudged the minimal amount to stay near the real NES rate. The
-        meter you've chosen still applies at encode time."""
-        if not self.is_nsf:
-            return
+        """Re-sequence to the BPM currently picked in the dial: the base note
+        takes as many ticks as fit that tempo (faster = finer grid), and the
+        speed is nudged the minimal amount. The meter you've chosen still applies
+        at encode time."""
         self.app.player.stop()
-        from ..nsf.extract import optimize_song_at
-        self.song, self._byte0, off, speed = optimize_song_at(
-            self.song, self._tempo_byte0())
+        if self.is_nsf:
+            from ..nsf.extract import optimize_song_at
+            self.song, self._byte0, off, speed = optimize_song_at(
+                self.song, self._tempo_byte0())
+        else:
+            from ..pt3 import optimize_pt3_at
+            self.song, self._byte0, off, speed = optimize_pt3_at(
+                self.song, self._tempo_byte0())
         self._show_optimized(off, speed)
 
     def _show_optimized(self, off: float, speed: float) -> None:
         if self._byte0 in self._tempos:
             self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
+        ref = "from NES speed" if self.is_nsf else "grid error"
         self.opt_label.configure(
-            text=f"{off:.2f} avg off-beat · {speed * 100:.0f}% from NES speed",
+            text=f"{off:.2f} avg off-beat · {speed * 100:.0f}% {ref}",
             fg=("#e0a030" if off > 0.1 else _ACCENT))
         self._update_stats()
         self._update_size()
