@@ -60,6 +60,12 @@ def _fit(midi: int, lo: int, hi: int) -> int:
     return midi
 
 
+def _dist(midi: int, window) -> int:
+    """0 if `midi` is inside the (lo, hi) window, else how far outside it sits."""
+    lo, hi = window
+    return 0 if lo <= midi <= hi else min(abs(midi - lo), abs(midi - hi))
+
+
 def _v_and_acc(midi: int, treble: bool, v_base: int = None) -> Tuple[int, int]:
     """Staff position v and accidental (-1/0/+1) for a MIDI note, sharp-spelled.
 
@@ -359,25 +365,27 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 best = (data, dropped)
         return best[0]                           # fewest-drop (2/4 balanced)
 
-    # Pitched voices (percussion handled separately below).
+    # Pitched voices (percussion overlaid separately in emit(), so it never skews
+    # the melody's clef/staff choice).
     events = [(s, d, m) for tr in song.tracks
               for s, d, m in _note_events([n for n in tr.notes if not n.percussive])
               if d > 0]
     if voices <= 1:
         events = _monophonic(events)
-    elif voices == 4:
-        # The 4-voice (PC-speaker) target spends its 4th voice on percussion: ONE
-        # drum click per hit tick (never the 2-note cluster — a single channel). A
-        # click on a tick a melody note already occupies joins that slot for free;
-        # a new-tick hit spends one of the 24 positions. Tandy (3 voices) has no
-        # spare tone for it, and the lossless default (6) leaves percussion out.
+    # The 4-voice (PC-speaker) target spends its 4th voice on percussion: ONE drum
+    # click per hit tick (never the 2-note cluster — a single channel). A click on
+    # a tick a melody note already occupies joins that slot for free; a new-tick
+    # hit spends one of the 24 positions. Tandy (3) has no spare tone, and the
+    # lossless default (6) leaves percussion out.
+    percussion: List[Tuple[int, int, int]] = []
+    if voices == 4:
         hits: Dict[int, int] = {}
         for tr in song.tracks:
             for n in tr.notes:
                 if n.percussive and not n.is_rest:
                     hits.setdefault(n.start_tick, n.midi_note)
-        events += [(t, 1, m) for t, m in hits.items()]
-    total = max((s + d for s, d, m in events), default=0)
+        percussion = [(t, 1, m) for t, m in hits.items()]
+    total = max((e[0] + e[1] for e in events + percussion), default=0)
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
     time_sig = {16: 0, 24: 3, 32: 1, 48: 2}.get(bar_ticks, 1)   # else 4/4
@@ -385,10 +393,20 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     def emit(a_ev, b_ev, a_treble, b_treble):
         # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM
         # (21..41) — independent of clef, so two bass staves stack as two staves,
-        # not one heap. Returns (staves, dropped-slot count).
-        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
+        # not one heap. Drum clicks are overlaid onto the staff whose window is
+        # CLOSER to the click's pitch (hi-hat -> treble, low-bass kick -> bass),
+        # CLAMPED into that window rather than octave-folded, so an extreme click
+        # stays extreme. Returns (staves, dropped-slot count).
+        a_win = (TREBLE_LO, TREBLE_HI) if a_treble else (BASS_LO, BASS_HI)
+        b_win = (TREBLE_LO, TREBLE_HI) if b_treble else (BASS_LO, BASS_HI)
+        a_perc, b_perc = [], []
+        for t, d, m in percussion:
+            win = a_win if _dist(m, a_win) <= _dist(m, b_win) else b_win
+            (a_perc if win is a_win else b_perc).append(
+                (t, d, max(win[0], min(win[1], m))))
+        top = _staff_for(a_ev + a_perc, total, bar_ticks, a_treble, cap, v_base=1)
         d = _emit_staff.last_dropped
-        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
+        bottom = _staff_for(b_ev + b_perc, total, bar_ticks, b_treble, cap, v_base=21)
         return [top, bottom], d + _emit_staff.last_dropped
 
     if voices <= 1:                              # single melodic line -> one staff

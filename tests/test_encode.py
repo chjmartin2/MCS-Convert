@@ -62,6 +62,26 @@ def test_percussion_excluded_below_four_voices(tmp_path):
         assert not any(m == 62 for _, _, m in _sounding(got)), f"voices={v}"
 
 
+def test_hi_hat_rides_the_treble_top_not_folded():
+    # A hi-hat click (E7=100) must land at its true top pitch on the treble staff
+    # when one exists — clamped into the window, never octave-folded down.
+    song = Song(title="hh")
+    mel = Track(name="mel")
+    for i in range(8):                                # treble-only melody (>G5)
+        mel.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=84 + i % 4))
+    bl = Track(name="bass")
+    for i in range(8):
+        bl.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=43 + i % 4))
+    dr = Track(name="Noise")
+    for i in range(8):
+        dr.add(NoteEvent(start_tick=i * 4 + 2, duration_ticks=1, midi_note=100,
+                         percussive=True))
+    for tr in (mel, bl, dr):
+        song.add_track(tr)
+    got = _roundtrip_bytes(song, cap=True, voices=4)
+    assert any(m == 100 for _, _, m in _sounding(got))    # E7 present, not folded
+
+
 def test_percussion_appears_in_four_voice_mode(tmp_path):
     # The 4-voice target spends its 4th voice on the drum clicks (single note).
     song, mel = _drum_song()

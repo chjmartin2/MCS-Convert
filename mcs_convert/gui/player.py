@@ -698,7 +698,7 @@ class ImportPreview(tk.Toplevel):
                                                               padx=(18, 4))
         self.drum = tk.StringVar(value="wood block")
         snd = ttk.Combobox(perc, textvariable=self.drum, width=10, state="readonly",
-                           values=("cluster", "wood block", "low bass"))
+                           values=("cluster", "wood block", "low bass", "hi-hat"))
         snd.pack(side="left")
         snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
         # MCS has no volume: a decaying sample can only be expressed as TIME.
@@ -812,7 +812,8 @@ class ImportPreview(tk.Toplevel):
                 text=verdict,
                 fg="#e0b060" if st["verdict"] == "percussion" else _ACCENT)
 
-    _DRUM_KEYS = {"cluster": "cluster", "wood block": "block", "low bass": "low bass"}
+    _DRUM_KEYS = {"cluster": "cluster", "wood block": "block",
+                  "low bass": "low bass", "hi-hat": "hi-hat"}
 
     def _load_kwargs(self) -> dict:
         kw = dict(percussion=self.perc.get(),

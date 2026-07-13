@@ -163,10 +163,10 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
 
 
 # Drum-click pitches. "low bass" is B2 (47) — the LOWEST note the MCS player can
-# sound: at a fast tempo a 32nd of it is only a few waveform cycles, so it reads
-# as a thud/tick rather than a pitch. "cluster" (two semitones) buzzes; "block"
-# is a single mid click.
-_CLICKS = {"cluster": (55, 56), "block": (62,), "low bass": (47,)}
+# sound: at a fast tempo a 32nd of it is only a few cycles, so it reads as a
+# thud/tick. "hi-hat" is E7 (100) — the HIGHEST note: a brief high tick/ting.
+# "cluster" (two semitones) buzzes; "block" is a single mid click.
+_CLICKS = {"cluster": (55, 56), "block": (62,), "low bass": (47,), "hi-hat": (100,)}
 _CHANNEL_NAMES = ("Pulse 1", "Pulse 2", "Triangle")
 
 # MCS's tick lands between ~33.5 ms (byte0 0x77) and ~105 ms (0x92); at 60 Hz
