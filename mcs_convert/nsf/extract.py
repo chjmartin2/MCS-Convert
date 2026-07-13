@@ -244,18 +244,26 @@ def fpt_for_byte0(byte0: int, play_hz: float) -> float:
 _MCS_TEMPOS = tuple(0x77 + 3 * s for s in range(10))
 
 
+def _off_beat(pts, unit: int, n: int) -> float:
+    """Average distance (in ticks, 0..0.5) of the onsets from an exact tick when
+    the base unit maps to n ticks. Anchored to the first onset so a whole-song
+    PHASE offset (a tune that starts a frame or two in) isn't counted as error —
+    only genuine off-grid notes are."""
+    o0 = pts[0]
+    return sum(abs((o - o0) * n / unit - round((o - o0) * n / unit))
+               for o in pts) / len(pts)
+
+
 def optimize_grid(onsets: List[int], play_hz: float):
     """Exhaustively search (MCS tempo × ticks-per-base-unit) for the grid that
     lands the MOST onsets exactly on ticks, then take the tempo that needs the
     SMALLEST playback-speed nudge to make those beats land dead-on.
 
-    The trick (what the user asked for): quantizing at the beat-aligned grid
-    fpt = unit/N puts every unit-multiple on an exact tick — but MCS only has ten
-    discrete tempos, so the grid's natural speed sits between two of them. We pick
-    the closest tempo and accept the tiny (<~5%) speed offset — a slight,
-    inaudible adjustment of the whole tune's rate in exchange for exact beats,
-    instead of smearing every note a fraction of a tick off. Returns
-    (fpt, byte0, off_beat_fraction, speed_pct)."""
+    Quantizing at the beat-aligned grid fpt = unit/N puts every unit-multiple on
+    an exact tick — but MCS only has ten discrete tempos, so the grid's natural
+    speed sits between two. We pick the closest and accept the tiny speed offset —
+    a slight, inaudible whole-tune rate change in exchange for exact beats.
+    Returns (fpt, byte0, off_beat, speed_pct)."""
     pts = sorted(set(onsets))
     if len(pts) < 2:
         fpt, byte0 = fit_grid(pts, play_hz)
@@ -266,8 +274,7 @@ def optimize_grid(onsets: List[int], play_hz: float):
         fpt = unit / n
         if not (_MIN_TICK_FRAMES <= fpt <= _MAX_TICK_FRAMES):
             continue
-        # how far each onset sits from an exact tick on this grid (0..0.5 ticks)
-        err = sum(abs(o * n / unit - round(o * n / unit)) for o in pts) / len(pts)
+        err = _off_beat(pts, unit, n)
         clean = 0.0 if n in (1, 2, 4) else 0.10   # odd N muddies note-values
         for b in _MCS_TEMPOS:
             speed = abs(fpt_for_byte0(b, play_hz) / fpt - 1.0)   # rate nudge
@@ -276,6 +283,24 @@ def optimize_grid(onsets: List[int], play_hz: float):
                 best = (score, fpt, b, err, speed)
     _, fpt, byte0, err, speed = best
     return fpt, byte0, err, speed
+
+
+def align_to_tempo(onsets: List[int], play_hz: float, target_byte0: int):
+    """Grid that plays at a CHOSEN MCS tempo while staying near the real NES
+    speed — the base note is given as many ticks as fit that tempo (a faster
+    tempo => more ticks per note => a finer grid that pins syncopations tighter),
+    then quantized beat-aligned. `speed_pct` is how far the result drifts from the
+    true NES rate. Returns (fpt, target_byte0, off_beat, speed_pct)."""
+    pts = sorted(set(onsets))
+    if len(pts) < 2:
+        return fpt_for_byte0(target_byte0, play_hz), target_byte0, 0.0, 0.0
+    unit = detect_base_unit(pts)
+    fpt_target = fpt_for_byte0(target_byte0, play_hz)
+    n = max(1, round(unit / fpt_target))          # ticks/note to hold NES speed
+    fpt = unit / n                                # beat-aligned grid for this N
+    err = _off_beat(pts, unit, n)
+    speed = abs(n * fpt_target / unit - 1.0)      # drift from true NES speed
+    return fpt, target_byte0, err, speed
 
 
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
@@ -340,13 +365,27 @@ def optimize_song(song: Song):
     optimize_grid), reusing the stashed frame log (no re-emulation). Returns
     (new_song, tempo_byte0, off_beat_error, speed_pct); the song unchanged with
     (0x80, 0, 0) if it wasn't NSF-imported."""
+    return _requantize(song, optimize_grid)
+
+
+def optimize_song_at(song: Song, target_byte0: int):
+    """Re-quantize an NSF-imported Song to a CHOSEN MCS tempo (align_to_tempo),
+    keeping close to real NES speed. Returns (new_song, tempo_byte0,
+    off_beat_error, speed_pct)."""
+    return _requantize(song, lambda o, hz: align_to_tempo(o, hz, target_byte0))
+
+
+def _requantize(song: Song, grid_fn):
+    """Shared body for optimize_song / optimize_song_at: run `grid_fn(pitched
+    onsets, play_hz) -> (fpt, byte0, err, speed)` and re-quantize from the stashed
+    frame log (no re-emulation)."""
     frames = getattr(song, "nsf_frames", None)
     if not frames:
         return song, 0x80, 0.0, 0.0
     header, log, subsong, percussion, drum_sound = frames
     runs = [segment_frames(ch) for ch in log.pitched]
     onsets = [n.start_tick for ch in runs for n in ch]   # pitched only (see fit)
-    fpt, byte0, err, speed = optimize_grid(onsets, header.play_rate_hz)
+    fpt, byte0, err, speed = grid_fn(onsets, header.play_rate_hz)
     new, byte0 = frames_to_song(header, log, subsong, percussion, drum_sound,
                                 grid=(fpt, byte0))
     return new, byte0, err, speed

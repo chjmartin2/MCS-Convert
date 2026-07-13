@@ -749,7 +749,7 @@ class ImportPreview(tk.Toplevel):
         # it); or force one. Shorter measures = more per-measure buffer = fewer
         # drops, at the cost of more barlines.
         tk.Label(bar, text="Meter", bg=_BG, fg=_ACCENT).pack(side="left", padx=(12, 4))
-        self._meters = {"Auto": None, "2/4": 16, "3/4": 24, "4/4": 32}
+        self._meters = {"Auto": None, "2/4": 16, "3/4": 24, "4/4": 32, "6/8": 48}
         self.meter = tk.StringVar(value="Auto")
         meter_box = ttk.Combobox(bar, textvariable=self.meter, width=5,
                                  state="readonly", values=list(self._meters))
@@ -763,8 +763,11 @@ class ImportPreview(tk.Toplevel):
         tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
             side="left", padx=(4, 0))
 
-        # Exhaustive Optimize: re-fit the grid (every tempo × ticks-per-unit) for
-        # the tightest beat alignment, nudging the speed by the minimal amount.
+        # Two re-fit buttons. Exhaustive Optimize searches every tempo × ticks-
+        # per-unit for the globally tightest alignment. Optimize with Current
+        # Settings re-sequences to the BPM you picked — a faster BPM gives the
+        # base note more ticks (finer grid, tighter syncopation) and nudges the
+        # speed the minimal amount to stay near the real NES rate.
         optbar = tk.Frame(self, bg=_BG)
         optbar.grid(row=base + 2, column=0, columnspan=9, sticky="w",
                     padx=10, pady=(2, 2))
@@ -772,6 +775,8 @@ class ImportPreview(tk.Toplevel):
         if self.is_nsf:
             tk.Button(optbar, text="⌖ Exhaustive Optimize",
                       command=self._optimize).pack(side="left")
+            tk.Button(optbar, text="⌖ Optimize with Current Settings",
+                      command=self._optimize_current).pack(side="left", padx=(4, 0))
             self.opt_label.pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(self, bg=_BG)
@@ -866,11 +871,27 @@ class ImportPreview(tk.Toplevel):
         self.app.player.stop()
         from ..nsf.extract import optimize_song
         self.song, self._byte0, off, speed = optimize_song(self.song)
+        self._show_optimized(off, speed)
+
+    def _optimize_current(self) -> None:
+        """Re-sequence the NSF to the BPM currently picked in the dial: the base
+        note takes as many ticks as fit that tempo (faster = finer grid), and the
+        speed is nudged the minimal amount to stay near the real NES rate. The
+        meter you've chosen still applies at encode time."""
+        if not self.is_nsf:
+            return
+        self.app.player.stop()
+        from ..nsf.extract import optimize_song_at
+        self.song, self._byte0, off, speed = optimize_song_at(
+            self.song, self._tempo_byte0())
+        self._show_optimized(off, speed)
+
+    def _show_optimized(self, off: float, speed: float) -> None:
         if self._byte0 in self._tempos:
             self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
         self.opt_label.configure(
-            text=f"aligned · {off:.2f} avg off-beat · {speed * 100:.0f}% speed nudge",
-            fg=_ACCENT)
+            text=f"{off:.2f} avg off-beat · {speed * 100:.0f}% from NES speed",
+            fg=("#e0a030" if off > 0.1 else _ACCENT))
         self._update_stats()
         self._update_size()
 
