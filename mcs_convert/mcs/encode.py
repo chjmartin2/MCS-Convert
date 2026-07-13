@@ -139,16 +139,14 @@ def _staff_slots(events: List[Tuple[int, int, int]], total: int, bar: int,
 # The real per-measure limit is HORIZONTAL POSITIONS, not entries. MCS plays 96+
 # entries/measure fine — chords stack vertically on one x-slot for free (proven
 # by test files) — so there is NO 32-entry buffer cap. What's finite is the
-# x-slot: a 5-bit field, x 0..31. The editor renders ~24 positions across a bar
-# cleanly (the 80-song corpus never exceeds 23), so 24 is the default range
-# (x 2..25, keeping clear of the barline/clef at x 0..1). "force 32" opens the
-# full field (x 0..31) — all 32 play, though MCS draws them cramped and the
-# barline-region slots x 0..1 render loosely.
+# x-slot: a 5-bit field, x 0..31. The editor renders 24 positions across a bar
+# cleanly (the 80-song corpus never exceeds 23), and packing more crowds the
+# barlines (notes drawn on the measure marks), so 24 is the limit: onsets sit at
+# x 2..25, clear of the barline/clef region (x 0..1) on the left.
 # (x_base, x_placement_end, x_cap): where the first note sits, how wide onsets
 # spread proportionally, and the position ceiling when capping an import.
-_POS_DEFAULT = (2, 25, 25)           # 24 clean positions
-_POS_FORCE32 = (0, 31, 31)           # the full 5-bit field, 32 positions
-_X_FIELD_MAX = 31                    # the x-slot is 5 bits; this is the hard wall
+_POS_DEFAULT = (2, 25, 25)           # 24 positions, clear of the barlines
+_X_FIELD_MAX = 30                    # bump ceiling for the lossless (uncapped) path
 
 
 def _tick_to_x(tick: int, bar_ticks: int, x_base: int, x_end: int) -> int:
@@ -324,7 +322,7 @@ def _staff_for(events, total, bar_ticks, treble, cap, v_base=None,
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 split: int = 67, cap: bool = False,
                 fit_meter: bool = False, balance: bool = False,
-                voices: int = 6, force32: bool = False) -> bytes:
+                voices: int = 6) -> bytes:
     """Song (32nd-note ticks) -> .MCS bytes on a two-staff grand staff — the
     layout real MCS renders (a top and a bottom staff). Both staves' clefs are
     free, so they need not be treble-over-bass.
@@ -338,20 +336,16 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     line (PC-speaker 1-voice), 3 suits a Tandy/PCjr (3 tones), 4 the PC-speaker
     4-voice multiplex. Our chiptune sources are already <=3 voices.
 
-    A measure holds a fixed number of horizontal POSITIONS (onsets), not entries —
-    chords stack on one slot for free. `force32=False` uses the clean 24 the
-    editor renders comfortably; `force32=True` opens the full 32 the x-slot field
-    allows (plays, but MCS draws it cramped). `cap=True` drops onsets past that
-    edge; `fit_meter=True` picks the meter that keeps the most notes."""
-    x_range = _POS_FORCE32 if force32 else _POS_DEFAULT
+    A measure holds a fixed 24 horizontal POSITIONS (onsets), not a fixed entry
+    count — chords stack on one slot for free. `cap=True` drops onsets past the
+    24th; `fit_meter=True` picks the meter that keeps the most notes."""
     if fit_meter:
         # Phase 1: prefer a LOSSLESS natural pitch-split (each voice in its own
         # register, no cross-staff reshuffling) at the longest meter that fits.
         # A sparse song (a Zelda theme) lands here — 2/4 pitch-split, untouched.
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=False, voices=voices,
-                               force32=force32)
+                               split=split, cap=cap, balance=False, voices=voices)
             if encode_song.last_dropped == 0:
                 return data
         # Phase 2: nothing fits naturally (a dense song like Dr. Wily) — allow
@@ -359,19 +353,30 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=balance, voices=voices,
-                               force32=force32)
+                               split=split, cap=cap, balance=balance, voices=voices)
             dropped = encode_song.last_dropped
             if best is None or dropped < best[1]:
                 best = (data, dropped)
         return best[0]                           # fewest-drop (2/4 balanced)
 
-    # All sounding events (percussion excluded — no home on a pitched staff).
+    # Pitched voices (percussion handled separately below).
     events = [(s, d, m) for tr in song.tracks
               for s, d, m in _note_events([n for n in tr.notes if not n.percussive])
               if d > 0]
     if voices <= 1:
         events = _monophonic(events)
+    elif voices == 4:
+        # The 4-voice (PC-speaker) target spends its 4th voice on percussion: ONE
+        # drum click per hit tick (never the 2-note cluster — a single channel). A
+        # click on a tick a melody note already occupies joins that slot for free;
+        # a new-tick hit spends one of the 24 positions. Tandy (3 voices) has no
+        # spare tone for it, and the lossless default (6) leaves percussion out.
+        hits: Dict[int, int] = {}
+        for tr in song.tracks:
+            for n in tr.notes:
+                if n.percussive and not n.is_rest:
+                    hits.setdefault(n.start_tick, n.midi_note)
+        events += [(t, 1, m) for t, m in hits.items()]
     total = max((s + d for s, d, m in events), default=0)
     total = ((total + bar_ticks - 1) // bar_ticks) * bar_ticks
     scroll = bytes([tempo_byte0, 0x86, 0x86, 0x77, 0x77])
@@ -381,11 +386,9 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         # Staff A is the TOP staff (v-positions 1..20), staff B the BOTTOM
         # (21..41) — independent of clef, so two bass staves stack as two staves,
         # not one heap. Returns (staves, dropped-slot count).
-        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1,
-                         x_range=x_range)
+        top = _staff_for(a_ev, total, bar_ticks, a_treble, cap, v_base=1)
         d = _emit_staff.last_dropped
-        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21,
-                            x_range=x_range)
+        bottom = _staff_for(b_ev, total, bar_ticks, b_treble, cap, v_base=21)
         return [top, bottom], d + _emit_staff.last_dropped
 
     if voices <= 1:                              # single melodic line -> one staff

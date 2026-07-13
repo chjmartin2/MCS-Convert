@@ -39,23 +39,38 @@ def test_simple_melody_roundtrips(tmp_path):
     assert _sounding(got) == sorted(src)
 
 
-def test_percussion_never_reaches_the_pitched_staff(tmp_path):
-    # A dense percussion track (noise/DPCM drum hits) must NOT be written onto the
-    # grand staff. It used to land as low bass notes and flood the 32-entry
-    # measure buffer, dropping real melody/bass (Dr. Wily lost ~40% of its notes).
+def _drum_song():
     song = Song(title="drums")
     mel = Track(name="Treble")
     for i in range(8):
         mel.add(NoteEvent(start_tick=i * 4, duration_ticks=4, midi_note=72 + i % 4))
     song.add_track(mel)
     drums = Track(name="Noise")
-    for i in range(200):                              # a hit on every tick
-        drums.add(NoteEvent(start_tick=i, duration_ticks=1, midi_note=55,
+    for i in range(8):                                # a click between the beats
+        drums.add(NoteEvent(start_tick=i * 4 + 2, duration_ticks=1, midi_note=62,
                             percussive=True))
     song.add_track(drums)
-    got = _roundtrip(song, tmp_path, cap=True)
-    # every melody note survives; no drum pitch (55 = G3) contaminates the staff
-    assert _sounding(got) == sorted(_note_events(mel.notes))
+    return song, mel
+
+
+def test_percussion_excluded_below_four_voices(tmp_path):
+    # Tandy (3) / mono (1) / the lossless default have no spare voice, so drum
+    # clicks stay off the staff — only the melody is written.
+    song, mel = _drum_song()
+    for v in (1, 3):
+        got = _roundtrip(song, tmp_path, cap=True, voices=v)
+        assert not any(m == 62 for _, _, m in _sounding(got)), f"voices={v}"
+
+
+def test_percussion_appears_in_four_voice_mode(tmp_path):
+    # The 4-voice target spends its 4th voice on the drum clicks (single note).
+    song, mel = _drum_song()
+    got = _roundtrip(song, tmp_path, cap=True, voices=4)
+    drums = [(s, d, m) for s, d, m in _sounding(got) if m == 62]
+    assert len(drums) == 8                            # all eight clicks present
+    # the melody is untouched
+    assert all(any(s == ms and m == mm for s, d, m in _sounding(got))
+               for ms, md, mm in _note_events(mel.notes))
 
 
 def test_fit_meter_keeps_more_notes_on_dense_input(tmp_path):
@@ -159,18 +174,17 @@ def test_multi_staff_header_sizes_are_consistent():
     assert s2 == body - s1 - 8                         # the two 4-byte end separators
 
 
-def test_position_cap_is_24_by_default_and_32_when_forced():
-    # A single measure of 32 distinct 32nd-note onsets: the default caps to 24
-    # horizontal positions, force32 keeps all 32. (Entries were never the limit.)
+def test_position_cap_is_24():
+    # A single measure of 32 distinct 32nd-note onsets caps to 24 horizontal
+    # positions (what MCS renders cleanly, clear of the barlines). Entries were
+    # never the limit; positions (the 5-bit x-slot) are.
     from mcs_convert.mcs.reader import (parse_records, split_staves, x_slot,
                                         symbol, _note_value)
     song = _mk([(i, 1, 72 + i % 7) for i in range(32)])   # 32 onsets in one 4/4 bar
-    for force, want in ((False, 24), (True, 32)):
-        data = encode_song(song, cap=True, force32=force)
-        pos = max(len({x_slot(b1) for b0, b1 in r.entries
-                       if _note_value(symbol(b0))[0]})
-                  for st in split_staves(parse_records(data)) for r in st[1:])
-        assert pos == want
+    data = encode_song(song, cap=True)
+    pos = max(len({x_slot(b1) for b0, b1 in r.entries if _note_value(symbol(b0))[0]})
+              for st in split_staves(parse_records(data)) for r in st[1:])
+    assert pos == 24
 
 
 def _count(song):

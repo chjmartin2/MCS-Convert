@@ -696,7 +696,7 @@ class ImportPreview(tk.Toplevel):
                            selectcolor="#2a2e3a").pack(side="left", padx=(10, 0))
         tk.Label(perc, text="sound", bg=_BG, fg=_ACCENT).pack(side="left",
                                                               padx=(18, 4))
-        self.drum = tk.StringVar(value="cluster")
+        self.drum = tk.StringVar(value="wood block")
         snd = ttk.Combobox(perc, textvariable=self.drum, width=10,
                            state="readonly", values=("cluster", "wood block"))
         snd.pack(side="left")
@@ -755,14 +755,6 @@ class ImportPreview(tk.Toplevel):
                                  state="readonly", values=list(self._meters))
         meter_box.pack(side="left")
         meter_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
-        # A measure normally holds 24 note-positions (what MCS renders cleanly).
-        # Force 32 opens the full x-slot field (32/measure) for very dense music —
-        # it plays, but MCS draws it cramped. Off by default.
-        self.force32 = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="Force 32 positions/measure", variable=self.force32,
-                       command=self._update_size, bg=_BG, fg=_FG,
-                       activebackground=_BG, activeforeground=_FG,
-                       selectcolor="#2a2e3a").pack(side="left", padx=(12, 0))
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
             [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
         if self.is_nsf:
@@ -956,8 +948,7 @@ class ImportPreview(tk.Toplevel):
         return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0(),
                            cap=True, fit_meter=bar_ticks is None,
                            bar_ticks=bar_ticks or 32, balance=True,
-                           voices=self._out_modes[self.out_mode.get()],
-                           force32=self.force32.get())
+                           voices=self._out_modes[self.out_mode.get()])
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:
@@ -978,8 +969,7 @@ class ImportPreview(tk.Toplevel):
         try:
             data = encode_song(sel, tempo_byte0=self._tempo_byte0(), cap=True,
                                fit_meter=bar_ticks is None, bar_ticks=bar_ticks or 32,
-                               balance=True, voices=self._out_modes[mode],
-                               force32=self.force32.get())
+                               balance=True, voices=self._out_modes[mode])
             sel = parse_bytes(data)
         except Exception:
             pass                        # fall back to the raw selection on any
