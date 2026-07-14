@@ -115,10 +115,11 @@ _NOISE_VIZ_P = 3
 
 
 def _viz_period(freq: float) -> int:
-    """On-screen half-period (pixels) for a tone of `freq`: proportional to the
-    SN76489 divider, so pitch maps to wave tightness. Clamped to a drawable range."""
+    """On-screen square half-period in COLUMNS (each column = 2 screen pixels) for
+    a tone of `freq`: proportional to the SN76489 divider, so pitch maps to wave
+    tightness. Clamped to a drawable range."""
     n = max(1, min(1023, round(_SN_HZ / (32.0 * freq))))
-    return max(2, min(100, n >> 4))
+    return max(1, min(50, n >> 5))
 
 
 def _tandy_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, int]]]:
@@ -238,113 +239,129 @@ class _Asm:
         return bytes(self.buf)
 
 
-# Scope layout: 5 stacked 40px bands (ch0..3 + master). Per band, dots sit on a
-# HI row and a LO row (the square) or the CENTRE row (silent). Offsets are y*320
-# (mode-13h stride), baked as constants. Colours: green/cyan/yellow/magenta/white.
-_BANDS = [(1920, 10880, 6400, 10),      # ch0: hi=6 lo=34 cen=20
-          (14720, 23680, 19200, 11),    # ch1: 46/74/60
-          (27520, 36480, 32000, 14),    # ch2: 86/114/100
-          (40320, 49280, 44800, 13)]    # ch3 (noise): 126/154/140
-_MASTER_CEN_Y = 180
-_MASTER_COLOR = 15
+# Scope layout: four small 25px bands (ch0..2 tone + ch3 noise) then a tall 80px
+# master. Drawing is DIRECT into the Tandy mode-9 packed/banked back buffer at
+# BYTE granularity: each sample is one byte = two horizontal pixels, both nibbles
+# the same colour (packed), so a plot is a single store (no read-modify-write)
+# and a "column" is 0..159. rowaddr[y] (baked table) gives a scanline's byte
+# offset (bank y&3 at (y>>2)*160). Colours: green/cyan/yellow/magenta, white.
+_SCROLL_SPEED = 2               # columns the waves scroll per frame
+_NOISE_SEED = 0xACE1
+_BAND_H = 25
+_CH = []
+for _ch in range(4):
+    _top = _ch * _BAND_H
+    _c = (10, 11, 14, 13)[_ch]
+    _CH.append((_top + 4, _top + 20, _top + 12, _c | (_c << 4)))  # hi_y, lo_y, cen_y, packed
+_NOISE_BASE = 3 * _BAND_H + 4   # 79: low edge of the noise band's random range
+_MASTER_CEN_Y = 140
+_MASTER_K = 10                  # master amplitude: y = 140 - (sum of 3 tones)*10
+_ROWADDR = [(y & 3) * 0x2000 + (y >> 2) * 160 for y in range(200)]
+
+
+def _w(v: int) -> bytes:
+    return struct.pack("<H", v)
+
+
+def _emit_ploty(a: "_Asm") -> None:
+    """Plot one packed sample: byte at rowaddr[CX] + BX = DL. (CX=y, DL=packed
+    colour, BX=column 0..159, ES=back buffer.) Clobbers SI, DI only."""
+    a.label("ploty")
+    a.db(0x89, 0xCE).db(0x01, 0xF6)                     # mov si,cx; add si,si (y*2)
+    a.db(0x8B, 0xBC).abs16("rowaddr")                   # mov di,[rowaddr+si]
+    a.db(0x01, 0xDF).db(0x26, 0x88, 0x15)               # add di,bx; mov es:[di],dl
+    a.db(0xC3)                                          # ret
 
 
 def _emit_channel_draw(a: "_Asm", ch: int) -> None:
-    """One channel's per-pixel work inside the x-loop (x in BX): plot a dot at
-    its HI/LO/CENTRE row, add ±1 to the master sum, and advance its counter."""
-    hi, lo, cen, col = _BANDS[ch]
+    """One tone channel per column (BX): plot its HI/LO/CENTRE sample, add ±1 to
+    the master sum, advance its scroll counter, and at a flip draw the vertical
+    edge HI..LO so the square is solid."""
+    hi, lo, cen, packed = _CH[ch]
+    a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
     a.db(0x75).rel8(f"c{ch}_snd")                       # jne snd
-    a.db(0xBF).bytes(struct.pack("<H", cen)).db(0x01, 0xDF)  # mov di,cen; add di,bx
-    a.db(0x26, 0xC6, 0x05, col)                         # mov es:[di],col
+    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen_y; call ploty
     a.db(0xEB).rel8(f"c{ch}_d")                         # jmp done
     a.label(f"c{ch}_snd")
     a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
     a.db(0x74).rel8(f"c{ch}_lo")                        # je lo
-    a.db(0xBF).bytes(struct.pack("<H", hi))             # mov di,hi
-    a.db(0xFE, 0x0E).abs16("msum")                      # dec byte[msum]
+    a.db(0xB9).bytes(_w(hi)).db(0xFE, 0x0E).abs16("msum")   # mov cx,hi_y; dec byte[msum]
     a.db(0xEB).rel8(f"c{ch}_pl")                        # jmp pl
     a.label(f"c{ch}_lo")
-    a.db(0xBF).bytes(struct.pack("<H", lo))             # mov di,lo
-    a.db(0xFE, 0x06).abs16("msum")                      # inc byte[msum]
+    a.db(0xB9).bytes(_w(lo)).db(0xFE, 0x06).abs16("msum")   # mov cx,lo_y; inc byte[msum]
     a.label(f"c{ch}_pl")
-    a.db(0x01, 0xDF).db(0x26, 0xC6, 0x05, col)          # add di,bx; mov es:[di],col
+    a.db(0xE8).rel16("ploty")                           # call ploty
     a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
     a.db(0x75).rel8(f"c{ch}_d")                         # jnz done
     a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1 (flip)
     a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)   # mov al,[viz+ch];mov[cnt+ch],al
-    # a transition: draw the vertical edge HI..LO so the square is solid, not dashes
-    a.db(0xBF).bytes(struct.pack("<H", hi)).db(0x01, 0xDF)  # mov di,hi; add di,bx
-    a.db(0xB9).bytes(struct.pack("<H", (lo - hi) // 320 + 1))   # mov cx, rows(hi..lo)
+    a.db(0xB9).bytes(_w(hi))                            # mov cx,hi_y (vertical edge start)
     a.label(f"c{ch}_v")
-    a.db(0x26, 0xC6, 0x05, col)                         # mov es:[di],col
-    a.db(0x81, 0xC7).bytes(struct.pack("<H", 320))      # add di,320
-    a.db(0xE2).rel8(f"c{ch}_v")                         # loop c{ch}_v
+    a.db(0xE8).rel16("ploty")                           # call ploty
+    a.db(0x41).db(0x81, 0xF9).bytes(_w(lo + 1))         # inc cx; cmp cx,lo_y+1
+    a.db(0x72).rel8(f"c{ch}_v")                         # jb c{ch}_v
     a.label(f"c{ch}_d")
 
 
-_SCROLL_SPEED = 3               # pixels the waves scroll left per frame
-_NOISE_SEED = 0xACE1
-
-
 def _emit_noise_draw(a: "_Asm") -> None:
-    """Channel 3 is NOISE, not a tone: draw a random dot per column (an evolving
-    LFSR/LCG seed makes it shimmer frame to frame) so it reads as static, not a
-    clean square. Silent -> a flat centre line."""
-    _, _, cen, col = _BANDS[3]
+    """Channel 3 is NOISE: draw THREE random dots per column from an evolving LCG
+    seed (shimmers frame to frame) so it reads as static, not a clean square.
+    Silent -> a flat centre line."""
+    _, _, cen, packed = _CH[3]
+    a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
     a.db(0x75).rel8("n_act")                            # jne active
-    a.db(0xBF).bytes(struct.pack("<H", cen)).db(0x01, 0xDF)  # mov di,cen; add di,bx
-    a.db(0x26, 0xC6, 0x05, col)                         # mov es:[di],col
+    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen_y; call ploty
     a.db(0xEB).rel8("n_done")                           # jmp done
     a.label("n_act")
-    a.db(0xA1).abs16("seed")                            # mov ax,[seed]
-    a.db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)               # mov cx,25173; mul cx (LCG)
-    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")       # add ax,13849; mov [seed],ax
-    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x1F).db(0x30, 0xED)   # mov cl,ah; and cl,0x1F; xor ch,ch
-    a.db(0x83, 0xC1, 0x7C)                              # add cx,124  (band 3: y 124..155)
-    a.db(0xB8, 0x40, 0x01).db(0xF7, 0xE1)               # mov ax,320; mul cx
-    a.db(0x01, 0xD8).db(0x89, 0xC7)                     # add ax,bx; mov di,ax
-    a.db(0x26, 0xC6, 0x05, col)                         # mov es:[di],col
+    for _k in range(3):                                 # three random dots
+        a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # mov ax,[seed];mov cx,25173;mul cx
+        a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")   # add ax,13849; mov [seed],ax
+        a.db(0x88, 0xE1).db(0x80, 0xE1, 0x0F).db(0x30, 0xED)   # mov cl,ah; and cl,0x0F; xor ch,ch
+        a.db(0x81, 0xC1).bytes(_w(_NOISE_BASE))         # add cx, noise base  (y 79..94)
+        a.db(0xE8).rel16("ploty")                       # call ploty
     a.label("n_done")
 
 
+def _emit_master_draw(a: "_Asm") -> None:
+    """Master: y = 140 - (sum of the 3 tone levels)*10, connected to the previous
+    column's y by a vertical line so it's a continuous trace."""
+    a.db(0xB2, 0xFF)                                    # mov dl, white (0xFF)
+    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
+    a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,K; imul cx (ax=msum*K)
+    a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,140; sub cx,ax (cx=y)
+    a.db(0xA1).abs16("prev_my").db(0x89, 0x0E).abs16("prev_my")  # mov ax,[prev_my];mov[prev_my],cx
+    a.db(0x39, 0xC8)                                    # cmp ax,cx
+    a.db(0x76).rel8("m_ord")                            # jbe m_ord
+    a.db(0x91)                                          # xchg ax,cx (ax=top, cx=bottom)
+    a.label("m_ord")
+    a.label("m_vloop")
+    a.db(0x51).db(0x89, 0xC1).db(0xE8).rel16("ploty").db(0x59)  # push cx; mov cx,ax; call ploty; pop cx
+    a.db(0x40).db(0x39, 0xC8)                           # inc ax; cmp ax,cx
+    a.db(0x76).rel8("m_vloop")                          # jbe m_vloop (ax<=bottom)
+
+
 def _emit_blit(a: "_Asm") -> None:
-    """Pack the linear back buffer (1 byte/pixel) into the Tandy 320x200x16
-    (BIOS mode 9) frame buffer at B800: 4 bits/pixel, 2 pixels/byte, scanlines
-    4-way interleaved (line y in bank y&3 at (y>>2)*160)."""
+    """Copy the packed back buffer straight to the Tandy screen at B800 (both are
+    already in mode-9 format, so it's a plain word copy — no packing)."""
     a.label("blit")
     a.db(0x1E)                                          # push ds
-    a.db(0xA1).abs16("bufseg").db(0x8E, 0xD8)           # mov ax,[bufseg]; mov ds,ax (linear src)
-    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)               # mov ax,0xB800; mov es,ax (Tandy dest)
-    a.db(0x31, 0xED)                                    # xor bp,bp  (y = 0)
-    a.label("blit_row")
-    a.db(0x89, 0xE8).db(0x83, 0xE0, 0x03)               # mov ax,bp; and ax,3 (bank)
-    a.db(0x89, 0xC3).db(0xD1, 0xE3)                     # mov bx,ax; shl bx,1
-    a.db(0x2E, 0x8B, 0xBF).abs16("banktab")             # mov di, cs:[banktab+bx]
-    a.db(0x89, 0xE8).db(0xD1, 0xE8).db(0xD1, 0xE8)      # mov ax,bp; shr ax,1; shr ax,1 (y>>2)
-    a.db(0xBB, 0xA0, 0x00).db(0xF7, 0xE3).db(0x01, 0xC7)   # mov bx,160; mul bx; add di,ax
-    a.db(0x89, 0xE8).db(0xBB, 0x40, 0x01).db(0xF7, 0xE3).db(0x89, 0xC6)  # mov ax,bp;mov bx,320;mul bx;mov si,ax
-    a.db(0xB9, 0xA0, 0x00)                              # mov cx,160 (bytes/row)
-    a.label("blit_px")
-    a.db(0xAC)                                          # lodsb (left pixel)
-    a.db(0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0)   # add al,al x4  (left << 4)
-    a.db(0x88, 0xC4).db(0xAC).db(0x24, 0x0F).db(0x08, 0xE0)  # mov ah,al;lodsb;and al,0x0F;or al,ah
-    a.db(0xAA)                                          # stosb (2 packed pixels)
-    a.db(0xE2).rel8("blit_px")                          # loop blit_px
-    a.db(0x45).db(0x81, 0xFD, 0xC8, 0x00)               # inc bp; cmp bp,200
-    a.db(0x72).rel8("blit_row")                         # jb blit_row
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xD8)           # mov ax,[bufseg]; mov ds,ax
+    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)               # mov ax,0xB800; mov es,ax
+    a.db(0x31, 0xF6).db(0x31, 0xFF)                     # xor si,si; xor di,di
+    a.db(0xB9).bytes(_w(16384)).db(0xF3, 0xA5)          # mov cx,16384; rep movsw (all 4 banks, 32 KB)
     a.db(0x1F).db(0xC3)                                 # pop ds; ret
 
 
 def _emit_drawframe(a: "_Asm") -> None:
-    """Redraw all five scopes into the linear back buffer. Tone channels are
-    solid square waves that scroll; channel 3 is noise; the master is the summed
-    trace. (The blit routine packs this into Tandy mode-9 format.)"""
+    """Redraw all five scopes straight into the packed back buffer, per column
+    (0..159). Tone channels scroll as solid squares; ch3 is noise; the master is
+    the summed trace."""
     a.label("drawframe")
-    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # mov ax,[bufseg]; mov es,ax (back buffer)
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # mov ax,[bufseg]; mov es,ax
     a.db(0x31, 0xFF).db(0x31, 0xC0)                     # xor di,di; xor ax,ax
-    a.db(0xB9).bytes(struct.pack("<H", 32000)).db(0xF3, 0xAB)   # mov cx,32000; rep stosw
+    a.db(0xB9).bytes(_w(16384)).db(0xF3, 0xAB)          # mov cx,16384; rep stosw (clear all 4 banks)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # add word[scroll], speed
     for ch in range(3):                                 # phase each tone channel by scroll
         a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)      # mov al,[viz+ch]; or al,al
@@ -354,34 +371,15 @@ def _emit_drawframe(a: "_Asm") -> None:
         a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)   # xor dx,dx;mov ax,[scroll];div bx
         a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)      # and al,1; mov [lev+ch],al (quotient&1)
         a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)  # mov ax,bx;sub ax,dx;mov[cnt+ch],al (P-rem)
-    a.db(0xC7, 0x06).abs16("prev_my").bytes(struct.pack("<H", _MASTER_CEN_Y))  # prev_my=180
-    a.db(0x31, 0xDB)                                    # xor bx,bx  (x = 0)
+    a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=140
+    a.db(0x31, 0xDB)                                    # xor bx,bx  (column = 0)
     a.label("xloop")
     a.db(0xC6, 0x06).abs16("msum").db(0x00)             # mov byte[msum],0
     for ch in range(3):
         _emit_channel_draw(a, ch)
     _emit_noise_draw(a)
-    # master: y = 180 - msum*3, then draw a vertical line from the previous
-    # column's y to this one so the summed trace is a connected line, not dots.
-    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
-    a.db(0xB9, 0x03, 0x00).db(0xF7, 0xE9)               # mov cx,3; imul cx (ax=msum*3)
-    a.db(0xB9).bytes(struct.pack("<H", _MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,180; sub cx,ax (cx=y)
-    a.db(0xA1).abs16("prev_my")                         # mov ax,[prev_my]
-    a.db(0x89, 0x0E).abs16("prev_my")                   # mov [prev_my],cx (save this y)
-    a.db(0x39, 0xC8)                                    # cmp ax,cx
-    a.db(0x76).rel8("m_ord")                            # jbe m_ord
-    a.db(0x91)                                          # xchg ax,cx  (ax=top, cx=bottom)
-    a.label("m_ord")
-    a.db(0x89, 0xCA).db(0x29, 0xC2).db(0x42)            # mov dx,cx; sub dx,ax; inc dx (rows)
-    a.db(0x52)                                          # push dx
-    a.db(0xBA).bytes(struct.pack("<H", 320)).db(0xF7, 0xE2)   # mov dx,320; mul dx (ax=top*320)
-    a.db(0x01, 0xD8).db(0x89, 0xC7)                     # add ax,bx; mov di,ax
-    a.db(0x59)                                          # pop cx (row count)
-    a.label("m_vloop")
-    a.db(0x26, 0xC6, 0x05, _MASTER_COLOR)              # mov es:[di],white
-    a.db(0x81, 0xC7).bytes(struct.pack("<H", 320))      # add di,320
-    a.db(0xE2).rel8("m_vloop")                          # loop m_vloop
-    a.db(0x43).db(0x81, 0xFB).bytes(struct.pack("<H", 320))   # inc bx; cmp bx,320
+    _emit_master_draw(a)
+    a.db(0x43).db(0x81, 0xFB).bytes(_w(160))            # inc bx; cmp bx,160
     a.db(0x73).rel8("xdone").db(0xE9).rel16("xloop")    # jae xdone; jmp xloop
     a.label("xdone")
     a.db(0xC3)                                          # ret
@@ -479,10 +477,11 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # mov al,0x20 ; out 0x20,al (EOI)
     a.db(0x1F, 0x5F, 0x5E, 0x5A, 0x59, 0x58, 0xCF)   # pop ds,di,si,dx,cx,ax ; iret
     if scope:
+        _emit_ploty(a)
         _emit_drawframe(a)
         _emit_blit(a)
-        a.label("banktab")                           # mode-9 scanline bank offsets
-        a.bytes(struct.pack("<4H", 0x0000, 0x2000, 0x4000, 0x6000))
+        a.label("rowaddr")                           # mode-9 byte offset of each scanline
+        a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
