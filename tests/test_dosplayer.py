@@ -119,3 +119,29 @@ def test_build_com_rejects_bad_input():
         D.build_com(_song([]), "tandy", 0x80)        # no notes
     with pytest.raises(ValueError):
         D.build_com(_song([(0, 4, 60)]), "bogus", 0x80)
+    with pytest.raises(ValueError):
+        D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, scope=True)  # scope=tandy only
+
+
+def test_scope_stream_carries_viz_records():
+    # with scope on, each note also emits a (0xF0|ch, half-period) viz pair and a
+    # (0xF0|ch, 0) at note-off; these ride the same stream as the audio writes.
+    by = D._tandy_stream(_song([(0, 4, 67)]), scope=True)
+    on = by[0]
+    assert any(p == D._VIZ_PORT and v > 0 for p, v in on)        # channel-0 period
+    off = by[4 * D._SUBTICKS - 1]
+    assert (D._VIZ_PORT, 0) in off                               # silenced at note-off
+    # without scope there are no 0xF0-0xF3 records
+    plain = D._tandy_stream(_song([(0, 4, 67)]), scope=False)
+    assert not any(0xF0 <= p <= 0xF3 for evs in plain.values() for p, _ in evs)
+
+
+def test_scope_com_sets_and_restores_video_mode():
+    com = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, scope=True)
+    assert com[:5] == b"\xB8\x13\x00\xCD\x10"        # mov ax,0x0013 ; int 0x10
+    assert b"\xB8\x03\x00\xCD\x10" in com            # mov ax,0x0003 ; int 0x10 (restore)
+    assert b"\xB8\x00\xA0\x8E\xC0" in com            # mov ax,0xA000 ; mov es,ax (framebuffer)
+    # a non-scope Tandy build does neither
+    plain = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, scope=False)
+    assert plain[:5] != b"\xB8\x13\x00\xCD\x10"
+    assert b"\xB8\x00\xA0\x8E\xC0" not in plain
