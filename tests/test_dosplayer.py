@@ -35,31 +35,52 @@ def test_pc_speaker_note_encoding():
 
 
 def test_mono_stream_takes_the_top_voice():
-    # two overlapping notes: the higher pitch sounds; when it ends the lower is
-    # exposed, then a rest silences the speaker.
+    # the highest voice (channel 0) plays; events land on SUB-tick keys and each
+    # note is articulated (its off comes a sub-tick before the next onset).
     song = Song(title="t", source="t")
     a, b = Track(name="a"), Track(name="b")
     a.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=60))   # low, long
     b.add(NoteEvent(start_tick=0, duration_ticks=4, midi_note=72))   # high, short
     song.add_track(a)
     song.add_track(b)
-    by_tick = D._mono_stream(song)
-    # tick 0: the high note (72); tick 4: falls back to the low note (60);
-    # after tick 8 (handled as end) nothing new. Speaker is re-gated on each.
-    assert by_tick[0] == D._spk_note_on(D.midi_to_freq(72))
-    assert by_tick[4] == D._spk_note_on(D.midi_to_freq(60))
-    assert set(by_tick) == {0, 4}                    # only change points emit
+    by = D._mono_stream(song)
+    S = D._SUBTICKS
+    assert by[0] == D._spk_note_on(D.midi_to_freq(72))        # top note at sub-tick 0
+    assert by[4 * S - 1] == D._spk_note_off()                 # cut before its end
 
 
 def test_build_stream_records_are_wellformed():
     stream, total = D._build_stream(_song([(0, 4, 60), (4, 4, 64)]), "tandy")
-    assert total == 8
-    # walk the per-tick [count][port,val]* records; they must consume exactly
+    assert total == 8 * D._SUBTICKS                  # sub-tick resolution
+    # walk the per-sub-tick [count][port,val]* records; must consume exactly
     i = pairs_seen = 0
     for _ in range(total):
         cnt = stream[i]; i += 1 + 2 * cnt
         pairs_seen += cnt
     assert i == len(stream) and pairs_seen > 0
+
+
+def test_notes_are_articulated():
+    # a note cut one sub-tick before its nominal end leaves a gap so the next
+    # onset re-attacks (fixes fast repeats blurring into one held tone).
+    by = D._tandy_stream(_song([(0, 2, 60), (2, 2, 60)]))    # same pitch, back to back
+    S = D._SUBTICKS
+    assert 0 in by and by[0][:1]                              # first note attacks at 0
+    assert by[2 * S - 1] == D._tandy_note_off(0)             # cut before the 2nd onset
+    assert 2 * S in by                                        # 2nd note re-attacks
+
+
+def test_percussion_routes_to_noise_channel():
+    # a percussive note goes to SN76489 channel 3 (noise), not the tone voices:
+    # bright pitch -> fast /512 shift (0xE4), dark -> slow /2048 (0xE6).
+    song = Song(title="t", source="t")
+    tr = Track(name="d")
+    tr.add(NoteEvent(start_tick=0, duration_ticks=1, midi_note=100, percussive=True))
+    tr.add(NoteEvent(start_tick=4, duration_ticks=1, midi_note=47, percussive=True))
+    song.add_track(tr)
+    by = D._tandy_stream(song)
+    assert (0xC0, 0xE4) in by[0]                              # E7 hi-hat -> bright
+    assert (0xC0, 0xE6) in by[4 * D._SUBTICKS]               # B2 kick -> dark
 
 
 def test_com_header_and_layout():
@@ -76,16 +97,21 @@ def test_com_header_and_layout():
     assert com[isr_off - 0x100] == 0x50              # isr begins with push ax
 
 
-def test_slow_tempo_uses_a_timer_subdivision():
-    # A slow tempo's tick exceeds one PIT period (>54.9 ms), so the builder fires
-    # the timer at a submultiple. The 'mov byte [subcount], N' immediate is that N.
-    fast = D.build_com(_song([(0, 4, 60)]), "tandy", 0x77)
-    slow = D.build_com(_song([(0, 4, 60)]), "tandy", 0x92)
-    # subcount init immediate follows the 'C6 06 <addr>' store in the ISR
-    def subdiv(com):
-        m = com.index(b"\xC6\x06")
-        return com[m + 4]
-    assert subdiv(fast) == 1 and subdiv(slow) >= 2
+def test_tempo_sets_the_timer_divider():
+    # The tempo byte picks the PIT divider (a slower tempo = a longer sub-tick =
+    # a larger divider). At sub-tick resolution both fit 16 bits, so subdiv is 1.
+    def divider_and_subdiv(byte0):
+        com = D.build_com(_song([(0, 4, 60)]), "tandy", byte0)
+        # 'mov ax, <divider>' (B8 lo hi) is the first B8 after the timer cmd 0x36
+        m = com.index(b"\xB0\x36\xE6\x43") + 4       # past mov al,0x36;out 0x43,al
+        assert com[m] == 0xB8                         # mov ax, imm16
+        div = com[m + 1] | (com[m + 2] << 8)
+        sub = com[com.index(b"\xC6\x06") + 4]         # subcount init immediate
+        return div, sub
+    dfast, sfast = divider_and_subdiv(0x77)
+    dslow, sslow = divider_and_subdiv(0x92)
+    assert dslow > dfast                              # slower tempo, bigger divider
+    assert sfast == 1 and sslow == 1                  # sub-ticks fit one period
 
 
 def test_build_com_rejects_bad_input():

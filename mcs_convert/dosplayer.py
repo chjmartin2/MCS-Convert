@@ -41,10 +41,20 @@ _PIT_HZ = 1193182.0
 _SN_HZ = 3579545.0       # SN76489 reference clock (÷32 per step)
 
 
-# --- register encoders (one drum hit / note -> (port, value) writes) --------
+# A 32nd-tick is split into this many sub-ticks. The engine runs at the sub-tick
+# rate so it can ARTICULATE each note: a note sounds for all but its final
+# sub-tick, leaving a ~1/_SUBTICKS-tick silence before the next onset. Without
+# it the SN76489 (no attack envelope) merges back-to-back notes into one held
+# tone — the "rat-tat-tat" of fast repeats blurs into a drone.
+_SUBTICKS = 4
+_NOISE_CH = 3                    # SN76489 channel 3 = noise
+_DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat noise
+
+
+# --- register encoders (one note/hit -> (port, value) writes) ----------------
 
 def _tandy_note_on(ch: int, freq: float) -> List[Tuple[int, int]]:
-    """SN76489: set channel `ch` (0..2) to `freq` at full volume."""
+    """SN76489: set tone channel `ch` (0..2) to `freq` at full volume."""
     n = max(1, min(1023, round(_SN_HZ / (32.0 * freq))))
     latch = 0x80 | (ch << 5) | (n & 0x0F)          # 1 cc 0 dddd : freq low nibble
     data = (n >> 4) & 0x3F                          # 0 dddddd     : freq high bits
@@ -54,6 +64,19 @@ def _tandy_note_on(ch: int, freq: float) -> List[Tuple[int, int]]:
 
 def _tandy_note_off(ch: int) -> List[Tuple[int, int]]:
     return [(_SN76489, 0x80 | (ch << 5) | 0x10 | 0x0F)]   # attenuation 15 = silent
+
+
+def _tandy_noise_on(bright: bool) -> List[Tuple[int, int]]:
+    """SN76489 noise channel: white noise, bright (hi-hat, fast /512 shift) or
+    dark (kick, slow /2048 shift). Re-latching the control byte retriggers the
+    LFSR, giving each drum a fresh attack."""
+    ctrl = 0xE0 | 0x04 | (0x00 if bright else 0x02)  # 1110 0 1 rr : white, rate
+    return [(_SN76489, ctrl), (_SN76489, 0xF0)]      # + channel-3 attenuation 0
+    #                                                  (0xF0 = 1 11 1 0000)
+
+
+def _tandy_noise_off() -> List[Tuple[int, int]]:
+    return [(_SN76489, 0xFF)]                        # channel-3 attenuation 15
 
 
 def _spk_note_on(freq: float) -> List[Tuple[int, int]]:
@@ -69,49 +92,67 @@ def _spk_note_off() -> List[Tuple[int, int]]:
     return [(_SPEAKER, 0x00)]                        # clear the low 2 bits -> quiet
 
 
-# --- event stream ------------------------------------------------------------
+# --- event stream (all in SUB-ticks) -----------------------------------------
+
+def _split_notes(song: Song):
+    """(per-track pitched events, percussion hits [(start_tick, midi)])."""
+    per_track, perc = [], []
+    for t in song.tracks:
+        per_track.append(_note_events([n for n in t.notes if not n.percussive]))
+        for n in t.notes:
+            if n.percussive and not n.is_rest:
+                perc.append((n.start_tick, n.midi_note))
+    return per_track, perc
+
 
 def _tandy_stream(song: Song) -> Dict[int, List[Tuple[int, int]]]:
-    """Per-tick (port,value) writes for the 3 SN76489 tone voices."""
-    per_track = [_note_events(t.notes) for t in song.tracks]
+    """Per-sub-tick writes: 3 SN76489 tone voices + the noise channel for drums.
+    Every note is articulated (a short cut before the next), so fast repeats
+    rat-tat-tat instead of merging."""
+    per_track, perc = _split_notes(song)
     voices = _allocate_voices(per_track, n=3)
-    by_tick: Dict[int, List[Tuple[int, int]]] = {}
+    by: Dict[int, List[Tuple[int, int]]] = {}
     for ch, voice in enumerate(voices):
-        starts = {e[0] for e in voice}
         for start, dur, midi in voice:
-            by_tick.setdefault(start, []).extend(
-                _tandy_note_on(ch, midi_to_freq(midi)))
-            off = start + dur
-            if off not in starts:                   # a new note here would re-set it
-                by_tick.setdefault(off, []).extend(_tandy_note_off(ch))
-    return by_tick
+            on = start * _SUBTICKS
+            off = on + max(1, dur * _SUBTICKS - 1)  # cut 1 sub-tick early
+            by.setdefault(on, []).extend(_tandy_note_on(ch, midi_to_freq(midi)))
+            by.setdefault(off, []).extend(_tandy_note_off(ch))
+    seen = set()
+    for start, midi in perc:                        # drums -> noise channel
+        on = start * _SUBTICKS
+        if on in seen:                              # one noise hit per sub-tick
+            continue
+        seen.add(on)
+        by.setdefault(on, []).extend(_tandy_noise_on(midi >= _DRUM_BRIGHT_MIDI))
+        by.setdefault(on + max(1, _SUBTICKS - 1), []).extend(_tandy_noise_off())
+    return by
 
 
 def _mono_stream(song: Song) -> Dict[int, List[Tuple[int, int]]]:
-    """Per-tick writes for the single PC-speaker voice: at each tick the highest
-    pitch sounding wins; emit only when that pitch changes (a rest = note off)."""
-    events = [e for t in song.tracks for e in _note_events(t.notes)]
-    total = max((s + d for s, d, _ in events), default=0)
-    by_tick: Dict[int, List[Tuple[int, int]]] = {}
-    prev = None
-    for t in range(total):
-        top = max((m for s, d, m in events if s <= t < s + d), default=None)
-        if top == prev:
-            continue
-        prev = top
-        by_tick[t] = _spk_note_off() if top is None else _spk_note_on(midi_to_freq(top))
-    return by_tick
+    """Per-sub-tick writes for the single PC-speaker voice: play the highest
+    voice (channel 0), articulated so repeated notes re-attack."""
+    per_track, _ = _split_notes(song)
+    voice = _allocate_voices(per_track, n=3)[0]     # channel 0 = the top line
+    by: Dict[int, List[Tuple[int, int]]] = {}
+    for start, dur, midi in voice:
+        on = start * _SUBTICKS
+        off = on + max(1, dur * _SUBTICKS - 1)
+        by.setdefault(on, []).extend(_spk_note_on(midi_to_freq(midi)))
+        by.setdefault(off, []).extend(_spk_note_off())
+    return by
 
 
 def _build_stream(song: Song, mode: str) -> Tuple[bytes, int]:
-    """(stream bytes, total_ticks). One record per tick: [pair_count][port,val]*."""
-    by_tick = _tandy_stream(song) if mode == "tandy" else _mono_stream(song)
-    total = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
+    """(stream bytes, total_subticks). One record per sub-tick: [n][port,val]*."""
+    by = _tandy_stream(song) if mode == "tandy" else _mono_stream(song)
+    ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
+    total = ticks * _SUBTICKS
     out = bytearray()
-    for t in range(total):
-        pairs = by_tick.get(t, [])
+    for s in range(total):
+        pairs = by.get(s, [])
         if len(pairs) > 255:
-            raise ValueError(f"tick {t} has {len(pairs)} register writes (max 255)")
+            raise ValueError(f"sub-tick {s} has {len(pairs)} writes (max 255)")
         out.append(len(pairs))
         for port, value in pairs:
             out += bytes([port & 0xFF, value & 0xFF])
@@ -260,13 +301,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int) -> bytes:
     stream, total = _build_stream(song, mode)
     if total == 0:
         raise ValueError("nothing to play (no notes)")
-    # Timer: fire at a submultiple of the tick rate so the divider fits 16 bits
-    # (slow tempos exceed one PIT period); the ISR advances music every `subdiv`.
-    tick_s = tick_seconds_for(tempo_byte0)
+    # Timer fires once per SUB-tick (the stream's resolution). Should always fit
+    # 16 bits since a sub-tick is well under one PIT period, but keep the subdiv
+    # fallback for safety; the ISR advances the stream every `subdiv` interrupts.
+    subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
     subdiv = 1
-    while round(_PIT_HZ * tick_s / subdiv) > 65535:
+    while round(_PIT_HZ * subtick_s / subdiv) > 65535:
         subdiv += 1
-    divider = round(_PIT_HZ * tick_s / subdiv)
+    divider = round(_PIT_HZ * subtick_s / subdiv)
 
     sil = _tandy_silence() if mode == "tandy" else _spk_note_off()
     sil_bytes = bytes([len(sil)]) + b"".join(bytes([p, v]) for p, v in sil)
