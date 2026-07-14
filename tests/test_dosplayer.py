@@ -138,10 +138,10 @@ def test_scope_stream_carries_viz_records():
 
 def test_scope_com_sets_and_restores_video_mode():
     com = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, scope=True)
-    assert com[:5] == b"\xB8\x13\x00\xCD\x10"        # mov ax,0x0013 ; int 0x10
+    assert com[:5] == b"\xB8\x09\x00\xCD\x10"        # mov ax,0x0009 ; int 0x10 (Tandy 320x200x16)
     assert b"\xB8\x03\x00\xCD\x10" in com            # mov ax,0x0003 ; int 0x10 (restore)
-    assert b"\xB8\x00\xA0\x8E\xC0" in com            # mov ax,0xA000 ; mov es,ax (framebuffer)
+    assert b"\xB8\x00\xB8\x8E\xC0" in com            # mov ax,0xB800 ; mov es,ax (Tandy framebuffer)
     # a non-scope Tandy build does neither
     plain = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, scope=False)
-    assert plain[:5] != b"\xB8\x13\x00\xCD\x10"
-    assert b"\xB8\x00\xA0\x8E\xC0" not in plain
+    assert plain[:5] != b"\xB8\x09\x00\xCD\x10"
+    assert b"\xB8\x00\xB8\x8E\xC0" not in plain
