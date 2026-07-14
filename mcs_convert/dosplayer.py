@@ -280,7 +280,7 @@ def _emit_drawframe(a: "_Asm") -> None:
     """Clear the mode-13h screen and redraw all five dot scopes from the viz
     table. Called each frame from the main loop."""
     a.label("drawframe")
-    a.db(0xB8, 0x00, 0xA0).db(0x8E, 0xC0)               # mov ax,0xA000; mov es,ax
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # mov ax,[bufseg]; mov es,ax (back buffer)
     a.db(0x31, 0xFF).db(0x31, 0xC0)                     # xor di,di; xor ax,ax
     a.db(0xB9).bytes(struct.pack("<H", 32000)).db(0xF3, 0xAB)   # mov cx,32000; rep stosw
     for ch in range(4):                                 # reset each counter/level
@@ -315,6 +315,9 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a = _Asm()
     if scope:
         a.db(0xB8, 0x13, 0x00).db(0xCD, 0x10)           # mov ax,0x0013; int 0x10
+        # back buffer one 64 KB block past our program (a .COM owns all memory)
+        a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)           # mov ax,cs; add ax,0x1000
+        a.db(0xA3).abs16("bufseg")                      # mov [bufseg],ax
     # ---- start: save + hook INT 8, program the tick timer -------------------
     a.db(0xFA)                                       # cli
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax ; mov es,ax
@@ -332,12 +335,19 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     # ---- main loop: redraw scopes (scope) or just wait, until a key ---------
     if scope:
         a.label("wait")
+        a.db(0xE8).rel16("drawframe")                # render the whole frame off-screen
         a.db(0xBA, 0xDA, 0x03)                       # mov dx,0x3DA (CRTC status)
         a.label("vs1")
-        a.db(0xEC, 0xA8, 0x08).db(0x75).rel8("vs1")  # in al,dx;test al,8;jnz vs1 (wait end)
+        a.db(0xEC).db(0xA8, 0x08).db(0x75).rel8("vs1")   # in al,dx;test al,8;jnz vs1 (wait end)
         a.label("vs2")
-        a.db(0xEC, 0xA8, 0x08).db(0x74).rel8("vs2")  # in al,dx;test al,8;jz vs2 (wait retrace)
-        a.db(0xE8).rel16("drawframe")                # call drawframe
+        a.db(0xEC).db(0xA8, 0x08).db(0x74).rel8("vs2")   # in al,dx;test al,8;jz vs2 (retrace)
+        # blit the back buffer to the screen during vertical retrace (no tearing)
+        a.db(0x1E)                                    # push ds
+        a.db(0xA1).abs16("bufseg").db(0x8E, 0xD8)     # mov ax,[bufseg]; mov ds,ax
+        a.db(0xB8, 0x00, 0xA0).db(0x8E, 0xC0)         # mov ax,0xA000; mov es,ax
+        a.db(0x31, 0xF6).db(0x31, 0xFF)               # xor si,si; xor di,di
+        a.db(0xB9).bytes(struct.pack("<H", 32000)).db(0xF3, 0xA5)   # mov cx,32000; rep movsw
+        a.db(0x1F)                                    # pop ds
         a.db(0xB4, 0x01).db(0xCD, 0x16)              # mov ah,1 ; int 0x16
         a.db(0x74).rel8("wait")                      # jz wait
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # xor ah,ah ; int 0x16 (consume)
@@ -404,6 +414,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("subcount"); a.db(subdiv & 0xFF)
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-channel scope periods
     if scope:
+        a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
         a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
         a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
