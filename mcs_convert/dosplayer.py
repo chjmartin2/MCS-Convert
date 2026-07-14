@@ -273,6 +273,13 @@ def _emit_channel_draw(a: "_Asm", ch: int) -> None:
     a.db(0x75).rel8(f"c{ch}_d")                         # jnz done
     a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1 (flip)
     a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)   # mov al,[viz+ch];mov[cnt+ch],al
+    # a transition: draw the vertical edge HI..LO so the square is solid, not dashes
+    a.db(0xBF).bytes(struct.pack("<H", hi)).db(0x01, 0xDF)  # mov di,hi; add di,bx
+    a.db(0xB9).bytes(struct.pack("<H", (lo - hi) // 320 + 1))   # mov cx, rows(hi..lo)
+    a.label(f"c{ch}_v")
+    a.db(0x26, 0xC6, 0x05, col)                         # mov es:[di],col
+    a.db(0x81, 0xC7).bytes(struct.pack("<H", 320))      # add di,320
+    a.db(0xE2).rel8(f"c{ch}_v")                         # loop c{ch}_v
     a.label(f"c{ch}_d")
 
 
@@ -289,18 +296,32 @@ def _emit_drawframe(a: "_Asm") -> None:
         a.label(f"rst{ch}")
         a.db(0xA2).abs16("cnt", ch)                     # mov [cnt+ch],al
         a.db(0xC6, 0x06).abs16("lev", ch).db(0x01)      # mov byte[lev+ch],1
+    a.db(0xC7, 0x06).abs16("prev_my").bytes(struct.pack("<H", _MASTER_CEN_Y))  # prev_my=180
     a.db(0x31, 0xDB)                                    # xor bx,bx  (x = 0)
     a.label("xloop")
     a.db(0xC6, 0x06).abs16("msum").db(0x00)             # mov byte[msum],0
     for ch in range(4):
         _emit_channel_draw(a, ch)
-    # master dot: y = 180 - msum*3 ; di = y*320 + x
+    # master: y = 180 - msum*3, then draw a vertical line from the previous
+    # column's y to this one so the summed trace is a connected line, not dots.
     a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
-    a.db(0xB9, 0x03, 0x00).db(0xF7, 0xE9)               # mov cx,3; imul cx
-    a.db(0xB9).bytes(struct.pack("<H", _MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,180; sub cx,ax
-    a.db(0xB8).bytes(struct.pack("<H", 320)).db(0xF7, 0xE1)   # mov ax,320; mul cx
+    a.db(0xB9, 0x03, 0x00).db(0xF7, 0xE9)               # mov cx,3; imul cx (ax=msum*3)
+    a.db(0xB9).bytes(struct.pack("<H", _MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,180; sub cx,ax (cx=y)
+    a.db(0xA1).abs16("prev_my")                         # mov ax,[prev_my]
+    a.db(0x89, 0x0E).abs16("prev_my")                   # mov [prev_my],cx (save this y)
+    a.db(0x39, 0xC8)                                    # cmp ax,cx
+    a.db(0x76).rel8("m_ord")                            # jbe m_ord
+    a.db(0x91)                                          # xchg ax,cx  (ax=top, cx=bottom)
+    a.label("m_ord")
+    a.db(0x89, 0xCA).db(0x29, 0xC2).db(0x42)            # mov dx,cx; sub dx,ax; inc dx (rows)
+    a.db(0x52)                                          # push dx
+    a.db(0xBA).bytes(struct.pack("<H", 320)).db(0xF7, 0xE2)   # mov dx,320; mul dx (ax=top*320)
     a.db(0x01, 0xD8).db(0x89, 0xC7)                     # add ax,bx; mov di,ax
+    a.db(0x59)                                          # pop cx (row count)
+    a.label("m_vloop")
     a.db(0x26, 0xC6, 0x05, _MASTER_COLOR)              # mov es:[di],white
+    a.db(0x81, 0xC7).bytes(struct.pack("<H", 320))      # add di,320
+    a.db(0xE2).rel8("m_vloop")                          # loop m_vloop
     a.db(0x43).db(0x81, 0xFB).bytes(struct.pack("<H", 320))   # inc bx; cmp bx,320
     a.db(0x73).rel8("xdone").db(0xE9).rel16("xloop")    # jae xdone; jmp xloop
     a.label("xdone")
@@ -418,6 +439,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
         a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
+        a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
