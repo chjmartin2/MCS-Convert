@@ -57,11 +57,11 @@ def _cmd_convert(args) -> int:
                                         shape_durations=args.shape_durations)
         elif ext == "nsf":
             from .nsf.extract import extract_song
-            byte0 = 0x77 + 3 * max(0, min(9, args.slow))
             song, byte0 = extract_song(args.input, subsong=args.subsong,
                                        percussion=args.percussion,
-                                       drum_sound=args.drum_sound,
-                                       tempo_byte0=byte0)
+                                       drum_sound=args.drum_sound)
+            if args.slow:                            # override the fitted tempo
+                byte0 = 0x77 + 3 * min(9, args.slow)  # for slow-motion study
         else:
             print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
                   file=sys.stderr)
