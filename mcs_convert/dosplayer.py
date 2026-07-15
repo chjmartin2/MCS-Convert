@@ -442,14 +442,155 @@ def _emit_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+# ---- text-mode (80x25) block scopes -----------------------------------------
+# Five stacked bands (ch0-2 tone, ch3 noise, master), each 5 rows; the wave
+# fills from its band's centre row toward the level with a full-block glyph, so
+# it's cheap (a few hundred cell writes/frame) -- 60 fps on real Tandy hardware.
+# A cell is a word: char (0xDB) in the low byte, colour attribute in the high.
+_TBLK = 0xDB                    # full-block glyph
+_TCEN = (2, 7, 12, 17, 22)      # band centre rows (ch0-3 + master)
+_TATTR = (0x0A, 0x0B, 0x0E, 0x0D, 0x0F)   # green/cyan/yellow/magenta/white
+_TAMP = 2                       # wave amplitude in rows (± from centre)
+_TEXTROW = [r * 160 for r in range(25)]   # byte offset of each text row
+
+
+def _tcolor(i: int) -> int:
+    return _TBLK | (_TATTR[i] << 8)
+
+
+def _emit_tcell(a: "_Asm") -> None:
+    """Write one text cell: char+attr AX at (row CX, col BX). Clobbers SI, DI."""
+    a.label("tcell")
+    a.db(0x89, 0xCE).db(0x01, 0xF6)                     # mov si,cx; add si,si
+    a.db(0x8B, 0xBC).abs16("textrow")                   # mov di,[textrow+si]
+    a.db(0x01, 0xDF).db(0x01, 0xDF)                     # add di,bx; add di,bx (col*2)
+    a.db(0x26, 0x89, 0x05).db(0xC3)                     # mov es:[di],ax ; ret
+
+
+def _emit_tfill(a: "_Asm") -> None:
+    """Fill rows [ftop]..[fbot] of column BX with char+attr AX."""
+    a.label("tfill")
+    a.db(0x8B, 0x0E).abs16("ftop")                      # mov cx,[ftop]
+    a.label("tf_lp")
+    a.db(0xE8).rel16("tcell")                           # call tcell
+    a.db(0x41).db(0x3B, 0x0E).abs16("fbot")             # inc cx; cmp cx,[fbot]
+    a.db(0x76).rel8("tf_lp")                            # jbe tf_lp
+    a.db(0xC3)                                          # ret
+
+
+def _emit_text_channel(a: "_Asm", ch: int) -> None:
+    """One tone channel column (BP): pick HI/LO/CENTRE row from its scroll
+    counter, add ±1 to the master sum, fill from centre to that row."""
+    rc = _TCEN[ch]
+    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
+    a.db(0x75).rel8(f"tc{ch}_s")                        # jne snd
+    a.db(0xB9).bytes(_w(rc))                            # mov cx,centre
+    a.db(0xEB).rel8(f"tc{ch}_f")                        # jmp fill
+    a.label(f"tc{ch}_s")
+    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
+    a.db(0x74).rel8(f"tc{ch}_lo")                       # je lo
+    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
+    a.db(0xEB).rel8(f"tc{ch}_a")                        # jmp adv
+    a.label(f"tc{ch}_lo")
+    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
+    a.label(f"tc{ch}_a")
+    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
+    a.db(0x75).rel8(f"tc{ch}_f")                        # jnz fill
+    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
+    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
+    a.label(f"tc{ch}_f")
+    a.db(0xB8).bytes(_w(rc))                            # mov ax,centre
+    a.db(0x39, 0xC8).db(0x76).rel8(f"tc{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg
+    a.label(f"tc{ch}_o")
+    a.db(0xA3).abs16("ftop").db(0x89, 0x0E).abs16("fbot")   # ftop=top; fbot=bottom
+    a.db(0x89, 0xEB).db(0xB8).bytes(_w(_tcolor(ch))).db(0xE8).rel16("tfill")  # bx=col;ax=cc;call tfill
+
+
+def _emit_text_noise(a: "_Asm") -> None:
+    """Noise band: fill from centre to a random nearby row (shimmers)."""
+    rc = _TCEN[3]
+    a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
+    a.db(0x75).rel8("tn_a")                             # jne active
+    a.db(0xB9).bytes(_w(rc))                            # mov cx,centre
+    a.db(0xEB).rel8("tn_f")                             # jmp fill
+    a.label("tn_a")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # LCG
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")
+    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x03).db(0x30, 0xED)   # cl=ah; and cl,3; xor ch,ch
+    a.db(0x81, 0xE9, 0x02, 0x00)                        # sub cx,2  (-2..1)
+    a.db(0x81, 0xC1).bytes(_w(rc))                      # add cx,centre
+    a.label("tn_f")
+    a.db(0xB8).bytes(_w(rc))                            # mov ax,centre
+    a.db(0x39, 0xC8).db(0x76).rel8("tn_o").db(0x91)     # cmp ax,cx; jbe o; xchg
+    a.label("tn_o")
+    a.db(0xA3).abs16("ftop").db(0x89, 0x0E).abs16("fbot")
+    a.db(0x89, 0xEB).db(0xB8).bytes(_w(_tcolor(3))).db(0xE8).rel16("tfill")
+
+
+def _emit_text_master(a: "_Asm") -> None:
+    """Master band: level = centre - clamp(sum of 3 tone levels, -2..2) -> discrete
+    bands; fill from centre."""
+    rc = _TCEN[4]
+    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
+    a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle .c1; mov ax,2
+    a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge .c2; mov ax,-2
+    a.db(0xB9).bytes(_w(rc)).db(0x29, 0xC1)             # mov cx,centre; sub cx,ax (level)
+    a.db(0xB8).bytes(_w(rc))                            # mov ax,centre
+    a.db(0x39, 0xC8).db(0x76).rel8("tm_o").db(0x91)     # cmp ax,cx; jbe o; xchg
+    a.label("tm_o")
+    a.db(0xA3).abs16("ftop").db(0x89, 0x0E).abs16("fbot")
+    a.db(0x89, 0xEB).db(0xB8).bytes(_w(_tcolor(4))).db(0xE8).rel16("tfill")
+
+
+def _emit_text_drawframe(a: "_Asm") -> None:
+    """Redraw the five text-mode block scopes into the 80x25 back buffer."""
+    a.label("drawframe")
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # mov ax,0x0720 (space); xor di,di
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # mov cx,2000; rep stosw (clear 80x25)
+    a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
+    for ch in range(3):                                 # phase each tone channel by scroll
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
+        a.db(0x75).rel8(f"tr{ch}").db(0xB0, 0x01)
+        a.label(f"tr{ch}")
+        a.db(0x30, 0xE4).db(0x89, 0xC3)
+        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
+        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
+        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+    a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
+    a.label("txloop")
+    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    for ch in range(3):
+        _emit_text_channel(a, ch)
+    _emit_text_noise(a)
+    _emit_text_master(a)
+    a.db(0x45).db(0x83, 0xFD, 80)                       # inc bp; cmp bp,80
+    a.db(0x73).rel8("txdone").db(0xE9).rel16("txloop")  # jae; jmp txloop
+    a.label("txdone")
+    a.db(0xC3)                                          # ret
+
+
+def _emit_text_blit(a: "_Asm") -> None:
+    """Copy the 80x25 text back buffer to the video page at B800."""
+    a.label("blit")
+    a.db(0x1E)                                          # push ds
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xD8)           # ds=bufseg
+    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)               # es=0xB800
+    a.db(0x31, 0xF6).db(0x31, 0xFF)                     # si=0; di=0
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xA5)               # mov cx,2000; rep movsw (4000 bytes)
+    a.db(0x1F).db(0xC3)                                 # pop ds; ret
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
-              silence: bytes, stream: bytes, scope: bool = False) -> bytes:
-    """The engine: (optionally set VGA mode 13h), install the timer ISR, run —
-    waiting for a key or redrawing the scopes — then tear down. Followed by the
-    silence record and per-sub-tick event stream."""
+              silence: bytes, stream: bytes, vis: str = "") -> bytes:
+    """The engine: (optionally set a graphics/text video mode), install the timer
+    ISR, run — waiting for a key or redrawing the scopes — then tear down.
+    Followed by the silence record and per-sub-tick event stream. `vis` is "",
+    "graphics" (mode 9) or "text" (mode 3)."""
     a = _Asm()
-    if scope:
-        a.db(0xB8, 0x09, 0x00).db(0xCD, 0x10)           # mov ax,0x0009; int 0x10 (Tandy 320x200x16)
+    if vis:
+        video_mode = 0x03 if vis == "text" else 0x09
+        a.db(0xB8, video_mode, 0x00).db(0xCD, 0x10)     # mov ax,000N; int 0x10 (set video mode)
         # back buffer one 64 KB block past our program (a .COM owns all memory)
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)           # mov ax,cs; add ax,0x1000
         a.db(0xA3).abs16("bufseg")                      # mov [bufseg],ax
@@ -467,8 +608,8 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)   # out 0x40,al;mov al,ah;out 0x40,al
     a.db(0xBE).abs16("silence").db(0xE8).rel16("playrec")    # silence the chip now
     a.db(0xFB)                                       # sti
-    # ---- main loop: redraw scopes (scope) or just wait, until a key ---------
-    if scope:
+    # ---- main loop: redraw scopes (vis) or just wait, until a key ----------
+    if vis:
         a.label("wait")
         a.db(0xE8).rel16("drawframe")                # render the whole frame off-screen
         a.db(0xBA, 0xDA, 0x03)                       # mov dx,0x3DA (CRTC status)
@@ -494,8 +635,8 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0xA1).abs16("old_off").db(0x26, 0xA3, 0x20, 0x00)   # mov ax,[old_off];mov[es:0x20],ax
     a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)   # mov ax,[old_seg];mov[es:0x22],ax
     a.db(0xFB)                                       # sti
-    if scope:
-        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (text mode)
+    if vis:
+        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (back to text mode)
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # mov ax,0x4C00 ; int 0x21
     # ---- playrec: apply one [count][port,val]* record at DS:SI --------------
     a.label("playrec")
@@ -533,7 +674,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # mov al,0x20 ; out 0x20,al (EOI)
     a.db(0x1F, 0x5F, 0x5E, 0x5A, 0x59, 0x58, 0xCF)   # pop ds,di,si,dx,cx,ax ; iret
-    if scope:
+    if vis == "graphics":
         _emit_ploty(a)
         _emit_vline(a)
         _emit_hline(a)
@@ -541,6 +682,13 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         _emit_blit(a)
         a.label("rowaddr")                           # mode-9 byte offset of each scanline
         a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
+    elif vis == "text":
+        _emit_tcell(a)
+        _emit_tfill(a)
+        _emit_text_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")                           # byte offset of each text row
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -548,18 +696,22 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("ticksleft"); a.db(0x00, 0x00)
     a.label("subcount"); a.db(subdiv & 0xFF)
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-channel scope periods
-    if scope:
+    if vis:                                          # shared draw state
         a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
         a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
         a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
+        a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
+        a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
+    if vis == "graphics":                            # mode-9 vline/frame state
         a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
         a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
         a.label("vtop"); a.db(0x00, 0x00)                # vline top y
         a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
         a.label("hend"); a.db(0x00, 0x00)                # hline end column
-        a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
-        a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
+    elif vis == "text":                              # text fill state
+        a.label("ftop"); a.db(0x00, 0x00)                # tfill top row
+        a.label("fbot"); a.db(0x00, 0x00)                # tfill bottom row
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -571,14 +723,17 @@ def _tandy_silence() -> List[Tuple[int, int]]:
             (_SN76489, 0xDF), (_SN76489, 0xFF)]      # and the noise channel
 
 
-def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False) -> bytes:
+def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
+              text_scope: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
-    With `scope` (Tandy only) it also draws five VGA mode-13h dot oscilloscopes."""
+    `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
+    (Tandy only) adds lighter 80x25 text-mode block scopes instead."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
-    if scope and mode != "tandy":
+    vis = "text" if text_scope else ("graphics" if scope else "")
+    if vis and mode != "tandy":
         raise ValueError("the scope display is only implemented for --tandy")
-    stream, total = _build_stream(song, mode, scope)
+    stream, total = _build_stream(song, mode, bool(vis))
     if total == 0:
         raise ValueError("nothing to play (no notes)")
     # Timer fires once per SUB-tick (the stream's resolution). Should always fit
@@ -596,7 +751,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False) -> b
     # its end instead of hanging the final chord until a key is pressed
     stream += sil_bytes
     total += 1
-    com = _assemble(divider, subdiv, total, sil_bytes, stream, scope)
+    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis)
     if len(com) > 0xFF00:
         raise ValueError(f".COM is {len(com)} bytes — too big for one segment; "
                          "shorten the song or split it")

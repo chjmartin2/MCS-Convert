@@ -72,10 +72,11 @@ def _cmd_convert(args) -> int:
                 raise NotImplementedError(
                     "the 4-voice PC-speaker player is phase 2; use --tandy or "
                     "--1voice for now")
-            if args.scope and target != "tandy":
-                raise ValueError("--scope is only available with --tandy")
+            if (args.scope or args.scope_text) and target != "tandy":
+                raise ValueError("--scope/--scope-text is only available with --tandy")
             from .dosplayer import build_com
-            data = build_com(song, target, byte0, scope=args.scope)
+            data = build_com(song, target, byte0, scope=args.scope,
+                             text_scope=args.scope_text)
         else:                                        # the default .MCS song file
             data = encode_song(song, tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
@@ -151,8 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--4voice", dest="4voice", action="store_true",
                         help="output a 4-voice PC-speaker .COM (phase 2 — not yet)")
     p_conv.add_argument("--scope", action="store_true",
-                        help="Tandy .COM only: draw a VGA 320x200 dot "
+                        help="Tandy .COM only: draw a 320x200 graphics "
                              "oscilloscope (4 channels + master) while playing")
+    p_conv.add_argument("--scope-text", dest="scope_text", action="store_true",
+                        help="Tandy .COM only: draw lighter 80x25 TEXT-mode block "
+                             "scopes (60 fps on real hardware) instead of graphics")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
                         default="clicks",

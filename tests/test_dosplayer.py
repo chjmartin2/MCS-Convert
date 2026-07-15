@@ -145,3 +145,16 @@ def test_scope_com_sets_and_restores_video_mode():
     plain = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, scope=False)
     assert plain[:5] != b"\xB8\x09\x00\xCD\x10"
     assert b"\xB8\x00\xB8\x8E\xC0" not in plain
+
+
+def test_text_scope_uses_text_mode_and_is_smaller():
+    # --scope-text sets text mode 3 (not graphics 9), blits to B800, restores
+    # text mode on exit, and is lighter than the graphics build.
+    txt = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, text_scope=True)
+    assert txt[:5] == b"\xB8\x03\x00\xCD\x10"        # mov ax,0x0003 ; int 0x10 (80x25 text)
+    assert b"\xB8\x09\x00\xCD\x10" not in txt        # NOT the graphics mode
+    assert b"\xB8\x00\xB8\x8E\xC0" in txt            # mov ax,0xB800 ; mov es,ax (text page)
+    gfx = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, scope=True)
+    assert len(txt) < len(gfx)                       # text renderer is lighter
+    with pytest.raises(ValueError):                  # Tandy only
+        D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, text_scope=True)

@@ -788,11 +788,12 @@ class ImportPreview(tk.Toplevel):
         self.size_label.pack(side="left", padx=(0, 14))
         # Standalone .COM export: a self-contained DOS player of the SELECTION,
         # incl. percussion (which the .MCS/tracker output can't carry on the
-        # Tandy noise channel). The scope box adds the on-screen oscilloscope.
-        self.com_scope = tk.BooleanVar(value=True)
-        tk.Checkbutton(btns, text="scope", variable=self.com_scope, bg=_BG, fg=_FG,
-                       activebackground=_BG, activeforeground=_FG,
-                       selectcolor="#2a2e3a").pack(side="left")
+        # Tandy noise channel). The scope dropdown picks the on-screen display:
+        # none, 320x200 graphics, or lighter 80x25 text (60 fps on real Tandy).
+        tk.Label(btns, text="scope", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
+        self.com_scope = tk.StringVar(value="text")
+        ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
+                     values=("none", "graphics", "text")).pack(side="left", padx=(0, 6))
         tk.Button(btns, text="Export .COM", command=self._export_com).pack(
             side="left", padx=(0, 6))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
@@ -1052,11 +1053,12 @@ class ImportPreview(tk.Toplevel):
                 'The standalone .COM plays on Tandy (3 voices) or PC Speaker 1 '
                 'Note. Choose one of those in "For".', parent=self)
             return
-        scope = bool(self.com_scope.get()) and mode == "tandy"
+        kind = self.com_scope.get() if mode == "tandy" else "none"
         try:
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
-                             scope=scope)
+                             scope=(kind == "graphics"),
+                             text_scope=(kind == "text"))
         except Exception as exc:                     # noqa: BLE001 - size/build errors
             messagebox.showerror("Cannot build .COM", str(exc), parent=self)
             return
