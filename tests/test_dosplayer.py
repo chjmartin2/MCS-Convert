@@ -168,3 +168,17 @@ def test_text2_uses_box_drawing_glyphs():
         assert bytes([0xB0, glyph]) in t2            # mov al, <glyph>
     t1 = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, text_scope=1)
     assert bytes([0xB0, 0xDA]) not in t1             # block build has no box corners
+
+
+def test_text3_is_grid_layout_in_text_mode():
+    # text_scope=3 is the 2x2 grid + master (the graphics layout, in text): text
+    # mode 3, box-drawing glyphs like text 2, but a heavier renderer (frames +
+    # two draw passes) so it's larger than the single-column text 2.
+    t3 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72)]), "tandy", 0x80,
+                     text_scope=3)
+    assert t3[:5] == b"\xB8\x03\x00\xCD\x10"         # text mode 3
+    for glyph in (0xDA, 0xBF, 0xC0, 0xD9, 0xC4, 0xB3):   # ┌ ┐ └ ┘ ─ │ (frames + trace)
+        assert bytes([0xB0, glyph]) in t3
+    t2 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72)]), "tandy", 0x80,
+                     text_scope=2)
+    assert len(t3) > len(t2)                          # grid + frames is heavier

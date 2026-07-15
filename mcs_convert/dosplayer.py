@@ -730,6 +730,211 @@ def _emit_text2_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+# ---- text-mode 3: graphics-style 2x2 grid + full-width master ---------------
+# The text twin of the graphics scope: the four channels in a 2x2 grid (ch0
+# top-left, ch1 top-right, ch2 bottom-left, ch3/noise bottom-right) with a
+# full-width master trace below, each a box-line scope inside a box-drawing
+# frame. The wave rendering is text-2's connected line; only the LAYOUT changes
+# -- bands sit side by side in quadrants instead of stacked full-width, so each
+# needs its own centre row AND left column. The master is sampled at the
+# quadrant width (38) and drawn at 2x horizontal scale to span the screen, the
+# same trick the graphics master uses.
+_T3_CEN = (4, 4, 13, 13, 21)          # centre row: TL, TR, BL, BR, master
+_T3_COL0 = (1, 41, 1, 41)             # interior left column of each quadrant
+_T3_QW = 38                           # quadrant interior width (columns)
+# frames (x0, x1, y0, y1): the four quadrants + the full-width master
+_T3_FRAMES = [(0, 39, 0, 8), (40, 79, 0, 8),
+              (0, 39, 9, 17), (40, 79, 9, 17), (0, 79, 18, 24)]
+_T3_FRAME_ATTR = 0x07                 # light grey box frames
+
+
+def _emit_t3seg(a: "_Asm") -> None:
+    """text-2's box-glyph segment, but at the column in [t3col] (not BP) so a band
+    can live anywhere on the row -- links [t3prev] to [t3cur], colour [t3attr]."""
+    a.label("t3seg")
+    a.db(0x8B, 0x1E).abs16("t3col")                     # mov bx,[t3col] (col)
+    a.db(0x8A, 0x26).abs16("t3attr")                    # mov ah,[t3attr]
+    a.db(0x8B, 0x0E).abs16("t3cur")                     # mov cx,[t3cur]
+    a.db(0x3B, 0x0E).abs16("t3prev")                    # cmp cx,[t3prev]
+    a.db(0x74).rel8("t3_flat")                          # je flat
+    a.db(0x72).rel8("t3_rise")                          # jb rising (cur<prev)
+    # falling: prev is top, cur is bottom
+    a.db(0x8B, 0x16).abs16("t3prev")                    # mov dx,[t3prev]
+    a.db(0x89, 0x16).abs16("t3top").db(0x89, 0x0E).abs16("t3bot")  # t3top=dx; t3bot=cx
+    a.db(0x51).db(0x89, 0xD1).db(0xB0, _BOX_TR).db(0xE8).rel16("tcell").db(0x59)  # ┐ at top
+    a.db(0xB0, _BOX_BL).db(0xE8).rel16("tcell")         # └ at cur/bot
+    a.db(0xEB).rel8("t3_vfill")                         # jmp vfill
+    a.label("t3_rise")                                  # rising: cur is top
+    a.db(0x8B, 0x16).abs16("t3prev")                    # mov dx,[t3prev]
+    a.db(0x89, 0x0E).abs16("t3top").db(0x89, 0x16).abs16("t3bot")  # t3top=cx; t3bot=dx
+    a.db(0xB0, _BOX_TL).db(0xE8).rel16("tcell")         # ┌ at cur/top
+    a.db(0x51).db(0x89, 0xD1).db(0xB0, _BOX_BR).db(0xE8).rel16("tcell").db(0x59)  # ┘ at bot
+    a.label("t3_vfill")
+    a.db(0x8B, 0x0E).abs16("t3top").db(0x41)            # mov cx,[t3top]; inc cx
+    a.label("t3_vl")
+    a.db(0x3B, 0x0E).abs16("t3bot").db(0x73).rel8("t3_done")  # cmp cx,[t3bot]; jae done
+    a.db(0xB0, _BOX_V).db(0xE8).rel16("tcell")          # al=│; tcell
+    a.db(0x41).db(0xEB).rel8("t3_vl")                   # inc cx; jmp vl
+    a.label("t3_done")
+    a.db(0xC3)                                          # ret
+    a.label("t3_flat")
+    a.db(0xB0, _BOX_H).db(0xE8).rel16("tcell").db(0xC3)  # al=─; tcell; ret
+
+
+def _emit_t3row(a: "_Asm", ch: int) -> None:
+    """Row CX -> a connected segment for band `ch` at the pre-set [t3col]:
+    remember it in prevrow[ch] so the next column links to it."""
+    a.db(0x89, 0x0E).abs16("t3cur")                     # mov [t3cur],cx
+    a.db(0xA1).abs16("prevrow", ch * 2).db(0xA3).abs16("t3prev")  # mov ax,[prevrow+ch];mov[t3prev],ax
+    a.db(0x89, 0x0E).abs16("prevrow", ch * 2)           # mov [prevrow+ch],cx
+    a.db(0xC6, 0x06).abs16("t3attr").db(_TATTR[ch])     # mov byte[t3attr],attr
+    a.db(0xE8).rel16("t3seg")                           # call t3seg
+
+
+def _t3_setcol(a: "_Asm", col0: int) -> None:
+    """[t3col] = BP + col0 -- this band's screen column for the current sample."""
+    a.db(0x89, 0xEB)                                    # mov bx,bp
+    if col0 == 1:
+        a.db(0x43)                                      # inc bx
+    else:
+        a.db(0x81, 0xC3).bytes(_w(col0))               # add bx,col0
+    a.db(0x89, 0x1E).abs16("t3col")                     # mov [t3col],bx
+
+
+def _emit_text3_channel(a: "_Asm", ch: int) -> None:
+    """Tone channel in its quadrant: HI/LO/CENTRE row from the scroll counter,
+    ±1 into the master sum, then the connected line segment at (BP + col0)."""
+    rc = _T3_CEN[ch]
+    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
+    a.db(0x75).rel8(f"v{ch}_s")                         # jne snd
+    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8(f"v{ch}_r")  # mov cx,centre; jmp row
+    a.label(f"v{ch}_s")
+    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
+    a.db(0x74).rel8(f"v{ch}_lo")                        # je lo
+    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
+    a.db(0xEB).rel8(f"v{ch}_a")                         # jmp adv
+    a.label(f"v{ch}_lo")
+    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
+    a.label(f"v{ch}_a")
+    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
+    a.db(0x75).rel8(f"v{ch}_r")                         # jnz row
+    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
+    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
+    a.label(f"v{ch}_r")
+    _t3_setcol(a, _T3_COL0[ch])
+    _emit_t3row(a, ch)
+
+
+def _emit_text3_noise(a: "_Asm") -> None:
+    """Noise quadrant (bottom-right): connect to a random nearby row."""
+    rc = _T3_CEN[3]
+    a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
+    a.db(0x75).rel8("vn_a")                             # jne active
+    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8("vn_r")      # mov cx,centre; jmp row
+    a.label("vn_a")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # LCG
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")
+    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x03).db(0x30, 0xED)   # cl=ah; and cl,3; xor ch,ch
+    a.db(0x81, 0xE9, 0x01, 0x00)                        # sub cx,1  (-1..2)
+    a.db(0x81, 0xC1).bytes(_w(rc))                      # add cx,centre
+    a.label("vn_r")
+    _t3_setcol(a, _T3_COL0[3])
+    _emit_t3row(a, 3)
+
+
+def _emit_t3frame(a: "_Asm") -> None:
+    """Draw a box-drawing rectangle around [fx0,fy0]-[fx1,fy1] in grey. Corners,
+    then the top/bottom (─) and left/right (│) edges. Uses tcell (preserves AX,
+    so the attribute in AH survives the whole routine)."""
+    a.label("t3frame")
+    a.db(0xB4, _T3_FRAME_ATTR)                          # mov ah, grey
+    a.db(0x8B, 0x0E).abs16("fy0").db(0x8B, 0x1E).abs16("fx0")  # cx=fy0; bx=fx0
+    a.db(0xB0, _BOX_TL).db(0xE8).rel16("tcell")         # ┌ (fx0,fy0)
+    a.db(0x8B, 0x1E).abs16("fx1").db(0xB0, _BOX_TR).db(0xE8).rel16("tcell")  # ┐ (fx1,fy0)
+    a.db(0x8B, 0x0E).abs16("fy1").db(0xB0, _BOX_BR).db(0xE8).rel16("tcell")  # ┘ (fx1,fy1)
+    a.db(0x8B, 0x1E).abs16("fx0").db(0xB0, _BOX_BL).db(0xE8).rel16("tcell")  # └ (fx0,fy1)
+    # top edge: row fy0, cols fx0+1..fx1-1
+    a.db(0xB0, _BOX_H).db(0x8B, 0x0E).abs16("fy0")      # al=─; cx=fy0
+    a.db(0x8B, 0x1E).abs16("fx0").db(0x43)              # bx=fx0; inc bx
+    a.label("t3f_t")
+    a.db(0x3B, 0x1E).abs16("fx1").db(0x73).rel8("t3f_td")  # cmp bx,[fx1]; jae
+    a.db(0xE8).rel16("tcell").db(0x43).db(0xEB).rel8("t3f_t")  # tcell; inc bx; jmp
+    a.label("t3f_td")
+    # bottom edge: row fy1
+    a.db(0x8B, 0x0E).abs16("fy1")                       # cx=fy1
+    a.db(0x8B, 0x1E).abs16("fx0").db(0x43)              # bx=fx0; inc bx
+    a.label("t3f_b")
+    a.db(0x3B, 0x1E).abs16("fx1").db(0x73).rel8("t3f_bd")
+    a.db(0xE8).rel16("tcell").db(0x43).db(0xEB).rel8("t3f_b")
+    a.label("t3f_bd")
+    # left edge: col fx0, rows fy0+1..fy1-1
+    a.db(0xB0, _BOX_V).db(0x8B, 0x1E).abs16("fx0")      # al=│; bx=fx0
+    a.db(0x8B, 0x0E).abs16("fy0").db(0x41)              # cx=fy0; inc cx
+    a.label("t3f_l")
+    a.db(0x3B, 0x0E).abs16("fy1").db(0x73).rel8("t3f_ld")  # cmp cx,[fy1]; jae
+    a.db(0xE8).rel16("tcell").db(0x41).db(0xEB).rel8("t3f_l")  # tcell; inc cx; jmp
+    a.label("t3f_ld")
+    # right edge: col fx1
+    a.db(0x8B, 0x1E).abs16("fx1")                       # bx=fx1
+    a.db(0x8B, 0x0E).abs16("fy0").db(0x41)              # cx=fy0; inc cx
+    a.label("t3f_r")
+    a.db(0x3B, 0x0E).abs16("fy1").db(0x73).rel8("t3f_rd")
+    a.db(0xE8).rel16("tcell").db(0x41).db(0xEB).rel8("t3f_r")
+    a.label("t3f_rd")
+    a.db(0xC3)                                          # ret
+
+
+def _emit_text3_drawframe(a: "_Asm") -> None:
+    """Redraw the 2x2 grid + master into the 80x25 back buffer, then the frames."""
+    a.label("drawframe")
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # ax=0x0720 (space); di=0
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # cx=2000; rep stosw (clear)
+    a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
+    for ch in range(3):                                 # phase each tone channel by scroll
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
+        a.db(0x75).rel8(f"w3{ch}").db(0xB0, 0x01)
+        a.label(f"w3{ch}")
+        a.db(0x30, 0xE4).db(0x89, 0xC3)
+        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
+        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
+        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+    for i in range(5):                                  # reset each band's previous row
+        a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_T3_CEN[i]))
+    # ---- quadrant loop: 38 columns; store each column's master sum to mbuf ----
+    a.db(0x31, 0xED)                                    # xor bp,bp
+    a.label("q3loop")
+    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    for ch in range(3):
+        _emit_text3_channel(a, ch)
+    _emit_text3_noise(a)
+    a.db(0xA0).abs16("msum").db(0x89, 0xEB).db(0x88, 0x87).abs16("mbuf")  # mov al,[msum];mov bx,bp;mov[mbuf+bx],al
+    a.db(0x45).db(0x83, 0xFD, _T3_QW)                  # inc bp; cmp bp,38
+    a.db(0x73).rel8("q3done").db(0xE9).rel16("q3loop")  # jae; jmp
+    a.label("q3done")
+    # ---- master loop: 76 columns (2x the sampled width), centred at col 2 ------
+    a.db(0x31, 0xED)                                    # xor bp,bp
+    a.label("m3loop")
+    a.db(0x89, 0xEB).db(0xD1, 0xEB)                     # mov bx,bp; shr bx,1 (sample = bp/2)
+    a.db(0x8A, 0x87).abs16("mbuf").db(0x98)             # mov al,[mbuf+bx]; cbw
+    a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle; mov ax,2
+    a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge; mov ax,-2
+    a.db(0xB9).bytes(_w(_T3_CEN[4])).db(0x29, 0xC1)     # mov cx,centre; sub cx,ax (row)
+    a.db(0x89, 0xEB).db(0x83, 0xC3, 0x02).db(0x89, 0x1E).abs16("t3col")  # mov bx,bp;add bx,2;mov[t3col],bx
+    _emit_t3row(a, 4)
+    a.db(0x45).db(0x83, 0xFD, 2 * _T3_QW)             # inc bp; cmp bp,76
+    a.db(0x73).rel8("m3done").db(0xE9).rel16("m3loop")  # jae; jmp
+    a.label("m3done")
+    # ---- frames on top ---------------------------------------------------------
+    for x0, x1, y0, y1 in _T3_FRAMES:
+        a.db(0xC7, 0x06).abs16("fx0").bytes(_w(x0))
+        a.db(0xC7, 0x06).abs16("fx1").bytes(_w(x1))
+        a.db(0xC7, 0x06).abs16("fy0").bytes(_w(y0))
+        a.db(0xC7, 0x06).abs16("fy1").bytes(_w(y1))
+        a.db(0xE8).rel16("t3frame")
+    a.db(0xC3)                                          # ret
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
               silence: bytes, stream: bytes, vis: str = "") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
@@ -845,6 +1050,14 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         _emit_text_blit(a)
         a.label("textrow")
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text3":
+        _emit_tcell(a)
+        _emit_t3seg(a)
+        _emit_t3frame(a)
+        _emit_text3_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -875,6 +1088,19 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("t2top"); a.db(0x00, 0x00)               # segment top row
         a.label("t2bot"); a.db(0x00, 0x00)               # segment bottom row
         a.label("t2attr"); a.db(0x00)                    # current band colour
+    elif vis == "text3":                             # text-3 grid line-trace state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
+        a.label("t3col"); a.db(0x00, 0x00)               # this band's screen column
+        a.label("t3cur"); a.db(0x00, 0x00)               # this column's row
+        a.label("t3prev"); a.db(0x00, 0x00)              # previous column's row
+        a.label("t3top"); a.db(0x00, 0x00)               # segment top row
+        a.label("t3bot"); a.db(0x00, 0x00)               # segment bottom row
+        a.label("t3attr"); a.db(0x00)                    # current band colour
+        a.label("fx0"); a.db(0x00, 0x00)                 # frame rectangle (x0,x1,y0,y1)
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
+        a.label("mbuf"); a.bytes(bytes(_T3_QW))          # per-column master sum (38)
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -891,11 +1117,12 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
     (Tandy only) adds a lighter 80x25 text-mode scope instead -- 1 = block bars,
-    2 = box-drawing line trace."""
+    2 = box-drawing line trace, 3 = box-line 2x2 grid + master (graphics layout)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if text_scope:
-        vis = "text2" if int(text_scope) == 2 else "text1"
+        ts = int(text_scope)
+        vis = "text3" if ts == 3 else "text2" if ts == 2 else "text1"
     elif scope:
         vis = "graphics"
     else:

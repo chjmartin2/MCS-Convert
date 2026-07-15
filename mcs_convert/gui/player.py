@@ -791,9 +791,10 @@ class ImportPreview(tk.Toplevel):
         # Tandy noise channel). The scope dropdown picks the on-screen display:
         # none, 320x200 graphics, or lighter 80x25 text (60 fps on real Tandy).
         tk.Label(btns, text="scope", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
-        self.com_scope = tk.StringVar(value="text 2")
+        self.com_scope = tk.StringVar(value="text 3")
         ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
-                     values=("none", "graphics", "text 1", "text 2")).pack(side="left", padx=(0, 6))
+                     values=("none", "graphics", "text 1", "text 2", "text 3")
+                     ).pack(side="left", padx=(0, 6))
         tk.Button(btns, text="Export .COM", command=self._export_com).pack(
             side="left", padx=(0, 6))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
@@ -1058,7 +1059,8 @@ class ImportPreview(tk.Toplevel):
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
                              scope=(kind == "graphics"),
-                             text_scope=(2 if kind == "text 2" else
+                             text_scope=(3 if kind == "text 3" else
+                                         2 if kind == "text 2" else
                                          1 if kind == "text 1" else 0))
         except Exception as exc:                     # noqa: BLE001 - size/build errors
             messagebox.showerror("Cannot build .COM", str(exc), parent=self)
