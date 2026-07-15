@@ -786,6 +786,15 @@ class ImportPreview(tk.Toplevel):
         self.drop_label.pack(side="left", padx=(0, 14))
         self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
         self.size_label.pack(side="left", padx=(0, 14))
+        # Standalone .COM export: a self-contained DOS player of the SELECTION,
+        # incl. percussion (which the .MCS/tracker output can't carry on the
+        # Tandy noise channel). The scope box adds the on-screen oscilloscope.
+        self.com_scope = tk.BooleanVar(value=True)
+        tk.Checkbutton(btns, text="scope", variable=self.com_scope, bg=_BG, fg=_FG,
+                       activebackground=_BG, activeforeground=_FG,
+                       selectcolor="#2a2e3a").pack(side="left")
+        tk.Button(btns, text="Export .COM", command=self._export_com).pack(
+            side="left", padx=(0, 6))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
         tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
         self._update_size()
@@ -1024,6 +1033,47 @@ class ImportPreview(tk.Toplevel):
         data = self.encode_selection()
         self.destroy()
         self.app.save_and_load(data, self.src)
+
+    def _export_com(self) -> None:
+        """Save a standalone DOS .COM that plays the current selection — INCLUDING
+        percussion, which the .MCS/tracker output can't carry (the .COM plays it
+        on the Tandy noise channel). Target follows the "For" dropdown: Tandy (3
+        voices) or PC Speaker 1 Note; "scope" adds the oscilloscope (Tandy only)."""
+        self.app.player.stop()
+        if not any(v.get() for v in self.include):
+            messagebox.showwarning("Nothing selected",
+                                   "Every channel is unchecked — nothing to export.",
+                                   parent=self)
+            return
+        mode = {3: "tandy", 1: "1voice"}.get(self._out_modes[self.out_mode.get()])
+        if mode is None:                             # PC Speaker 4 Note (phase 2)
+            messagebox.showinfo(
+                "Pick a .COM target",
+                'The standalone .COM plays on Tandy (3 voices) or PC Speaker 1 '
+                'Note. Choose one of those in "For".', parent=self)
+            return
+        scope = bool(self.com_scope.get()) and mode == "tandy"
+        try:
+            from ..dosplayer import build_com
+            data = build_com(self.selected_song(), mode, self._tempo_byte0(),
+                             scope=scope)
+        except Exception as exc:                     # noqa: BLE001 - size/build errors
+            messagebox.showerror("Cannot build .COM", str(exc), parent=self)
+            return
+        default = _dos_name(os.path.splitext(os.path.basename(self.src))[0]) + ".COM"
+        out = filedialog.asksaveasfilename(
+            title="Export standalone .COM", defaultextension=".com",
+            initialdir=os.path.dirname(self.src), initialfile=default,
+            filetypes=[("DOS programs", "*.com *.COM")], parent=self)
+        if not out:
+            return
+        with open(out, "wb") as fh:
+            fh.write(data)
+        tip = " (run in DOSBox with machine=tandy)" if mode == "tandy" else ""
+        messagebox.showinfo(
+            "Exported .COM",
+            f"Wrote {os.path.basename(out)} — {len(data):,} bytes{tip}.",
+            parent=self)
 
     def _close(self) -> None:
         self.app.player.stop()
