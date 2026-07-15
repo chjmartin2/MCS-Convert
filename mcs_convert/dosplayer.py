@@ -253,10 +253,10 @@ _CHW = 70                       # channel scope width in byte columns; L = 0..69
 _TOP = (10, 50, 30)             # top-row band: hi_y, lo_y, cen_y (drawn y 10..50)
 _BOT = (70, 110, 90)            # bottom-row band
 # (hi_y, lo_y, cen_y, packed colour, left column). left col 4, right col 86.
-_CH = [(*_TOP, 0xAA, 4),        # ch0 green   top-left
-       (*_TOP, 0xBB, 86),       # ch1 cyan    top-right
-       (*_BOT, 0xEE, 4),        # ch2 yellow  bottom-left
-       (*_BOT, 0xDD, 86)]       # ch3 noise   bottom-right (magenta)
+_CH = [(*_TOP, 0xEE, 4),        # ch0 yellow      top-left
+       (*_TOP, 0x44, 86),       # ch1 dark red    top-right
+       (*_BOT, 0x11, 4),        # ch2 dark blue   bottom-left
+       (*_BOT, 0xAA, 86)]       # ch3 noise bright green  bottom-right
 _NOISE_CEN = 90                 # noise band centre (spikes go both ways from here)
 _MASTER_CEN_Y = 158
 # Master = the 3 tone levels (±1 each) summed, each divided by 3 -> discrete
@@ -449,7 +449,7 @@ def _emit_drawframe(a: "_Asm") -> None:
 # A cell is a word: char (0xDB) in the low byte, colour attribute in the high.
 _TBLK = 0xDB                    # full-block glyph
 _TCEN = (2, 7, 12, 17, 22)      # band centre rows (ch0-3 + master)
-_TATTR = (0x0A, 0x0B, 0x0E, 0x0D, 0x0F)   # green/cyan/yellow/magenta/white
+_TATTR = (0x0E, 0x04, 0x01, 0x0A, 0x0F)   # yellow/dark-red/dark-blue/bright-green/white
 _TAMP = 2                       # wave amplitude in rows (± from centre)
 _TEXTROW = [r * 160 for r in range(25)]   # byte offset of each text row
 
