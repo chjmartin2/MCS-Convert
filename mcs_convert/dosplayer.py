@@ -259,11 +259,15 @@ _CH = [(*_TOP, 0xAA, 4),        # ch0 green   top-left
        (*_BOT, 0xDD, 86)]       # ch3 noise   bottom-right (magenta)
 _NOISE_CEN = 90                 # noise band centre (spikes go both ways from here)
 _MASTER_CEN_Y = 158
-_MASTER_K = 6                   # y = 158 - (sum of 4 channel levels)*6
-# white frames (x0, x1, y0, y1): the four scopes + the master.
+# Master = the 3 tone levels (±1 each) summed, each divided by 3 -> discrete
+# bands: y = 158 - sum*12, so sum -3/-1/+1/+3 lands on 4 levels (194/170/146/122),
+# max only when all three are high, min when all three are low. Noise is excluded.
+_MASTER_K = 12
+# white frames (x0, x1, y0, y1): the four scopes + the master (aligned to the grid
+# on both sides: left x=2, right x=157).
 _FRAMES = [(2, 75, 6, 54), (84, 157, 6, 54),
            (2, 75, 66, 114), (84, 157, 66, 114),
-           (2, 145, 120, 196)]
+           (2, 157, 120, 196)]
 _ROWADDR = [(y & 3) * 0x2000 + (y >> 2) * 160 for y in range(200)]
 
 
@@ -364,12 +368,7 @@ def _emit_noise_draw(a: "_Asm") -> None:
     a.db(0x88, 0xE1).db(0x80, 0xE1, 0x1F).db(0x30, 0xED)   # mov cl,ah; and cl,0x1F (0..31); xor ch,ch
     a.db(0x81, 0xE9).bytes(_w(16))                      # sub cx,16  (-16..15)
     a.db(0x81, 0xC1).bytes(_w(cen))                     # add cx,cen (y = cen-16..cen+15)
-    a.db(0x81, 0xF9).bytes(_w(cen)).db(0x73).rel8("n_dn")   # cmp cx,cen; jae n_dn (y>=cen = down)
-    a.db(0xFE, 0x06).abs16("msum").db(0xEB).rel8("n_sp")    # inc byte[msum]; jmp spike
-    a.label("n_dn")
-    a.db(0xFE, 0x0E).abs16("msum")                      # dec byte[msum]
-    a.label("n_sp")
-    a.db(0xB8).bytes(_w(cen))                           # mov ax,cen
+    a.db(0xB8).bytes(_w(cen))                           # mov ax,cen  (noise is NOT in the master sum)
     a.db(0x39, 0xC8).db(0x76).rel8("n_o").db(0x91)      # cmp ax,cx; jbe o; xchg ax,cx
     a.label("n_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
@@ -378,20 +377,20 @@ def _emit_noise_draw(a: "_Asm") -> None:
 
 
 def _emit_master_draw(a: "_Asm") -> None:
-    """Master (framed, below the grid): y = 158 - (sum of the 4 channel levels)*6,
-    connected to the previous column's y. Drawn 2 columns wide (4+2L, 4+2L+1;
-    BP = L = 0..69) so the 70 samples span the width."""
+    """Master (framed, below the grid): y = 158 - (sum of the 3 tone levels)*12,
+    so it steps between discrete bands, connected column to column. Drawn 2 wide
+    (10+2L, 10+2L+1; BP = L = 0..69), centred in its frame."""
     a.db(0xB2, 0xFF)                                    # mov dl, white
     a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
-    a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,K; imul cx (ax=sum*K)
+    a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,12; imul cx (ax=sum*12)
     a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
     a.db(0xA1).abs16("prev_my").db(0x89, 0x0E).abs16("prev_my")  # mov ax,[prev_my];mov[prev_my],cx
     a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
     a.label("m_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
-    a.db(0x89, 0xEB).db(0x01, 0xEB).db(0x83, 0xC3, 0x04)    # mov bx,bp; add bx,bp; add bx,4 (=4+2L)
-    a.db(0xE8).rel16("vline")                           # call vline (col 4+2L)
-    a.db(0x43).db(0xE8).rel16("vline")                  # inc bx; call vline (col 4+2L+1)
+    a.db(0x89, 0xEB).db(0x01, 0xEB).db(0x83, 0xC3, 0x0A)    # mov bx,bp; add bx,bp; add bx,10 (=10+2L)
+    a.db(0xE8).rel16("vline")                           # call vline (col 10+2L)
+    a.db(0x43).db(0xE8).rel16("vline")                  # inc bx; call vline (col 10+2L+1)
 
 
 def _emit_blit(a: "_Asm") -> None:
