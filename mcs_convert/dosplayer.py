@@ -239,25 +239,31 @@ class _Asm:
         return bytes(self.buf)
 
 
-# Scope layout: a 2x2 GRID of the four channels (each a 160x60 quadrant) with a
-# full-width master trace below, like the GUI player's scope view. Drawing is
-# DIRECT into the Tandy mode-9 packed/banked back buffer at BYTE granularity:
-# each sample is one byte = two horizontal pixels, both nibbles the same colour,
-# so a plot is a single store (no read-modify-write). rowaddr[y] (baked table)
-# gives a scanline's byte offset (bank y&3 at (y>>2)*160). A quadrant is 80 byte
-# columns wide (x-offset 0 for the left column, 80 for the right).
+# Scope layout: a spaced 2x2 GRID of the four channel scopes, each inside a white
+# frame with black margins, then a wide master trace framed below (like the GUI
+# player's scope view). Drawing is DIRECT into the Tandy mode-9 packed/banked
+# back buffer at BYTE granularity: each sample is one byte = two pixels, both
+# nibbles the same colour, so a plot is a single store. rowaddr[y] (baked table)
+# gives a scanline's byte offset (bank y&3 at (y>>2)*160). Waves are drawn by
+# connecting consecutive samples with a vertical line (vline) -- the same way for
+# every scope, so square edges stay crisp.
 _SCROLL_SPEED = 2               # columns the waves scroll per frame
 _NOISE_SEED = 0xACE1
-_TOP = (8, 52, 30)              # top-row quadrant band: hi_y, lo_y, cen_y (y 0..59)
-_BOT = (68, 112, 90)            # bottom-row quadrant band (y 60..119)
-# (hi_y, lo_y, cen_y, packed colour, x-column offset). left=0, right=80.
-_CH = [(*_TOP, 0xAA, 0),        # ch0 green   top-left
-       (*_TOP, 0xBB, 80),       # ch1 cyan    top-right
-       (*_BOT, 0xEE, 0),        # ch2 yellow  bottom-left
-       (*_BOT, 0xDD, 80)]       # ch3 noise   bottom-right (magenta)
-_NOISE_BASE = 74                # noise random y base (band 60..119, ~centre 90)
-_MASTER_CEN_Y = 160
-_MASTER_K = 8                   # y = 160 - (sum of 4 channel levels)*8 (band 120..199)
+_CHW = 70                       # channel scope width in byte columns; L = 0..69
+_TOP = (10, 50, 30)             # top-row band: hi_y, lo_y, cen_y (drawn y 10..50)
+_BOT = (70, 110, 90)            # bottom-row band
+# (hi_y, lo_y, cen_y, packed colour, left column). left col 4, right col 86.
+_CH = [(*_TOP, 0xAA, 4),        # ch0 green   top-left
+       (*_TOP, 0xBB, 86),       # ch1 cyan    top-right
+       (*_BOT, 0xEE, 4),        # ch2 yellow  bottom-left
+       (*_BOT, 0xDD, 86)]       # ch3 noise   bottom-right (magenta)
+_NOISE_CEN = 90                 # noise band centre (spikes go both ways from here)
+_MASTER_CEN_Y = 158
+_MASTER_K = 6                   # y = 158 - (sum of 4 channel levels)*6
+# white frames (x0, x1, y0, y1): the four scopes + the master.
+_FRAMES = [(2, 75, 6, 54), (84, 157, 6, 54),
+           (2, 75, 66, 114), (84, 157, 66, 114),
+           (2, 145, 120, 196)]
 _ROWADDR = [(y & 3) * 0x2000 + (y >> 2) * 160 for y in range(200)]
 
 
@@ -275,84 +281,117 @@ def _emit_ploty(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+def _emit_vline(a: "_Asm") -> None:
+    """Vertical line from [vtop] down to [vbot] (inclusive, vtop<=vbot) at column
+    BX, colour DL. Clobbers AX, CX, SI, DI."""
+    a.label("vline")
+    a.db(0xA1).abs16("vtop")                            # mov ax,[vtop]
+    a.label("vl_lp")
+    a.db(0x89, 0xC1).db(0xE8).rel16("ploty")            # mov cx,ax; call ploty
+    a.db(0x40).db(0x3B, 0x06).abs16("vbot")             # inc ax; cmp ax,[vbot]
+    a.db(0x76).rel8("vl_lp")                            # jbe vl_lp
+    a.db(0xC3)                                          # ret
+
+
+def _emit_hline(a: "_Asm") -> None:
+    """Horizontal line at y=CX from column BX to [hend]-1, colour DL. Clobbers
+    BX, SI, DI (CX/y preserved)."""
+    a.label("hline")
+    a.label("hl_lp")
+    a.db(0xE8).rel16("ploty")                           # call ploty
+    a.db(0x43).db(0x3B, 0x1E).abs16("hend")             # inc bx; cmp bx,[hend]
+    a.db(0x72).rel8("hl_lp")                            # jb hl_lp
+    a.db(0xC3)                                          # ret
+
+
+def _emit_frame(a: "_Asm", x0: int, x1: int, y0: int, y1: int) -> None:
+    """Draw a white rectangle outline (top/bottom via hline, sides via vline)."""
+    a.db(0xB2, 0xFF)                                    # mov dl, white
+    a.db(0xC7, 0x06).abs16("hend").bytes(_w(x1 + 1))    # mov word[hend], x1+1
+    a.db(0xBB).bytes(_w(x0)).db(0xB9).bytes(_w(y0)).db(0xE8).rel16("hline")   # top
+    a.db(0xBB).bytes(_w(x0)).db(0xB9).bytes(_w(y1)).db(0xE8).rel16("hline")   # bottom
+    a.db(0xC7, 0x06).abs16("vtop").bytes(_w(y0))        # mov word[vtop], y0
+    a.db(0xC7, 0x06).abs16("vbot").bytes(_w(y1))        # mov word[vbot], y1
+    a.db(0xBB).bytes(_w(x0)).db(0xE8).rel16("vline")    # left
+    a.db(0xBB).bytes(_w(x1)).db(0xE8).rel16("vline")    # right
+
+
 def _emit_channel_draw(a: "_Asm", ch: int) -> None:
-    """One tone channel per column (BX = its quadrant column): plot its HI/LO/
-    CENTRE sample, add ±1 to the master sum (HI = up = +1), advance its scroll
-    counter, and at a flip draw the vertical edge HI..LO so the square is solid."""
-    hi, lo, cen, packed, _xoff = _CH[ch]
+    """One tone channel per column (BX = its screen column): pick this column's y
+    (HI/LO while sounding, CENTRE when silent), add ±1 to the master sum (HI =
+    up = +1), advance its scroll counter, then connect the previous column's y to
+    this one with a vline -- so the square is solid and edges stay crisp."""
+    hi, lo, cen, packed, _cs = _CH[ch]
     a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"c{ch}_snd")                       # jne snd
-    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen_y; call ploty
-    a.db(0xEB).rel8(f"c{ch}_d")                         # jmp done
-    a.label(f"c{ch}_snd")
+    a.db(0x75).rel8(f"c{ch}_s")                         # jne snd
+    a.db(0xB9).bytes(_w(cen))                           # mov cx,cen_y
+    a.db(0xEB).rel8(f"c{ch}_y")                         # jmp have_y
+    a.label(f"c{ch}_s")
     a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
     a.db(0x74).rel8(f"c{ch}_lo")                        # je lo
-    a.db(0xB9).bytes(_w(hi)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi_y; inc byte[msum] (up=+1)
-    a.db(0xEB).rel8(f"c{ch}_pl")                        # jmp pl
+    a.db(0xB9).bytes(_w(hi)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi_y; inc byte[msum] (up)
+    a.db(0xEB).rel8(f"c{ch}_a")                         # jmp adv
     a.label(f"c{ch}_lo")
     a.db(0xB9).bytes(_w(lo)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo_y; dec byte[msum]
-    a.label(f"c{ch}_pl")
-    a.db(0xE8).rel16("ploty")                           # call ploty
+    a.label(f"c{ch}_a")
     a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"c{ch}_d")                         # jnz done
+    a.db(0x75).rel8(f"c{ch}_y")                         # jnz have_y
     a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1 (flip)
     a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)   # mov al,[viz+ch];mov[cnt+ch],al
-    a.db(0xB9).bytes(_w(hi))                            # mov cx,hi_y (vertical edge start)
-    a.label(f"c{ch}_v")
-    a.db(0xE8).rel16("ploty")                           # call ploty
-    a.db(0x41).db(0x81, 0xF9).bytes(_w(lo + 1))         # inc cx; cmp cx,lo_y+1
-    a.db(0x72).rel8(f"c{ch}_v")                         # jb c{ch}_v
-    a.label(f"c{ch}_d")
+    a.label(f"c{ch}_y")
+    a.db(0xA1).abs16("prevy", ch * 2)                   # mov ax,[prevy+ch] (previous y)
+    a.db(0x89, 0x0E).abs16("prevy", ch * 2)             # mov [prevy+ch],cx (save this y)
+    a.db(0x39, 0xC8).db(0x76).rel8(f"c{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg ax,cx
+    a.label(f"c{ch}_o")
+    a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
+    a.db(0xE8).rel16("vline")                           # call vline
 
 
 def _emit_noise_draw(a: "_Asm") -> None:
-    """Channel 3 is NOISE: draw THREE random dots per column from an evolving LCG
-    seed (shimmers frame to frame). Silent -> a flat centre line. Contributes ±1
-    to the master sum while active."""
-    _, _, cen, packed, _xoff = _CH[3]
+    """Channel 3 is NOISE: a single-colour spike from the band centre to a random
+    y that swings BOTH ways (an evolving LCG seed makes it shimmer). Silent -> a
+    flat centre line. Contributes its spike direction (±1) to the master sum."""
+    _, _, cen, packed, _cs = _CH[3]
     a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
     a.db(0x75).rel8("n_act")                            # jne active
-    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen_y; call ploty
+    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen; call ploty (flat)
     a.db(0xEB).rel8("n_done")                           # jmp done
     a.label("n_act")
-    for _k in range(3):                                 # three random dots
-        a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # mov ax,[seed];mov cx,25173;mul cx
-        a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")   # add ax,13849; mov [seed],ax
-        a.db(0x88, 0xE1).db(0x80, 0xE1, 0x0F).db(0x30, 0xED)   # mov cl,ah; and cl,0x0F; xor ch,ch
-        a.db(0x81, 0xC1).bytes(_w(_NOISE_BASE))         # add cx, noise base
-        a.db(0xE8).rel16("ploty")                       # call ploty
-    a.db(0xF6, 0x06).abs16("seed").db(0x01)             # test byte[seed],1
-    a.db(0x74).rel8("n_lo")                             # jz n_lo
-    a.db(0xFE, 0x06).abs16("msum").db(0xEB).rel8("n_done")  # inc byte[msum]; jmp done
-    a.label("n_lo")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # mov ax,[seed];mov cx,25173;mul cx
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")       # add ax,13849; mov [seed],ax
+    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x1F).db(0x30, 0xED)   # mov cl,ah; and cl,0x1F (0..31); xor ch,ch
+    a.db(0x81, 0xE9).bytes(_w(16))                      # sub cx,16  (-16..15)
+    a.db(0x81, 0xC1).bytes(_w(cen))                     # add cx,cen (y = cen-16..cen+15)
+    a.db(0x81, 0xF9).bytes(_w(cen)).db(0x73).rel8("n_dn")   # cmp cx,cen; jae n_dn (y>=cen = down)
+    a.db(0xFE, 0x06).abs16("msum").db(0xEB).rel8("n_sp")    # inc byte[msum]; jmp spike
+    a.label("n_dn")
     a.db(0xFE, 0x0E).abs16("msum")                      # dec byte[msum]
+    a.label("n_sp")
+    a.db(0xB8).bytes(_w(cen))                           # mov ax,cen
+    a.db(0x39, 0xC8).db(0x76).rel8("n_o").db(0x91)      # cmp ax,cx; jbe o; xchg ax,cx
+    a.label("n_o")
+    a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
+    a.db(0xE8).rel16("vline")                           # call vline (spike)
     a.label("n_done")
 
 
 def _emit_master_draw(a: "_Asm") -> None:
-    """Master (full width, below the grid): y = 160 - (sum of the 4 channel
-    levels)*8, connected to the previous column's y by a vertical line. Drawn at
-    columns 2L and 2L+1 (BP = L = 0..79) so 80 samples span the full 320 px."""
-    a.db(0xB2, 0xFF)                                    # mov dl, white (0xFF)
+    """Master (framed, below the grid): y = 158 - (sum of the 4 channel levels)*6,
+    connected to the previous column's y. Drawn 2 columns wide (4+2L, 4+2L+1;
+    BP = L = 0..69) so the 70 samples span the width."""
+    a.db(0xB2, 0xFF)                                    # mov dl, white
     a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
     a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,K; imul cx (ax=sum*K)
-    a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,160; sub cx,ax (cx=y)
+    a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
     a.db(0xA1).abs16("prev_my").db(0x89, 0x0E).abs16("prev_my")  # mov ax,[prev_my];mov[prev_my],cx
-    a.db(0x39, 0xC8)                                    # cmp ax,cx
-    a.db(0x76).rel8("m_ord")                            # jbe m_ord
-    a.db(0x91)                                          # xchg ax,cx (ax=top, cx=bottom)
-    a.label("m_ord")
-    a.db(0xA3).abs16("mtop").db(0x89, 0x0E).abs16("mbot")   # mov [mtop],ax; mov [mbot],cx
-    a.db(0x89, 0xE8).db(0x01, 0xC0).db(0xA3).abs16("mcol")  # mov ax,bp; add ax,ax; mov [mcol],ax (2L)
-    a.db(0xA1).abs16("mtop")                            # mov ax,[mtop] (loop y)
-    a.label("m_vloop")
-    a.db(0x89, 0xC1)                                    # mov cx,ax (y)
-    a.db(0x8B, 0x1E).abs16("mcol").db(0xE8).rel16("ploty")        # mov bx,[mcol]; call ploty (2L)
-    a.db(0x8B, 0x1E).abs16("mcol").db(0x43).db(0xE8).rel16("ploty")  # mov bx,[mcol];inc bx;call ploty (2L+1)
-    a.db(0x40).db(0x3B, 0x06).abs16("mbot")            # inc ax; cmp ax,[mbot]
-    a.db(0x76).rel8("m_vloop")                          # jbe m_vloop
+    a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
+    a.label("m_o")
+    a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
+    a.db(0x89, 0xEB).db(0x01, 0xEB).db(0x83, 0xC3, 0x04)    # mov bx,bp; add bx,bp; add bx,4 (=4+2L)
+    a.db(0xE8).rel16("vline")                           # call vline (col 4+2L)
+    a.db(0x43).db(0xE8).rel16("vline")                  # inc bx; call vline (col 4+2L+1)
 
 
 def _emit_blit(a: "_Asm") -> None:
@@ -384,22 +423,22 @@ def _emit_drawframe(a: "_Asm") -> None:
         a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)   # xor dx,dx;mov ax,[scroll];div bx
         a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)      # and al,1; mov [lev+ch],al (quotient&1)
         a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)  # mov ax,bx;sub ax,dx;mov[cnt+ch],al (P-rem)
-    a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=160
-    a.db(0x31, 0xED)                                    # xor bp,bp  (L = quadrant column 0..79)
+        a.db(0xC7, 0x06).abs16("prevy", ch * 2).bytes(_w(_CH[ch][2]))  # prevy[ch]=cen_y
+    a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=158
+    a.db(0x31, 0xED)                                    # xor bp,bp  (L = column 0..69)
     a.label("xloop")
     a.db(0xC6, 0x06).abs16("msum").db(0x00)             # mov byte[msum],0
     for ch in range(3):
-        xoff = _CH[ch][4]
-        a.db(0x89, 0xEB)                               # mov bx,bp
-        if xoff:
-            a.db(0x83, 0xC3, xoff)                     # add bx,xoff (right column)
+        a.db(0xBB).bytes(_w(_CH[ch][4])).db(0x01, 0xEB)  # mov bx,col_start; add bx,bp
         _emit_channel_draw(a, ch)
-    a.db(0x89, 0xEB).db(0x83, 0xC3, _CH[3][4])         # mov bx,bp; add bx,80 (noise bottom-right)
+    a.db(0xBB).bytes(_w(_CH[3][4])).db(0x01, 0xEB)     # mov bx,86; add bx,bp (noise)
     _emit_noise_draw(a)
     _emit_master_draw(a)
-    a.db(0x45).db(0x83, 0xFD, 80)                      # inc bp; cmp bp,80
+    a.db(0x45).db(0x83, 0xFD, _CHW)                    # inc bp; cmp bp,70
     a.db(0x73).rel8("xdone").db(0xE9).rel16("xloop")    # jae xdone; jmp xloop
     a.label("xdone")
+    for fr in _FRAMES:                                  # white frames on top
+        _emit_frame(a, *fr)
     a.db(0xC3)                                          # ret
 
 
@@ -496,6 +535,8 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0x1F, 0x5F, 0x5E, 0x5A, 0x59, 0x58, 0xCF)   # pop ds,di,si,dx,cx,ax ; iret
     if scope:
         _emit_ploty(a)
+        _emit_vline(a)
+        _emit_hline(a)
         _emit_drawframe(a)
         _emit_blit(a)
         a.label("rowaddr")                           # mode-9 byte offset of each scanline
@@ -513,9 +554,10 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
         a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
-        a.label("mtop"); a.db(0x00, 0x00)                # master vertical-line top y
-        a.label("mbot"); a.db(0x00, 0x00)                # master vertical-line bottom y
-        a.label("mcol"); a.db(0x00, 0x00)                # master column (2L)
+        a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
+        a.label("vtop"); a.db(0x00, 0x00)                # vline top y
+        a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
+        a.label("hend"); a.db(0x00, 0x00)                # hline end column
         a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
         a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
     # ---- appended data ------------------------------------------------------
