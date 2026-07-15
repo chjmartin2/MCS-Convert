@@ -599,6 +599,137 @@ def _emit_text_blit(a: "_Asm") -> None:
     a.db(0x1F).db(0xC3)                                 # pop ds; ret
 
 
+# ---- text-mode 2: box-drawing (line) oscilloscope trace ---------------------
+# Same 5-band layout as text 1, but the wave is a CONNECTED LINE built from
+# CP437 box glyphs (179..218): each column links the previous row to this one
+# with a horizontal run, a vertical edge, and corners -- a clean scope trace.
+_BOX_H, _BOX_V = 0xC4, 0xB3          # - and |
+_BOX_TL, _BOX_TR = 0xDA, 0xBF        # top-left (down+right), top-right (down+left)
+_BOX_BL, _BOX_BR = 0xC0, 0xD9        # bottom-left (up+right), bottom-right (up+left)
+
+
+def _emit_t2seg(a: "_Asm") -> None:
+    """Draw the box-glyph segment linking [t2prev] to [t2cur] at column BP, colour
+    [t2attr]: flat -> a horizontal run; a jump -> corners + a vertical edge."""
+    a.label("t2seg")
+    a.db(0x89, 0xEB)                                    # mov bx,bp (col)
+    a.db(0x8A, 0x26).abs16("t2attr")                    # mov ah,[t2attr]
+    a.db(0x8B, 0x0E).abs16("t2cur")                     # mov cx,[t2cur]
+    a.db(0x3B, 0x0E).abs16("t2prev")                    # cmp cx,[t2prev]
+    a.db(0x74).rel8("t2_flat")                          # je flat
+    a.db(0x72).rel8("t2_rise")                          # jb rising (cur<prev)
+    # falling: prev is top, cur is bottom
+    a.db(0x8B, 0x16).abs16("t2prev")                    # mov dx,[t2prev]
+    a.db(0x89, 0x16).abs16("t2top").db(0x89, 0x0E).abs16("t2bot")  # t2top=dx; t2bot=cx
+    a.db(0x51).db(0x89, 0xD1).db(0xB0, _BOX_TR).db(0xE8).rel16("tcell").db(0x59)  # push cx;cx=dx;al=┐;tcell;pop cx
+    a.db(0xB0, _BOX_BL).db(0xE8).rel16("tcell")         # al=└; tcell (at cur/bot)
+    a.db(0xEB).rel8("t2_vfill")                         # jmp vfill
+    a.label("t2_rise")                                  # rising: cur is top
+    a.db(0x8B, 0x16).abs16("t2prev")                    # mov dx,[t2prev]
+    a.db(0x89, 0x0E).abs16("t2top").db(0x89, 0x16).abs16("t2bot")  # t2top=cx; t2bot=dx
+    a.db(0xB0, _BOX_TL).db(0xE8).rel16("tcell")         # al=┌; tcell (at cur/top)
+    a.db(0x51).db(0x89, 0xD1).db(0xB0, _BOX_BR).db(0xE8).rel16("tcell").db(0x59)  # push cx;cx=dx;al=┘;tcell;pop cx
+    a.label("t2_vfill")
+    a.db(0x8B, 0x0E).abs16("t2top").db(0x41)            # mov cx,[t2top]; inc cx
+    a.label("t2_vl")
+    a.db(0x3B, 0x0E).abs16("t2bot").db(0x73).rel8("t2_done")  # cmp cx,[t2bot]; jae done
+    a.db(0xB0, _BOX_V).db(0xE8).rel16("tcell")          # al=│; tcell
+    a.db(0x41).db(0xEB).rel8("t2_vl")                   # inc cx; jmp vl
+    a.label("t2_done")
+    a.db(0xC3)                                          # ret
+    a.label("t2_flat")
+    a.db(0xB0, _BOX_H).db(0xE8).rel16("tcell").db(0xC3)  # al=─; tcell; ret
+
+
+def _emit_t2row(a: "_Asm", ch: int) -> None:
+    """Set up [t2cur]/[t2prev]/[t2attr] from the row in CX and call t2seg,
+    advancing this band's previous-row so the line stays connected."""
+    a.db(0x89, 0x0E).abs16("t2cur")                     # mov [t2cur],cx
+    a.db(0xA1).abs16("prevrow", ch * 2).db(0xA3).abs16("t2prev")  # mov ax,[prevrow+ch];mov[t2prev],ax
+    a.db(0x89, 0x0E).abs16("prevrow", ch * 2)           # mov [prevrow+ch],cx
+    a.db(0xC6, 0x06).abs16("t2attr").db(_TATTR[ch])     # mov byte[t2attr],attr
+    a.db(0xE8).rel16("t2seg")                           # call t2seg
+
+
+def _emit_text2_channel(a: "_Asm", ch: int) -> None:
+    """Tone channel: pick HI/LO/CENTRE row from its scroll counter, add ±1 to the
+    master sum, draw the connected line segment."""
+    rc = _TCEN[ch]
+    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
+    a.db(0x75).rel8(f"u{ch}_s")                         # jne snd
+    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8(f"u{ch}_r")  # mov cx,centre; jmp row
+    a.label(f"u{ch}_s")
+    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
+    a.db(0x74).rel8(f"u{ch}_lo")                        # je lo
+    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
+    a.db(0xEB).rel8(f"u{ch}_a")                         # jmp adv
+    a.label(f"u{ch}_lo")
+    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
+    a.label(f"u{ch}_a")
+    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
+    a.db(0x75).rel8(f"u{ch}_r")                         # jnz row
+    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
+    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
+    a.label(f"u{ch}_r")
+    _emit_t2row(a, ch)
+
+
+def _emit_text2_noise(a: "_Asm") -> None:
+    """Noise band: connect to a random nearby row (a jagged noise trace)."""
+    rc = _TCEN[3]
+    a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
+    a.db(0x75).rel8("un_a")                             # jne active
+    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8("un_r")      # mov cx,centre; jmp row
+    a.label("un_a")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # LCG
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")
+    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x03).db(0x30, 0xED)   # cl=ah; and cl,3; xor ch,ch
+    a.db(0x81, 0xE9, 0x01, 0x00)                        # sub cx,1  (-1..2)
+    a.db(0x81, 0xC1).bytes(_w(rc))                      # add cx,centre
+    a.label("un_r")
+    _emit_t2row(a, 3)
+
+
+def _emit_text2_master(a: "_Asm") -> None:
+    """Master band: row = centre - clamp(3-tone sum, -2..2) -> discrete line."""
+    rc = _TCEN[4]
+    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
+    a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle; mov ax,2
+    a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge; mov ax,-2
+    a.db(0xB9).bytes(_w(rc)).db(0x29, 0xC1)             # mov cx,centre; sub cx,ax (row)
+    _emit_t2row(a, 4)
+
+
+def _emit_text2_drawframe(a: "_Asm") -> None:
+    """Redraw the five box-line scopes into the 80x25 back buffer."""
+    a.label("drawframe")
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # mov ax,0x0720 (space); xor di,di
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # mov cx,2000; rep stosw (clear)
+    a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
+    for ch in range(3):                                 # phase each tone channel by scroll
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
+        a.db(0x75).rel8(f"ur{ch}").db(0xB0, 0x01)
+        a.label(f"ur{ch}")
+        a.db(0x30, 0xE4).db(0x89, 0xC3)
+        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
+        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
+        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+    for i in range(5):                                  # reset each band's previous row to its centre
+        a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_TCEN[i]))
+    a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
+    a.label("txloop")
+    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    for ch in range(3):
+        _emit_text2_channel(a, ch)
+    _emit_text2_noise(a)
+    _emit_text2_master(a)
+    a.db(0x45).db(0x83, 0xFD, 80)                       # inc bp; cmp bp,80
+    a.db(0x73).rel8("txdone").db(0xE9).rel16("txloop")  # jae; jmp
+    a.label("txdone")
+    a.db(0xC3)                                          # ret
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
               silence: bytes, stream: bytes, vis: str = "") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
@@ -607,7 +738,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     "graphics" (mode 9) or "text" (mode 3)."""
     a = _Asm()
     if vis:
-        video_mode = 0x03 if vis == "text" else 0x09
+        video_mode = 0x03 if vis.startswith("text") else 0x09
         a.db(0xB8, video_mode, 0x00).db(0xCD, 0x10)     # mov ax,000N; int 0x10 (set video mode)
         # back buffer one 64 KB block past our program (a .COM owns all memory)
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)           # mov ax,cs; add ax,0x1000
@@ -700,12 +831,19 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         _emit_blit(a)
         a.label("rowaddr")                           # mode-9 byte offset of each scanline
         a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
-    elif vis == "text":
+    elif vis == "text1":
         _emit_tcell(a)
         _emit_tfill(a)
         _emit_text_drawframe(a)
         _emit_text_blit(a)
         a.label("textrow")                           # byte offset of each text row
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text2":
+        _emit_tcell(a)
+        _emit_t2seg(a)
+        _emit_text2_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
@@ -727,9 +865,16 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("vtop"); a.db(0x00, 0x00)                # vline top y
         a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
         a.label("hend"); a.db(0x00, 0x00)                # hline end column
-    elif vis == "text":                              # text fill state
+    elif vis == "text1":                             # text-1 block-fill state
         a.label("ftop"); a.db(0x00, 0x00)                # tfill top row
         a.label("fbot"); a.db(0x00, 0x00)                # tfill bottom row
+    elif vis == "text2":                             # text-2 line-trace state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
+        a.label("t2cur"); a.db(0x00, 0x00)               # this column's row
+        a.label("t2prev"); a.db(0x00, 0x00)              # previous column's row
+        a.label("t2top"); a.db(0x00, 0x00)               # segment top row
+        a.label("t2bot"); a.db(0x00, 0x00)               # segment bottom row
+        a.label("t2attr"); a.db(0x00)                    # current band colour
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -745,10 +890,16 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
-    (Tandy only) adds lighter 80x25 text-mode block scopes instead."""
+    (Tandy only) adds a lighter 80x25 text-mode scope instead -- 1 = block bars,
+    2 = box-drawing line trace."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
-    vis = "text" if text_scope else ("graphics" if scope else "")
+    if text_scope:
+        vis = "text2" if int(text_scope) == 2 else "text1"
+    elif scope:
+        vis = "graphics"
+    else:
+        vis = ""
     if vis and mode != "tandy":
         raise ValueError("the scope display is only implemented for --tandy")
     stream, total = _build_stream(song, mode, bool(vis))

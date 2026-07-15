@@ -157,3 +157,14 @@ def test_text_scope_uses_text_mode_and_is_smaller():
     assert len(txt) < len(gfx)                       # text renderer is lighter
     with pytest.raises(ValueError):                  # Tandy only
         D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, text_scope=True)
+
+
+def test_text2_uses_box_drawing_glyphs():
+    # text_scope=2 is the box-drawing LINE trace: still text mode 3, and it emits
+    # the CP437 corner/line glyphs (┌┐└┘─│). text_scope=1 stays the block bars.
+    t2 = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, text_scope=2)
+    assert t2[:5] == b"\xB8\x03\x00\xCD\x10"         # text mode 3
+    for glyph in (0xDA, 0xBF, 0xC0, 0xD9, 0xC4, 0xB3):   # ┌ ┐ └ ┘ ─ │
+        assert bytes([0xB0, glyph]) in t2            # mov al, <glyph>
+    t1 = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, text_scope=1)
+    assert bytes([0xB0, 0xDA]) not in t1             # block build has no box corners
