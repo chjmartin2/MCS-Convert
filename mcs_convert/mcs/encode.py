@@ -200,7 +200,13 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
     note_counts = []
     for bar in bars:
         entries = []
-        acc_state: Dict[int, int] = {}
+        # An accidental persists to the measure end. We track it BOTH by exact
+        # position (which our decoder / standard notation uses) AND by letter,
+        # i.e. degree across octaves (which real MCS's engine actually does). A
+        # glyph is emitted whenever EITHER reading would otherwise be wrong, so a
+        # sharp on one octave never leaks onto the same letter an octave away.
+        pos_state: Dict[int, int] = {}           # accidental by staff position v
+        let_state: Dict[int, int] = {}           # accidental by degree (v-1)%7
         note_count = 0                           # noteheads+rests this measure
         # x-slots must strictly increase across distinct time positions, or the
         # reader (and real MCS) group different notes into one chord. `last_x`
@@ -239,10 +245,13 @@ def _emit_staff(bars, treble: bool, cap: bool = False, bar_ticks: int = 32,
                 else:
                     for midi in sorted(midis, reverse=True):
                         v, acc = _v_and_acc(midi, treble, v_base)
-                        if acc_state.get(v, key_state_default) != acc:
+                        deg = (v - 1) % 7
+                        if (pos_state.get(v, key_state_default) != acc
+                                or let_state.get(deg, key_state_default) != acc):
                             sym = _SYM_SHARP if acc > 0 else _SYM_NAT
                             slot.append(make_entry(sym, v, x))
-                            acc_state[v] = acc
+                        pos_state[v] = acc
+                        let_state[deg] = acc
                         slot.append(make_entry(_NOTE_SYM[base], v, x))
                         if dotted:
                             slot.append(make_entry(_SYM_DOT, v, aux_x))
