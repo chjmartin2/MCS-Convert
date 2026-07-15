@@ -53,9 +53,19 @@ _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat nois
 
 # --- register encoders (one note/hit -> (port, value) writes) ----------------
 
+def _sn_divider(freq: float) -> int:
+    """SN76489 10-bit divider for `freq`, octave-shifting UP any note below the
+    chip's ~109 Hz floor (divider > 1023) so it stays in TUNE (same pitch class,
+    an octave higher) instead of clamping to a wrong pitch. The NES triangle bass
+    routinely goes below 109 Hz, which is what made it sound out of tune."""
+    while freq > 0 and round(_SN_HZ / (32.0 * freq)) > 1023:
+        freq *= 2.0
+    return max(1, min(1023, round(_SN_HZ / (32.0 * freq))))
+
+
 def _tandy_note_on(ch: int, freq: float) -> List[Tuple[int, int]]:
     """SN76489: set tone channel `ch` (0..2) to `freq` at full volume."""
-    n = max(1, min(1023, round(_SN_HZ / (32.0 * freq))))
+    n = _sn_divider(freq)
     latch = 0x80 | (ch << 5) | (n & 0x0F)          # 1 cc 0 dddd : freq low nibble
     data = (n >> 4) & 0x3F                          # 0 dddddd     : freq high bits
     att = 0x80 | (ch << 5) | 0x10 | 0x00            # 1 cc 1 0000  : attenuation 0
