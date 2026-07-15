@@ -372,6 +372,7 @@ def _emit_noise_draw(a: "_Asm") -> None:
     a.db(0x39, 0xC8).db(0x76).rel8("n_o").db(0x91)      # cmp ax,cx; jbe o; xchg ax,cx
     a.label("n_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
+    a.db(0xB2, packed)                                  # mov dl,packed (LCG's mul clobbered DL!)
     a.db(0xE8).rel16("vline")                           # call vline (spike)
     a.label("n_done")
 
@@ -380,7 +381,6 @@ def _emit_master_draw(a: "_Asm") -> None:
     """Master (framed, below the grid): y = 158 - (sum of the 3 tone levels)*12,
     so it steps between discrete bands, connected column to column. Drawn 2 wide
     (10+2L, 10+2L+1; BP = L = 0..69), centred in its frame."""
-    a.db(0xB2, 0xFF)                                    # mov dl, white
     a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
     a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,12; imul cx (ax=sum*12)
     a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
@@ -388,6 +388,7 @@ def _emit_master_draw(a: "_Asm") -> None:
     a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
     a.label("m_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
+    a.db(0xB2, 0xFF)                                    # mov dl,white (imul clobbered DL!)
     a.db(0x89, 0xEB).db(0x01, 0xEB).db(0x83, 0xC3, 0x0A)    # mov bx,bp; add bx,bp; add bx,10 (=10+2L)
     a.db(0xE8).rel16("vline")                           # call vline (col 10+2L)
     a.db(0x43).db(0xE8).rel16("vline")                  # inc bx; call vline (col 10+2L+1)
