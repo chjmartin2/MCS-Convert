@@ -182,3 +182,23 @@ def test_text3_is_grid_layout_in_text_mode():
     t2 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72)]), "tandy", 0x80,
                      text_scope=2)
     assert len(t3) > len(t2)                          # grid + frames is heavier
+
+
+def test_text4_spectrum_uses_block_and_half_block_glyphs():
+    # text_scope=4 is the faux spectrum analyzer: text mode 3, coloured bars built
+    # from the full block and the half-height blocks (for smooth motion), a white
+    # peak cap, and a per-period harmonic table (4 bins x 51 periods).
+    t4 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72)]), "tandy", 0x80,
+                     text_scope=4)
+    assert t4[:5] == b"\xB8\x03\x00\xCD\x10"          # text mode 3
+    for glyph in (0xDB, 0xDC, 0xDF):                  # █ full, ▄ lower half, ▀ peak cap
+        assert bytes([0xB0, glyph]) in t4
+    # the harmonic table is a square wave's odd harmonics on a log-freq axis:
+    # bins rise with frequency, and harmonics sit above the fundamental
+    harm = D._s4_harm()
+    assert len(harm) == 51 * 4
+    f, h3, h5, h7 = harm[6 * 4:6 * 4 + 4]             # a mid-high note (period 6)
+    assert f < h3 < h5 and h7 >= h5                   # 3f,5f,7f above the fundamental bin
+    # rows are coloured green(low) -> yellow -> red(high)
+    rc = D._s4_rowcol()
+    assert rc[D._S4_BASE_ROW] == D._S4_GREEN and rc[D._S4_TOP_ROW] == D._S4_RED

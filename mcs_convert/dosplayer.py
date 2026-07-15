@@ -935,6 +935,183 @@ def _emit_text3_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+# ---- text-mode 4: faux spectrum analyzer ------------------------------------
+# A bar-graph spectrum: each active tone deposits energy at its fundamental bin
+# and its odd harmonics (3f, 5f, 7f at 1/3, 1/5, 1/7 -- the square wave's
+# spectrum), noise fills the whole band, and the bars attack instantly / release
+# slowly with a slow-falling peak cap. Bars are coloured by height (green ->
+# yellow -> red) and use the half-height block (0xDC) for a sub-cell top edge, so
+# motion is smooth. Frequency->bin and the harmonic offsets are baked into `harm`
+# (a per-period table); the ISR just deposits and draws.
+_S4_N = 20                            # number of frequency bars
+_S4_FIRST_COL = 10                    # left column of the first bar
+_S4_STRIDE = 3                        # columns per bar (2 wide + 1 gap)
+_S4_BASE_ROW = 22                     # baseline (bars grow up from here)
+_S4_TOP_ROW = 2
+_S4_HMAX = 2 * (_S4_BASE_ROW - _S4_TOP_ROW)   # 40 half-units of range
+_S4_FALL = 2                          # bar release, half-units/frame
+_S4_PEAK_FALL = 1                     # peak cap release (slower)
+_S4_HH = (32, 10, 6, 4)               # deposit height: fundamental, 3rd, 5th, 7th
+_S4_NOISE_BASE = 8                    # noise floor height (+ 0..7 jitter)
+_BLK_FULL, _BLK_LOWER, _BLK_UPPER = 0xDB, 0xDC, 0xDF   # █  ▄  ▀
+_S4_GREEN, _S4_YELLOW, _S4_RED, _S4_PEAK_ATTR = 0x0A, 0x0E, 0x0C, 0x0F
+_S4_FRAME = (0, 79, 0, 24)            # full-screen border
+
+
+def _s4_rowcol() -> bytes:
+    """Attribute for each screen row: green low, yellow mid, red high (0 outside
+    the meter). A cell's colour is its ROW, so a tall bar passes through zones."""
+    out = []
+    for r in range(25):
+        if r < _S4_TOP_ROW or r > _S4_BASE_ROW:
+            out.append(0)
+        elif r >= 15:
+            out.append(_S4_GREEN)
+        elif r >= 8:
+            out.append(_S4_YELLOW)
+        else:
+            out.append(_S4_RED)
+    return bytes(out)
+
+
+def _s4_harm() -> bytes:
+    """Per-period (0..50) table of 4 bin indices: the fundamental and the 3rd/5th/
+    7th harmonic, each on a log-frequency axis (low period = high freq = high
+    bin). A square wave's energy lives at exactly these odd harmonics."""
+    import math
+    n = _S4_N
+
+    def binof(p: int) -> int:
+        p = max(1, min(50, p))
+        t = (math.log(50) - math.log(p)) / (math.log(50) - math.log(1))
+        return max(0, min(n - 1, round(t * (n - 1))))
+
+    out = bytearray()
+    for p in range(51):
+        if p == 0:
+            out += bytes(4)
+            continue
+        for k in (1, 3, 5, 7):
+            out.append(binof(max(1, round(p / k))))
+    return bytes(out)
+
+
+def _emit_s4_drawcol(a: "_Asm") -> None:
+    """Draw one column BX of the meter: [bar_h] full/half blocks up from the
+    baseline (coloured by row), then the [peak_h] white cap. Uses tcell (keeps
+    BX and BP), scratches AX/CX/DX/SI/DI."""
+    a.label("s4drawcol")
+    a.db(0xA0).abs16("bar_h")                           # mov al,[bar_h]
+    a.db(0x08, 0xC0).db(0x74).rel8("s4c_peak")          # or al,al; jz peak (empty bar)
+    a.db(0x88, 0xC6).db(0xD0, 0xEE)                     # mov dh,al; shr dh,1 (dh = full rows)
+    a.db(0xB2, _S4_BASE_ROW)                            # mov dl, baseline row
+    a.label("s4c_full")
+    a.db(0x08, 0xF6).db(0x74).rel8("s4c_part")          # or dh,dh; jz partial
+    a.db(0x88, 0xD1).db(0x30, 0xED)                     # mov cl,dl; xor ch,ch (cx=row)
+    a.db(0x89, 0xCE).db(0x8A, 0xA4).abs16("rowcol")     # mov si,cx; mov ah,[si+rowcol]
+    a.db(0xB0, _BLK_FULL).db(0xE8).rel16("tcell")       # al=█; tcell
+    a.db(0xFE, 0xCA).db(0xFE, 0xCE)                     # dec dl (up a row); dec dh
+    a.db(0xEB).rel8("s4c_full")
+    a.label("s4c_part")
+    a.db(0xA0).abs16("bar_h").db(0xA8, 0x01).db(0x74).rel8("s4c_peak")  # test bar_h,1; jz peak
+    a.db(0x88, 0xD1).db(0x30, 0xED)                     # cx=row (dl)
+    a.db(0x89, 0xCE).db(0x8A, 0xA4).abs16("rowcol")     # si=cx; ah=[si+rowcol]
+    a.db(0xB0, _BLK_LOWER).db(0xE8).rel16("tcell")      # al=▄ (lower half); tcell
+    a.label("s4c_peak")
+    a.db(0xA0).abs16("peak_h")                          # mov al,[peak_h]
+    a.db(0x08, 0xC0).db(0x74).rel8("s4c_done")          # or al,al; jz done
+    a.db(0xD0, 0xE8)                                    # shr al,1 (peak full-rows)
+    a.db(0xB6, _S4_BASE_ROW).db(0x28, 0xC6)             # mov dh,baseline; sub dh,al (peak row)
+    a.db(0x88, 0xF1).db(0x30, 0xED)                     # mov cl,dh; xor ch,ch (cx=row)
+    a.db(0xB4, _S4_PEAK_ATTR).db(0xB0, _BLK_UPPER)      # ah=white; al=▀ (upper half cap)
+    a.db(0xE8).rel16("tcell")
+    a.label("s4c_done")
+    a.db(0xC3)                                          # ret
+
+
+def _emit_s4_drawframe(a: "_Asm") -> None:
+    """One spectrum frame: build the target heights from the channels (fundamental
+    + odd harmonics per tone, broadband for noise), advance each bar's attack/
+    release and peak, draw the bars, then the border."""
+    a.label("drawframe")
+    # ---- clear the per-bar target heights --------------------------------------
+    a.db(0x31, 0xF6)                                    # xor si,si
+    a.label("s4_clr")
+    a.db(0xC6, 0x84).abs16("tgt").db(0x00)              # mov byte[si+tgt],0
+    a.db(0x46).db(0x83, 0xFE, _S4_N).db(0x72).rel8("s4_clr")  # inc si; cmp si,N; jb
+    # ---- deposit each tone: fundamental + 3rd/5th/7th harmonic (max) ------------
+    for ch in range(3):
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)      # mov al,[viz+ch]; or al,al
+        a.db(0x74).rel8(f"s4d{ch}")                     # jz skip (silent)
+        a.db(0x88, 0xC3).db(0x30, 0xFF).db(0x01, 0xDB).db(0x01, 0xDB)  # bl=al;bh=0;bx*=4 (period*4)
+        for k in range(4):
+            a.db(0x8A, 0x87).abs16("harm", k)           # mov al,[bx+harm+k] (bin)
+            a.db(0x30, 0xE4).db(0x89, 0xC6)             # xor ah,ah; mov si,ax (si=bin)
+            a.db(0xB0, _S4_HH[k])                       # mov al, deposit height
+            a.db(0x3A, 0x84).abs16("tgt")               # cmp al,[si+tgt]
+            a.db(0x76).rel8(f"s4n{ch}_{k}")             # jbe keep
+            a.db(0x88, 0x84).abs16("tgt")               # mov [si+tgt],al (raise)
+            a.label(f"s4n{ch}_{k}")
+        a.label(f"s4d{ch}")
+    # ---- deposit noise across every bar (a shimmering floor) --------------------
+    a.db(0xA0).abs16("viz", 3).db(0x08, 0xC0)           # mov al,[viz+3]; or al,al
+    a.db(0x74).rel8("s4nn")                             # jz no-noise
+    a.db(0x31, 0xF6)                                    # xor si,si
+    a.label("s4nl")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # LCG: ax=seed*25173
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")       # +13849; store
+    a.db(0x88, 0xE0).db(0x24, 0x07).db(0x04, _S4_NOISE_BASE)  # al=ah; and 7; add base
+    a.db(0x3A, 0x84).abs16("tgt").db(0x76).rel8("s4n2")  # cmp al,[si+tgt]; jbe keep
+    a.db(0x88, 0x84).abs16("tgt")                       # mov [si+tgt],al
+    a.label("s4n2")
+    a.db(0x46).db(0x83, 0xFE, _S4_N).db(0x72).rel8("s4nl")   # inc si; cmp si,N; jb
+    a.label("s4nn")
+    # ---- clear the screen back buffer ------------------------------------------
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # ax=0x0720; di=0
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # cx=2000; rep stosw
+    # ---- per-bar attack/release + peak, then draw ------------------------------
+    a.db(0x31, 0xED)                                    # xor bp,bp (bar index)
+    a.label("s4bl")
+    a.db(0x89, 0xEE)                                    # mov si,bp
+    a.db(0x8A, 0x84).abs16("tgt")                       # al = target
+    a.db(0x8A, 0xA4).abs16("bar")                       # ah = current
+    a.db(0x38, 0xC4).db(0x72).rel8("s4atk")             # cmp ah,al; jb attack (rise instantly)
+    a.db(0x80, 0xEC, _S4_FALL).db(0x73).rel8("s4set")   # sub ah,FALL; jnc set
+    a.db(0x30, 0xE4).db(0xEB).rel8("s4set")             # xor ah,ah (floor 0); jmp set
+    a.label("s4atk")
+    a.db(0x88, 0xC4)                                    # mov ah,al (jump up to target)
+    a.label("s4set")
+    a.db(0x88, 0xA4).abs16("bar")                       # mov [si+bar],ah
+    # peak: raise to bar, else fall slowly
+    a.db(0x8A, 0x84).abs16("peak")                      # al = peak
+    a.db(0x38, 0xC4).db(0x76).rel8("s4pdec")            # cmp ah,al; jbe decay
+    a.db(0x88, 0xE0).db(0x88, 0x84).abs16("peak").db(0xEB).rel8("s4pdrw")  # peak=bar
+    a.label("s4pdec")
+    a.db(0x2C, _S4_PEAK_FALL).db(0x73).rel8("s4pset")   # sub al,PFALL; jnc
+    a.db(0x30, 0xC0)                                    # xor al,al
+    a.label("s4pset")
+    a.db(0x88, 0x84).abs16("peak")                      # mov [si+peak],al
+    a.label("s4pdrw")
+    a.db(0x8A, 0x84).abs16("bar").db(0xA2).abs16("bar_h")    # bar_h = [si+bar]
+    a.db(0x8A, 0x84).abs16("peak").db(0xA2).abs16("peak_h")  # peak_h = [si+peak]
+    a.db(0x89, 0xE8).db(0x01, 0xE8).db(0x01, 0xE8)      # ax=bp; ax+=bp; ax+=bp (3*i)
+    a.db(0x05).bytes(_w(_S4_FIRST_COL)).db(0x89, 0xC3)  # add ax,first_col; mov bx,ax (col)
+    a.db(0xE8).rel16("s4drawcol")                       # draw left column
+    a.db(0x43).db(0xE8).rel16("s4drawcol")              # inc bx; draw right column
+    a.db(0x45).db(0x83, 0xFD, _S4_N)                   # inc bp; cmp bp,N
+    a.db(0x73).rel8("s4bdone").db(0xE9).rel16("s4bl")   # jae; jmp
+    a.label("s4bdone")
+    # ---- border ----------------------------------------------------------------
+    x0, x1, y0, y1 = _S4_FRAME
+    a.db(0xC7, 0x06).abs16("fx0").bytes(_w(x0))
+    a.db(0xC7, 0x06).abs16("fx1").bytes(_w(x1))
+    a.db(0xC7, 0x06).abs16("fy0").bytes(_w(y0))
+    a.db(0xC7, 0x06).abs16("fy1").bytes(_w(y1))
+    a.db(0xE8).rel16("t3frame")
+    a.db(0xC3)                                          # ret
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
               silence: bytes, stream: bytes, vis: str = "") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
@@ -1058,6 +1235,16 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         _emit_text_blit(a)
         a.label("textrow")
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text4":
+        _emit_tcell(a)
+        _emit_t3frame(a)                             # reuse the box-drawing border
+        _emit_s4_drawcol(a)
+        _emit_s4_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+        a.label("harm"); a.bytes(_s4_harm())         # per-period fundamental+harmonic bins
+        a.label("rowcol"); a.bytes(_s4_rowcol())     # per-row green/yellow/red attribute
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -1101,6 +1288,16 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("fy0"); a.db(0x00, 0x00)
         a.label("fy1"); a.db(0x00, 0x00)
         a.label("mbuf"); a.bytes(bytes(_T3_QW))          # per-column master sum (38)
+    elif vis == "text4":                             # spectrum-analyzer state
+        a.label("tgt"); a.bytes(bytes(_S4_N))            # this frame's target heights
+        a.label("bar"); a.bytes(bytes(_S4_N))            # current bar heights (persist)
+        a.label("peak"); a.bytes(bytes(_S4_N))           # peak-hold heights (persist)
+        a.label("bar_h"); a.db(0x00)                     # drawcol: this bar's height
+        a.label("peak_h"); a.db(0x00)                    # drawcol: this bar's peak
+        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -1117,12 +1314,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
     (Tandy only) adds a lighter 80x25 text-mode scope instead -- 1 = block bars,
-    2 = box-drawing line trace, 3 = box-line 2x2 grid + master (graphics layout)."""
+    2 = box-drawing line trace, 3 = box-line 2x2 grid + master (graphics layout),
+    4 = faux spectrum analyzer (colour bars + peak caps)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if text_scope:
         ts = int(text_scope)
-        vis = "text3" if ts == 3 else "text2" if ts == 2 else "text1"
+        vis = ("text4" if ts == 4 else "text3" if ts == 3 else
+               "text2" if ts == 2 else "text1")
     elif scope:
         vis = "graphics"
     else:
