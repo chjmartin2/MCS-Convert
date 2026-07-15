@@ -87,6 +87,25 @@ def test_detect_base_unit_ignores_arpeggio_jitter():
     assert detect_base_unit(sorted(onsets)) == 6
 
 
+def test_base_unit_measures_within_channels_not_across():
+    # Three voices all sit on a clean 10-frame grid but start on different frames.
+    # MERGING them and diffing the sorted union manufactures phantom sub-grid gaps
+    # (a voice at ...,20,30 next to one at ...,25,35 reads as a run of 5s) that can
+    # out-vote the real 10 — exactly what put Zelda's overworld on a 4.5-frame tick,
+    # a quarter of its onsets off the beat. Measured per channel, the unit is 10.
+    chans = [[10 * k for k in range(30)],            # phase 0
+             [5 + 10 * k for k in range(30)],        # phase 5 (half the unit)
+             [20 + 10 * k for k in range(28)]]        # phase 0, enters later
+    assert detect_base_unit(chans) == 10             # per-channel: the true grid
+    merged = sorted(o for ch in chans for o in ch)
+    assert detect_base_unit(merged) == 5             # merged fakes a 5-frame unit
+    # and the fitted grid lands every onset on a tick (fpt = 10/2 = a 16th)
+    fpt, _ = fit_grid(chans, 60.0)
+    pts = sorted({o for ch in chans for o in ch})
+    off = [abs((o - pts[0]) / fpt - round((o - pts[0]) / fpt)) for o in pts]
+    assert abs(fpt - 5.0) < 0.01 and max(off) < 0.01
+
+
 def test_grid_maps_base_unit_to_whole_ticks():
     # a 6-frame base unit must land on a whole number of ticks so 1:2:4:8 note
     # ratios survive; and the tick must sit in MCS's tempo range.

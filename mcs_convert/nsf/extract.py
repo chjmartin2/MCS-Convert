@@ -187,12 +187,31 @@ def _drum_pitches(drum_sound: str, period: int) -> Tuple[int, ...]:
 _MIN_TICK_FRAMES, _MAX_TICK_FRAMES = 2.0, 6.3
 
 
-def detect_base_unit(onsets: List[int]) -> int:
+def _as_channels(onsets) -> List[List[int]]:
+    """Normalize the onset argument to a list of per-channel onset lists. A flat
+    list of ints (the historical single-stream form, still used by tests) becomes
+    one channel; a list of lists passes through."""
+    if onsets and isinstance(onsets[0], (list, tuple)):
+        return [list(ch) for ch in onsets]
+    return [list(onsets)]
+
+
+def detect_base_unit(onsets) -> int:
     """The song's fundamental note spacing, in NES frames — the most common gap
     between note onsets, ignoring the sub-grid jitter of arpeggios and grace
-    notes (gaps of 1-2 frames). Dr. Wily's theme is 227 gaps of exactly 6."""
+    notes (gaps of 1-2 frames). Dr. Wily's theme is 227 gaps of exactly 6.
+
+    `onsets` is either a flat onset list or a list of per-channel onset lists.
+    Gaps are ALWAYS measured WITHIN a channel, never across channels: two voices
+    that share the beat but start on different frames would, if interleaved,
+    manufacture phantom sub-grid gaps (Zelda's overworld: three voices each on a
+    clean 10-frame grid, but phase-shifted, merged into a spurious mode of 9 — a
+    4.5-frame tick that put a quarter of the onsets off the beat)."""
     from collections import Counter
-    gaps = Counter(b - a for a, b in zip(onsets, onsets[1:]) if b - a >= 3)
+    gaps: "Counter[int]" = Counter()
+    for ch in _as_channels(onsets):
+        ordered = sorted(ch)
+        gaps.update(b - a for a, b in zip(ordered, ordered[1:]) if b - a >= 3)
     if not gaps:
         return 6
     return gaps.most_common(1)[0][0]
@@ -209,8 +228,11 @@ def fit_grid(onsets: List[int], play_hz: float) -> Tuple[float, int]:
     notes (Zelda's dungeon theme) smears into muddy 3-tick, tie-ridden rhythms
     (dropped from 50% to 77% clean note-values by preferring 2). We fall to 4
     ticks only for a slow song too coarse for 2, and to 1 tick for a fast one too
-    quick — whichever lands in MCS's tempo range."""
-    unit = detect_base_unit(sorted(onsets))
+    quick — whichever lands in MCS's tempo range.
+
+    `onsets` may be a flat list or per-channel lists; the base unit is measured
+    within channels either way (see detect_base_unit)."""
+    unit = detect_base_unit(onsets)
     for ticks_per_unit in (2, 4, 1):                 # 16th=2 ticks first (see above)
         fpt = unit / ticks_per_unit
         if _MIN_TICK_FRAMES <= fpt <= _MAX_TICK_FRAMES:
@@ -281,11 +303,12 @@ def optimize_grid(onsets: List[int], play_hz: float):
     speed sits between two. We pick the closest and accept the tiny speed offset —
     a slight, inaudible whole-tune rate change in exchange for exact beats.
     Returns (fpt, byte0, off_beat, speed_pct)."""
-    pts = sorted(set(onsets))
+    channels = _as_channels(onsets)
+    pts = sorted({o for ch in channels for o in ch})
     if len(pts) < 2:
         fpt, byte0 = fit_grid(pts, play_hz)
         return fpt, byte0, 0.0, 0.0
-    unit = detect_base_unit(pts)
+    unit = detect_base_unit(channels)
     best = None
     for n in (1, 2, 3, 4, 6, 8):
         fpt = unit / n
@@ -308,10 +331,11 @@ def align_to_tempo(onsets: List[int], play_hz: float, target_byte0: int):
     tempo => more ticks per note => a finer grid that pins syncopations tighter),
     then quantized beat-aligned. `speed_pct` is how far the result drifts from the
     true NES rate. Returns (fpt, target_byte0, off_beat, speed_pct)."""
-    pts = sorted(set(onsets))
+    channels = _as_channels(onsets)
+    pts = sorted({o for ch in channels for o in ch})
     if len(pts) < 2:
         return fpt_for_byte0(target_byte0, play_hz), target_byte0, 0.0, 0.0
-    unit = detect_base_unit(pts)
+    unit = detect_base_unit(channels)
     fpt_target = fpt_for_byte0(target_byte0, play_hz)
     n = max(1, round(unit / fpt_target))          # ticks/note to hold NES speed
     fpt = unit / n                                # beat-aligned grid for this N
@@ -338,7 +362,8 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
         # defines the beat and what the ear tracks. Folding in percussion (SMB's
         # 127 noise hits) drags the base unit to a subdivision that makes the
         # melody's 9-frame notes a muddy 3 ticks instead of a clean 16th (2).
-        onsets = [n.start_tick for ch in runs for n in ch]
+        # Per channel (not merged) so phase-shifted voices don't fake a sub-grid.
+        onsets = [[n.start_tick for n in ch] for ch in runs]
         fpt, byte0 = fit_grid(onsets, header.play_rate_hz)
 
     title = header.song_name or "NSF"
@@ -404,7 +429,7 @@ def _requantize(song: Song, grid_fn):
         return song, 0x80, 0.0, 0.0
     header, log, subsong, percussion, drum_sound = frames
     runs = [segment_frames(ch) for ch in log.pitched]
-    onsets = [n.start_tick for ch in runs for n in ch]   # pitched only (see fit)
+    onsets = [[n.start_tick for n in ch] for ch in runs]   # per channel (see fit)
     fpt, byte0, err, speed = grid_fn(onsets, header.play_rate_hz)
     new, byte0 = frames_to_song(header, log, subsong, percussion, drum_sound,
                                 grid=(fpt, byte0))
