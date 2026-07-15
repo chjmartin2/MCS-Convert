@@ -42,13 +42,21 @@ _SN_HZ = 3579545.0       # SN76489 reference clock (÷32 per step)
 
 
 # A 32nd-tick is split into this many sub-ticks. The engine runs at the sub-tick
-# rate so it can ARTICULATE each note: a note sounds for all but its final
-# sub-tick, leaving a ~1/_SUBTICKS-tick silence before the next onset. Without
-# it the SN76489 (no attack envelope) merges back-to-back notes into one held
-# tone — the "rat-tat-tat" of fast repeats blurs into a drone.
+# rate so it can ARTICULATE each note: a note sounds for most of its span then
+# goes silent briefly, so the SN76489 (no attack envelope) re-attacks the next
+# note instead of merging back-to-back (legato) notes into one held drone.
 _SUBTICKS = 4
 _NOISE_CH = 3                    # SN76489 channel 3 = noise
 _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat noise
+
+
+def _artic_off(on: int, dur_ticks: int) -> int:
+    """Sub-tick a note goes silent: cut ~1/8 of its span (min 1 sub-tick) so the
+    gap SCALES with note length. A fixed 1-sub-tick cut was inaudible on long
+    legato notes (Zelda's held triangle bass ran together); a proportional cut
+    separates long notes cleanly while keeping fast repeats crisp."""
+    span = dur_ticks * _SUBTICKS
+    return on + max(1, span - max(1, span // 8))
 
 
 # --- register encoders (one note/hit -> (port, value) writes) ----------------
@@ -143,7 +151,7 @@ def _tandy_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, 
     for ch, voice in enumerate(voices):
         for start, dur, midi in voice:
             on = start * _SUBTICKS
-            off = on + max(1, dur * _SUBTICKS - 1)  # cut 1 sub-tick early
+            off = _artic_off(on, dur)               # silence briefly before the next note
             by.setdefault(on, []).extend(_tandy_note_on(ch, midi_to_freq(midi)))
             by.setdefault(off, []).extend(_tandy_note_off(ch))
             if scope:
@@ -172,7 +180,7 @@ def _mono_stream(song: Song) -> Dict[int, List[Tuple[int, int]]]:
     by: Dict[int, List[Tuple[int, int]]] = {}
     for start, dur, midi in voice:
         on = start * _SUBTICKS
-        off = on + max(1, dur * _SUBTICKS - 1)
+        off = _artic_off(on, dur)
         by.setdefault(on, []).extend(_spk_note_on(midi_to_freq(midi)))
         by.setdefault(off, []).extend(_spk_note_off())
     return by

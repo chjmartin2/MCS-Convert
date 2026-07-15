@@ -44,9 +44,8 @@ def test_mono_stream_takes_the_top_voice():
     song.add_track(a)
     song.add_track(b)
     by = D._mono_stream(song)
-    S = D._SUBTICKS
     assert by[0] == D._spk_note_on(D.midi_to_freq(72))        # top note at sub-tick 0
-    assert by[4 * S - 1] == D._spk_note_off()                 # cut before its end
+    assert by[D._artic_off(0, 4)] == D._spk_note_off()        # articulated silence before its end
 
 
 def test_build_stream_records_are_wellformed():
@@ -129,7 +128,7 @@ def test_scope_stream_carries_viz_records():
     by = D._tandy_stream(_song([(0, 4, 67)]), scope=True)
     on = by[0]
     assert any(p == D._VIZ_PORT and v > 0 for p, v in on)        # channel-0 period
-    off = by[4 * D._SUBTICKS - 1]
+    off = by[D._artic_off(0, 4)]
     assert (D._VIZ_PORT, 0) in off                               # silenced at note-off
     # without scope there are no 0xF0-0xF3 records
     plain = D._tandy_stream(_song([(0, 4, 67)]), scope=False)
