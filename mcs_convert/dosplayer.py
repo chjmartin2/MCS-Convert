@@ -60,19 +60,32 @@ _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat nois
 # just swaps its accumulator-bit for an LFSR bit -- same mixer.
 _SPK4_DIV = 100                  # PIT ch0 divider -> Fs = 1193182/100 ≈ 11.9 kHz
 _SPK4_FS = _PIT_HZ / _SPK4_DIV
-_SPK4_NV = 3                     # voices summed (delta-sigma threshold)
+_SPK4_TONES = 3                  # square-wave voices
+_SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
+_SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
+_SPK4_NOISE_BRIGHT_HZ = 5500     # hi-hat: fast LFSR clock (hiss)
+_SPK4_NOISE_DARK_HZ = 1200       # kick: slow LFSR clock (rumble)
 
 
 def _spk4_inc(freq: float) -> int:
     """Phase-accumulator increment for `freq`: the 16-bit accumulator wraps once
-    per cycle, so inc = freq * 2^16 / Fs. Its top bit is the square wave."""
+    per cycle, so inc = freq * 2^16 / Fs. Its top bit is the square wave (for the
+    noise voice it's the overflow that clocks the LFSR)."""
     return max(1, min(65535, round(freq * 65536.0 / _SPK4_FS)))
+
+
+def _spk4_noise_inc(bright: bool) -> int:
+    """Accumulator increment for the noise voice -- it sets how fast the LFSR is
+    clocked, i.e. the noise brightness (hi-hat vs kick)."""
+    return _spk4_inc(_SPK4_NOISE_BRIGHT_HZ if bright else _SPK4_NOISE_DARK_HZ)
 
 
 def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int]]]:
     """sub-tick -> [(voice, inc)] changes: each note-on sets its voice's inc, each
-    articulated note-off sets it to 0 (silent). Top 3 voices, like the Tandy."""
-    per_track, _ = _split_notes(song)
+    articulated note-off sets it to 0 (silent). Voices 0-2 are the tone squares
+    (top 3, like the Tandy); voice 3 is the noise channel, driven by percussion --
+    a bright/dark hit just picks a fast/slow LFSR-clock inc."""
+    per_track, perc = _split_notes(song)
     voices = _allocate_voices(per_track, n=3)
     events: Dict[int, List[Tuple[int, int]]] = {}
     for v, voice in enumerate(voices):
@@ -81,6 +94,15 @@ def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int]]]:
             off = _artic_off(on, dur)
             events.setdefault(on, []).append((v, _spk4_inc(midi_to_freq(midi))))
             events.setdefault(off, []).append((v, 0))
+    seen = set()
+    for start, midi in perc:                        # drums -> noise voice (3)
+        on = start * _SUBTICKS
+        if on in seen:                              # one hit per sub-tick
+            continue
+        seen.add(on)
+        off = on + max(1, _SUBTICKS - 1)
+        events.setdefault(on, []).append((3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI)))
+        events.setdefault(off, []).append((3, 0))
     return events
 
 
@@ -98,8 +120,8 @@ def _build_spk4_stream(song: Song) -> Tuple[bytes, int]:
         out.append(len(ch))
         for v, inc in ch:
             out += bytes([v & 0xFF, inc & 0xFF, (inc >> 8) & 0xFF])
-    out.append(3)                                   # trailing all-off sub-tick
-    for v in range(3):
+    out.append(_SPK4_VOICES)                        # trailing all-off sub-tick
+    for v in range(_SPK4_VOICES):
         out += bytes([v, 0, 0])
     total += 1
     return bytes(out), total
@@ -1784,7 +1806,6 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     `samps_per_sub` samples applies the next sub-tick's inc changes. Auto-repeats;
     a keypress restores everything and exits."""
     a = _Asm()
-    nv = _SPK4_NV
     # ---- start: hook INT 8, set up the speaker, program the sample timer -------
     a.db(0xFA)                                       # cli
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
@@ -1824,18 +1845,32 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
-    # synth: bl = sum of the voices' top bits
+    # synth: bl = sum of the voices' bits (3 tone squares + 1 noise)
     a.db(0x31, 0xDB)                                 # xor bx,bx
-    for i in range(nv):
+    for i in range(_SPK4_TONES):
         a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
         a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
         a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
         a.db(0x01, 0xC0).db(0x80, 0xD3, 0x00)        # add ax,ax (CF=bit15); adc bl,0
-    # delta-sigma: err += sum; if err>=NV: err-=NV, speaker high
+    # noise voice (index 3): clock a Galois LFSR each time its accumulator
+    # overflows (the inc sets the clock rate = brightness); its bit0 joins the sum.
+    nz = _SPK4_TONES * 2
+    a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
+    a.db(0x74).rel8("sp_nmute")                      # jz muted -> contributes 0
+    a.db(0xA1).abs16("acc", nz).db(0x03, 0x06).abs16("inc", nz).db(0xA3).abs16("acc", nz)  # nacc+=ninc
+    a.db(0x73).rel8("sp_nobit")                      # jnc: no overflow -> don't clock
+    a.db(0xA1).abs16("nlfsr").db(0xD1, 0xE8)         # ax=[nlfsr]; shr ax,1 (CF=lsb)
+    a.db(0x73).rel8("sp_nf").db(0x35).bytes(_w(_SPK4_LFSR))   # jnc; xor ax,taps
+    a.label("sp_nf")
+    a.db(0xA3).abs16("nlfsr")                        # [nlfsr]=ax
+    a.label("sp_nobit")
+    a.db(0xA0).abs16("nlfsr").db(0x24, 0x01).db(0x00, 0xC3)   # al=[nlfsr]; and al,1; add bl,al
+    a.label("sp_nmute")
+    # delta-sigma: err += sum; if err>=VOICES: err-=VOICES, speaker high
     a.db(0xA0).abs16("sderr").db(0x00, 0xD8)         # al=[sderr]; add al,bl
     a.db(0x30, 0xD2)                                 # xor dl,dl
-    a.db(0x3C, nv).db(0x72).rel8("sd_lo")            # cmp al,NV; jb lo
-    a.db(0x2C, nv).db(0xB2, 0x02)                    # sub al,NV; dl=bit1
+    a.db(0x3C, _SPK4_VOICES).db(0x72).rel8("sd_lo")  # cmp al,4; jb lo
+    a.db(0x2C, _SPK4_VOICES).db(0xB2, 0x02)          # sub al,4; dl=bit1
     a.label("sd_lo")
     a.db(0xA2).abs16("sderr")                        # [sderr]=al
     a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # out speaker
@@ -1873,8 +1908,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("sampctr"); a.db(0x00, 0x00)
     a.label("sampsub"); a.bytes(_w(samps_per_sub))   # samples per sub-tick (const)
     a.label("sderr"); a.db(0x00)                     # delta-sigma error
-    a.label("acc"); a.bytes(bytes(2 * nv))           # phase accumulators
-    a.label("inc"); a.bytes(bytes(2 * nv))           # phase increments
+    a.label("nlfsr"); a.bytes(_w(_NOISE_SEED))       # noise LFSR state (nonzero)
+    a.label("acc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase accumulators (0-2 tone, 3 noise)
+    a.label("inc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase increments
     a.label("stream"); a.bytes(stream)
     return a.resolve()
 

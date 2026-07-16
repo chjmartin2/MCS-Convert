@@ -142,8 +142,8 @@ def test_strike_latch_fires_on_noteon_only():
 
 def test_4voice_pc_speaker_mixes_in_software():
     # --4voice is a software 1-bit mixer: a sample-rate ISR sums phase-accumulator
-    # square waves and delta-sigma modulates them onto the speaker. (3 tone voices
-    # for now; the noise voice is next.)
+    # square waves + an LFSR noise voice, and delta-sigma modulates them onto the
+    # speaker (3 tones + 1 noise = threshold 4).
     song = Song(title="t", source="t")
     for midi in (72, 64, 55):
         tr = Track(name="v")
@@ -152,7 +152,8 @@ def test_4voice_pc_speaker_mixes_in_software():
     com = D.build_com(song, "4voice", 0x80)
     assert com[0] == 0xFA                             # cli (engine prologue)
     assert b"\xE6\x61" in com                         # out 0x61,al (drives the speaker)
-    assert b"\x3C\x03" in com                         # cmp al,3 : 3-voice delta-sigma threshold
+    assert b"\x3C\x04" in com                         # cmp al,4 : 4-voice delta-sigma threshold
+    assert b"\x35\x00\xB4" in com                     # xor ax,0xB400 : the noise LFSR taps
     # the stream is per sub-tick: [nchanges][voice, inc_lo, inc_hi]*
     stream, total = D._build_spk4_stream(song)
     assert stream[0] == 3                             # sub-tick 0 = three note-ons
@@ -161,6 +162,23 @@ def test_4voice_pc_speaker_mixes_in_software():
     # a scope isn't available with the (CPU-busy) 4-voice engine
     with pytest.raises(ValueError):
         D.build_com(song, "4voice", 0x80, text_scope=5)
+
+
+def test_4voice_percussion_drives_the_noise_voice():
+    # a percussive note lands on voice 3 with a bright/dark LFSR-clock inc; a
+    # pitched note never touches voice 3.
+    song = Song(title="t", source="t")
+    mel = Track(name="m")
+    mel.add(NoteEvent(start_tick=0, duration_ticks=4, midi_note=60))
+    drums = Track(name="d")
+    drums.add(NoteEvent(start_tick=0, duration_ticks=1, midi_note=100, percussive=True))
+    song.add_track(mel)
+    song.add_track(drums)
+    events = D._spk4_events(song)
+    at0 = dict((v, inc) for v, inc in events[0])     # voice -> inc at sub-tick 0
+    assert at0[0] == D._spk4_inc(D.midi_to_freq(60))  # melody on voice 0
+    assert at0[3] == D._spk4_noise_inc(True)          # bright hi-hat on the noise voice
+    assert D._spk4_noise_inc(True) > D._spk4_noise_inc(False)   # brighter = faster clock
 
 
 def test_com_auto_repeats_until_keypress():
