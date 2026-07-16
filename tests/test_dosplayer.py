@@ -96,6 +96,29 @@ def test_com_header_and_layout():
     assert com[isr_off - 0x100] == 0x50              # isr begins with push ax
 
 
+def test_com_auto_repeats_until_keypress():
+    # When the song ends (ticksleft hits 0) the ISR rewinds streamptr + ticksleft
+    # to the top instead of halting, so the .COM loops until a key is pressed.
+    cap = {}
+    real = D._Asm.resolve
+
+    def capture(self):
+        out = real(self)
+        cap["labels"], cap["com"] = dict(self.labels), out
+        return out
+
+    D._Asm.resolve = capture
+    try:
+        D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80)
+    finally:
+        D._Asm.resolve = real
+    L, com = cap["labels"], cap["com"]
+    # 'mov word [streamptr], <stream offset>' — the rewind that makes it loop
+    rewind = b"\xC7\x06" + struct.pack("<HH", L["streamptr"], L["stream"])
+    assert rewind in com
+    assert b"\xC7\x06" + struct.pack("<H", L["ticksleft"]) in com   # ticksleft reload
+
+
 def test_tempo_sets_the_timer_divider():
     # The tempo byte picks the PIT divider (a slower tempo = a longer sub-tick =
     # a larger divider). At sub-tick resolution both fit 16 bits, so subdiv is 1.

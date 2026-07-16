@@ -1197,7 +1197,13 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0x75).rel8("isr_eoi")                       # jnz isr_eoi
     a.db(0xC6, 0x06).abs16("subcount").db(subdiv & 0xFF)     # mov byte[subcount], subdiv
     a.db(0x83, 0x3E).abs16("ticksleft").db(0x00)     # cmp word [ticksleft],0
-    a.db(0x74).rel8("isr_eoi")                       # je isr_eoi
+    a.db(0x75).rel8("isr_play")                      # jne isr_play (still mid-song)
+    # reached the end -> rewind to the top and keep playing (auto-repeat). The
+    # stream's last tick is the silence record, so held notes are already off; the
+    # loop just re-attacks from tick 0. A keypress in the main loop still quits.
+    a.db(0xC7, 0x06).abs16("ticksleft").bytes(struct.pack("<H", total_ticks))  # mov word[ticksleft],total
+    a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")   # mov word[streamptr],stream
+    a.label("isr_play")
     a.db(0x8B, 0x36).abs16("streamptr")              # mov si,[streamptr]
     a.db(0xE8).rel16("playrec")                      # call playrec
     a.db(0x89, 0x36).abs16("streamptr")              # mov [streamptr],si
