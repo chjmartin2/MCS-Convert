@@ -29,7 +29,7 @@ from .audio import _allocate_voices, _note_events, midi_to_freq
 from .mcs.reader import tick_seconds_for
 from .model import Song
 
-MODES = ("tandy", "1voice")
+MODES = ("tandy", "1voice", "4voice")
 
 # --- I/O ports ---------------------------------------------------------------
 _SN76489 = 0xC0          # Tandy/PCjr PSG (write-only)
@@ -48,6 +48,61 @@ _SN_HZ = 3579545.0       # SN76489 reference clock (÷32 per step)
 _SUBTICKS = 4
 _NOISE_CH = 3                    # SN76489 channel 3 = noise
 _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat noise
+
+# --- 4-voice PC-speaker player (software 1-bit mixing) -----------------------
+# The PC speaker is 1 bit, so N voices are summed in software and delta-sigma
+# modulated onto that single bit. A sample-rate timer ISR (PIT ch0 at ~Fs)
+# advances one PHASE ACCUMULATOR per voice (acc += inc each sample; the square
+# wave is the accumulator's top bit), sums the top bits, and PWMs the sum. The
+# speaker is driven directly (port 0x61 bit 1) with timer 2's gate off so its
+# OUT is forced high and the cone follows the data bit. Note events (per sub-
+# tick) reload the voices' `inc`. Phase 1 = 3 tone voices; the 4th (noise) voice
+# just swaps its accumulator-bit for an LFSR bit -- same mixer.
+_SPK4_DIV = 100                  # PIT ch0 divider -> Fs = 1193182/100 ≈ 11.9 kHz
+_SPK4_FS = _PIT_HZ / _SPK4_DIV
+_SPK4_NV = 3                     # voices summed (delta-sigma threshold)
+
+
+def _spk4_inc(freq: float) -> int:
+    """Phase-accumulator increment for `freq`: the 16-bit accumulator wraps once
+    per cycle, so inc = freq * 2^16 / Fs. Its top bit is the square wave."""
+    return max(1, min(65535, round(freq * 65536.0 / _SPK4_FS)))
+
+
+def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int]]]:
+    """sub-tick -> [(voice, inc)] changes: each note-on sets its voice's inc, each
+    articulated note-off sets it to 0 (silent). Top 3 voices, like the Tandy."""
+    per_track, _ = _split_notes(song)
+    voices = _allocate_voices(per_track, n=3)
+    events: Dict[int, List[Tuple[int, int]]] = {}
+    for v, voice in enumerate(voices):
+        for start, dur, midi in voice:
+            on = start * _SUBTICKS
+            off = _artic_off(on, dur)
+            events.setdefault(on, []).append((v, _spk4_inc(midi_to_freq(midi))))
+            events.setdefault(off, []).append((v, 0))
+    return events
+
+
+def _build_spk4_stream(song: Song) -> Tuple[bytes, int]:
+    """(stream bytes, total sub-ticks). One record per sub-tick:
+    [nchanges][voice, inc_lo, inc_hi]* -- only voices that CHANGE are listed, so a
+    held note emits nothing and keeps its phase. A final all-off record silences
+    the voices before the loop restarts."""
+    events = _spk4_events(song)
+    ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
+    total = ticks * _SUBTICKS
+    out = bytearray()
+    for s in range(total):
+        ch = events.get(s, [])
+        out.append(len(ch))
+        for v, inc in ch:
+            out += bytes([v & 0xFF, inc & 0xFF, (inc >> 8) & 0xFF])
+    out.append(3)                                   # trailing all-off sub-tick
+    for v in range(3):
+        out += bytes([v, 0, 0])
+    total += 1
+    return bytes(out), total
 
 
 def _artic_off(on: int, dur_ticks: int) -> int:
@@ -1721,6 +1776,109 @@ def _tandy_silence() -> List[Tuple[int, int]]:
             (_SN76489, 0xDF), (_SN76489, 0xFF)]      # and the noise channel
 
 
+def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
+                   stream: bytes) -> bytes:
+    """The 4-voice (currently 3) software-mixed PC-speaker engine. PIT ch0 fires
+    the ISR at Fs; each interrupt it advances the phase accumulators, sums their
+    top bits, delta-sigma modulates the sum to the speaker bit, and every
+    `samps_per_sub` samples applies the next sub-tick's inc changes. Auto-repeats;
+    a keypress restores everything and exits."""
+    a = _Asm()
+    nv = _SPK4_NV
+    # ---- start: hook INT 8, set up the speaker, program the sample timer -------
+    a.db(0xFA)                                       # cli
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
+    a.db(0x26, 0xA1, 0x20, 0x00).db(0xA3).abs16("old_off")   # save INT8 vector
+    a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
+    a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("isr")  # [es:0x20] = isr
+    a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
+    # speaker: save port 0x61, base = it with gate(bit0)+data(bit1) cleared. With
+    # timer 2 in mode 3 and its gate low, OUT is forced high, so the cone follows
+    # bit 1 -- our 1-bit DAC output.
+    a.db(0xE4, 0x61).db(0xA2).abs16("old61")         # in al,0x61; save
+    a.db(0x24, 0xFC).db(0xA2).abs16("base61")        # and al,0xFC; base61
+    a.db(0xB0, 0xB6).db(0xE6, _PIT_CMD)              # mov al,0xB6; out 0x43 (ch2 mode3)
+    a.db(0xB0, 0x01).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)   # count=1
+    a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base (gate off) now
+    # stream pointers; sampctr=1 so the first sub-tick applies immediately
+    a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
+    a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
+    a.db(0xB8).bytes(_w(1)).db(0xA3).abs16("sampctr")
+    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
+    a.db(0xB8).bytes(_w(divider)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
+    a.db(0xFB)                                        # sti
+    # ---- foreground: wait for a key --------------------------------------------
+    a.label("wait")
+    a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
+    a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
+    # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
+    a.db(0xFA)                                        # cli
+    a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61
+    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
+    a.db(0x30, 0xC0).db(0xE6, _PIT_CH0).db(0xE6, _PIT_CH0)   # divisor 0 (65536) = 18.2 Hz
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # es=0
+    a.db(0xA1).abs16("old_off").db(0x26, 0xA3, 0x20, 0x00)
+    a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)
+    a.db(0xFB)                                        # sti
+    a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
+    # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
+    a.label("isr")
+    a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
+    # synth: bl = sum of the voices' top bits
+    a.db(0x31, 0xDB)                                 # xor bx,bx
+    for i in range(nv):
+        a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
+        a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
+        a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
+        a.db(0x01, 0xC0).db(0x80, 0xD3, 0x00)        # add ax,ax (CF=bit15); adc bl,0
+    # delta-sigma: err += sum; if err>=NV: err-=NV, speaker high
+    a.db(0xA0).abs16("sderr").db(0x00, 0xD8)         # al=[sderr]; add al,bl
+    a.db(0x30, 0xD2)                                 # xor dl,dl
+    a.db(0x3C, nv).db(0x72).rel8("sd_lo")            # cmp al,NV; jb lo
+    a.db(0x2C, nv).db(0xB2, 0x02)                    # sub al,NV; dl=bit1
+    a.label("sd_lo")
+    a.db(0xA2).abs16("sderr")                        # [sderr]=al
+    a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # out speaker
+    # timing: every samps_per_sub samples, apply the next sub-tick
+    a.db(0xFF, 0x0E).abs16("sampctr")                # dec word[sampctr]
+    a.db(0x75).rel8("isr_eoi")                       # jnz eoi
+    a.db(0xA1).abs16("sampsub").db(0xA3).abs16("sampctr")   # reload sampctr
+    a.db(0x83, 0x3E).abs16("ticksleft").db(0x00)     # cmp word[ticksleft],0
+    a.db(0x75).rel8("sp_apply")                      # jne apply
+    a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))   # rewind (auto-repeat)
+    a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")
+    a.label("sp_apply")
+    a.db(0x8B, 0x36).abs16("streamptr")              # si=[streamptr]
+    a.db(0xAC).db(0x88, 0xC1).db(0x30, 0xED)         # lodsb (nchanges); cl=al; ch=0
+    a.db(0xE3).rel8("sp_noev")                       # jcxz noev
+    a.label("sp_evl")
+    a.db(0xAC).db(0x88, 0xC3).db(0x30, 0xFF).db(0x01, 0xDB)   # lodsb voice; bx=voice*2
+    a.db(0xAD)                                        # lodsw (inc)
+    a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
+    a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
+    a.db(0xE2).rel8("sp_evl")                        # loop
+    a.label("sp_noev")
+    a.db(0x89, 0x36).abs16("streamptr")              # [streamptr]=si
+    a.db(0xFF, 0x0E).abs16("ticksleft")              # dec word[ticksleft]
+    a.label("isr_eoi")
+    a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
+    a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
+    # ---- variables + data ------------------------------------------------------
+    a.label("old_off"); a.db(0x00, 0x00)
+    a.label("old_seg"); a.db(0x00, 0x00)
+    a.label("old61"); a.db(0x00)
+    a.label("base61"); a.db(0x00)
+    a.label("streamptr"); a.db(0x00, 0x00)
+    a.label("ticksleft"); a.db(0x00, 0x00)
+    a.label("sampctr"); a.db(0x00, 0x00)
+    a.label("sampsub"); a.bytes(_w(samps_per_sub))   # samples per sub-tick (const)
+    a.label("sderr"); a.db(0x00)                     # delta-sigma error
+    a.label("acc"); a.bytes(bytes(2 * nv))           # phase accumulators
+    a.label("inc"); a.bytes(bytes(2 * nv))           # phase increments
+    a.label("stream"); a.bytes(stream)
+    return a.resolve()
+
+
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
@@ -1731,6 +1889,21 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     (2x2 scopes + spectrum + VU meters)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    if mode == "4voice":                             # software-mixed PC speaker
+        if scope or text_scope:
+            raise ValueError("the scope display is not available with --4voice")
+        stream, total = _build_spk4_stream(song)
+        if total <= 1:
+            raise ValueError("nothing to play (no notes)")
+        if total > 65535:
+            raise ValueError("song too long for the 4-voice player (sub-tick "
+                             "count exceeds 16 bits)")
+        subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
+        samps = max(1, min(65535, round(_SPK4_FS * subtick_s)))
+        com = _assemble_spk4(_SPK4_DIV, samps, total, stream)
+        if len(com) > 0xFF00:
+            raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
+        return com
     if text_scope:
         ts = int(text_scope)
         vis = ("text5" if ts == 5 else "text4" if ts == 4 else

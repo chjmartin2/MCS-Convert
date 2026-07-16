@@ -68,10 +68,6 @@ def _cmd_convert(args) -> int:
             return 1
 
         if target:                                   # standalone DOS .COM player
-            if target == "4voice":
-                raise NotImplementedError(
-                    "the 4-voice PC-speaker player is phase 2; use --tandy or "
-                    "--1voice for now")
             text_scope = (5 if args.scope_text5 else 4 if args.scope_text4 else
                           3 if args.scope_text3 else 2 if args.scope_text2 else
                           1 if args.scope_text else 0)
@@ -153,7 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="output a .COM that plays on the PC speaker "
                              "(monophonic, top line)")
     target.add_argument("--4voice", dest="4voice", action="store_true",
-                        help="output a 4-voice PC-speaker .COM (phase 2 — not yet)")
+                        help="output a 4-voice PC-speaker .COM (software 1-bit "
+                             "mixing; currently 3 tone voices, noise voice next)")
     p_conv.add_argument("--scope", action="store_true",
                         help="Tandy .COM only: draw a 320x200 graphics "
                              "oscilloscope (4 channels + master) while playing")

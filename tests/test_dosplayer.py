@@ -140,6 +140,29 @@ def test_strike_latch_fires_on_noteon_only():
     assert b"\xC6\x85" + struct.pack("<H", L["strike"]) + b"\x01" in com
 
 
+def test_4voice_pc_speaker_mixes_in_software():
+    # --4voice is a software 1-bit mixer: a sample-rate ISR sums phase-accumulator
+    # square waves and delta-sigma modulates them onto the speaker. (3 tone voices
+    # for now; the noise voice is next.)
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    com = D.build_com(song, "4voice", 0x80)
+    assert com[0] == 0xFA                             # cli (engine prologue)
+    assert b"\xE6\x61" in com                         # out 0x61,al (drives the speaker)
+    assert b"\x3C\x03" in com                         # cmp al,3 : 3-voice delta-sigma threshold
+    # the stream is per sub-tick: [nchanges][voice, inc_lo, inc_hi]*
+    stream, total = D._build_spk4_stream(song)
+    assert stream[0] == 3                             # sub-tick 0 = three note-ons
+    voice, lo, hi = stream[1], stream[2], stream[3]
+    assert voice == 0 and (lo | (hi << 8)) == D._spk4_inc(D.midi_to_freq(72))
+    # a scope isn't available with the (CPU-busy) 4-voice engine
+    with pytest.raises(ValueError):
+        D.build_com(song, "4voice", 0x80, text_scope=5)
+
+
 def test_com_auto_repeats_until_keypress():
     # When the song ends (ticksleft hits 0) the ISR rewinds streamptr + ticksleft
     # to the top instead of halting, so the .COM loops until a key is pressed.
