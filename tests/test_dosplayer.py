@@ -154,14 +154,15 @@ def test_4voice_pc_speaker_mixes_in_software():
     assert b"\xE6\x61" in com                         # out 0x61,al (drives the speaker)
     assert b"\x3C\x04" in com                         # cmp al,4 : 4-voice delta-sigma threshold
     assert b"\x35\x00\xB4" in com                     # xor ax,0xB400 : the noise LFSR taps
-    # the stream is per sub-tick: [nchanges][voice, inc_lo, inc_hi]*
+    # the stream is per sub-tick: [nchanges][voice, inc_lo, inc_hi, viz]*
     stream, total = D._build_spk4_stream(song)
     assert stream[0] == 3                             # sub-tick 0 = three note-ons
     voice, lo, hi = stream[1], stream[2], stream[3]
     assert voice == 0 and (lo | (hi << 8)) == D._spk4_inc(D.midi_to_freq(72))
-    # a scope isn't available with the (CPU-busy) 4-voice engine
+    # the graphics oscilloscope is Tandy-only, but text scopes are allowed
     with pytest.raises(ValueError):
-        D.build_com(song, "4voice", 0x80, text_scope=5)
+        D.build_com(song, "4voice", 0x80, scope=True)
+    assert len(D.build_com(song, "4voice", 0x80, text_scope=5)) > len(com)
 
 
 def test_4voice_percussion_drives_the_noise_voice():
@@ -175,10 +176,31 @@ def test_4voice_percussion_drives_the_noise_voice():
     song.add_track(mel)
     song.add_track(drums)
     events = D._spk4_events(song)
-    at0 = dict((v, inc) for v, inc in events[0])     # voice -> inc at sub-tick 0
+    at0 = dict((v, inc) for v, inc, viz in events[0])   # voice -> inc at sub-tick 0
     assert at0[0] == D._spk4_inc(D.midi_to_freq(60))  # melody on voice 0
     assert at0[3] == D._spk4_noise_inc(True)          # bright hi-hat on the noise voice
     assert D._spk4_noise_inc(True) > D._spk4_noise_inc(False)   # brighter = faster clock
+
+
+def test_4voice_text_scope_reuses_the_renderer():
+    # a text scope on the 4-voice player shares the Tandy renderers: it sets text
+    # mode 3, draws with the same glyphs, and the audio ISR now also fills viz[]
+    # from the stream (which carries a per-voice viz byte) so the scopes track it.
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    t5 = D.build_com(song, "4voice", 0x80, text_scope=5)
+    assert t5[:5] == b"\xB8\x03\x00\xCD\x10"          # sets 80x25 text mode
+    for glyph in (0xC4, 0xB3, 0xDB, 0xDD, 0xC5):      # ─ │ █ ▌ ┼ (scope + VU + grid)
+        assert bytes([0xB0, glyph]) in t5
+    # the stream carries the viz byte per change (4-byte records)
+    stream, _ = D._build_spk4_stream(song)
+    assert stream[0] == 3 and stream[4] == D._viz_period(D.midi_to_freq(72))
+    # a plain 4-voice build (no scope) stays in the audio-only fast path
+    plain = D.build_com(song, "4voice", 0x80)
+    assert plain[:5] != b"\xB8\x03\x00\xCD\x10"
 
 
 def test_com_auto_repeats_until_keypress():

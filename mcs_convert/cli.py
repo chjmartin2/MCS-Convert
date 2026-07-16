@@ -71,8 +71,10 @@ def _cmd_convert(args) -> int:
             text_scope = (5 if args.scope_text5 else 4 if args.scope_text4 else
                           3 if args.scope_text3 else 2 if args.scope_text2 else
                           1 if args.scope_text else 0)
-            if (args.scope or text_scope) and target != "tandy":
-                raise ValueError("--scope/--scope-text is only available with --tandy")
+            if args.scope and target != "tandy":
+                raise ValueError("--scope (graphics oscilloscope) needs --tandy")
+            if text_scope and target not in ("tandy", "4voice"):
+                raise ValueError("--scope-text.. needs --tandy or --4voice")
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope)

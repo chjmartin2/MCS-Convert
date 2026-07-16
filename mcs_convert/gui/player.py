@@ -1047,14 +1047,13 @@ class ImportPreview(tk.Toplevel):
                                    "Every channel is unchecked — nothing to export.",
                                    parent=self)
             return
-        mode = {3: "tandy", 1: "1voice"}.get(self._out_modes[self.out_mode.get()])
-        if mode is None:                             # PC Speaker 4 Note (phase 2)
-            messagebox.showinfo(
-                "Pick a .COM target",
-                'The standalone .COM plays on Tandy (3 voices) or PC Speaker 1 '
-                'Note. Choose one of those in "For".', parent=self)
-            return
-        kind = self.com_scope.get() if mode == "tandy" else "none"
+        mode = {3: "tandy", 1: "1voice",
+                4: "4voice"}[self._out_modes[self.out_mode.get()]]
+        # Scopes: Tandy allows graphics + text; 4-voice allows text scopes (the
+        # graphics mode is Tandy-only); 1-voice has no per-channel data to show.
+        kind = self.com_scope.get()
+        if mode == "1voice" or (mode == "4voice" and kind == "graphics"):
+            kind = "none"
         try:
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),

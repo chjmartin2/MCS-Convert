@@ -80,20 +80,22 @@ def _spk4_noise_inc(bright: bool) -> int:
     return _spk4_inc(_SPK4_NOISE_BRIGHT_HZ if bright else _SPK4_NOISE_DARK_HZ)
 
 
-def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int]]]:
-    """sub-tick -> [(voice, inc)] changes: each note-on sets its voice's inc, each
-    articulated note-off sets it to 0 (silent). Voices 0-2 are the tone squares
-    (top 3, like the Tandy); voice 3 is the noise channel, driven by percussion --
-    a bright/dark hit just picks a fast/slow LFSR-clock inc."""
+def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int, int]]]:
+    """sub-tick -> [(voice, inc, viz)] changes: each note-on sets its voice's
+    increment, each articulated note-off sets it to 0 (silent). `viz` is the
+    on-screen scope period (0 = silent) that the text visualisations read -- same
+    units as the Tandy player, so the scope renderers are reused verbatim. Voices
+    0-2 are the tone squares; voice 3 is the noise channel from percussion."""
     per_track, perc = _split_notes(song)
     voices = _allocate_voices(per_track, n=3)
-    events: Dict[int, List[Tuple[int, int]]] = {}
+    events: Dict[int, List[Tuple[int, int, int]]] = {}
     for v, voice in enumerate(voices):
         for start, dur, midi in voice:
             on = start * _SUBTICKS
             off = _artic_off(on, dur)
-            events.setdefault(on, []).append((v, _spk4_inc(midi_to_freq(midi))))
-            events.setdefault(off, []).append((v, 0))
+            freq = midi_to_freq(midi)
+            events.setdefault(on, []).append((v, _spk4_inc(freq), _viz_period(freq)))
+            events.setdefault(off, []).append((v, 0, 0))
     seen = set()
     for start, midi in perc:                        # drums -> noise voice (3)
         on = start * _SUBTICKS
@@ -101,8 +103,9 @@ def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int]]]:
             continue
         seen.add(on)
         off = on + max(1, _SUBTICKS - 1)
-        events.setdefault(on, []).append((3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI)))
-        events.setdefault(off, []).append((3, 0))
+        events.setdefault(on, []).append(
+            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI), _NOISE_VIZ_P))
+        events.setdefault(off, []).append((3, 0, 0))
     return events
 
 
@@ -118,11 +121,11 @@ def _build_spk4_stream(song: Song) -> Tuple[bytes, int]:
     for s in range(total):
         ch = events.get(s, [])
         out.append(len(ch))
-        for v, inc in ch:
-            out += bytes([v & 0xFF, inc & 0xFF, (inc >> 8) & 0xFF])
+        for v, inc, viz in ch:
+            out += bytes([v & 0xFF, inc & 0xFF, (inc >> 8) & 0xFF, viz & 0xFF])
     out.append(_SPK4_VOICES)                        # trailing all-off sub-tick
     for v in range(_SPK4_VOICES):
-        out += bytes([v, 0, 0])
+        out += bytes([v, 0, 0, 0])
     total += 1
     return bytes(out), total
 
@@ -1562,6 +1565,131 @@ def _emit_text5_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+def _emit_scope_code(a: "_Asm", vis: str) -> None:
+    """Emit the scope renderer routines + baked tables for `vis`. Audio-agnostic:
+    they only read the viz[]/strike[] tables and draw to the back buffer, so both
+    the Tandy engine and the 4-voice engine share them."""
+    if vis == "graphics":
+        _emit_ploty(a)
+        _emit_vline(a)
+        _emit_hline(a)
+        _emit_drawframe(a)
+        _emit_blit(a)
+        a.label("rowaddr")                           # mode-9 byte offset of each scanline
+        a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
+    elif vis == "text1":
+        _emit_tcell(a)
+        _emit_tfill(a)
+        _emit_text_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")                           # byte offset of each text row
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text2":
+        _emit_tcell(a)
+        _emit_t2seg(a)
+        _emit_text2_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text3":
+        _emit_tcell(a)
+        _emit_t3seg(a)
+        _emit_t3frame(a)
+        _emit_text3_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+    elif vis == "text4":
+        _emit_tcell(a)
+        _emit_t3frame(a)                             # reuse the box-drawing border
+        _emit_s4_drawcol(a)
+        _emit_s4_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+        a.label("harm"); a.bytes(_s4_harm())         # per-period fundamental+harmonic bins
+        a.label("rowcol"); a.bytes(_s4_rowcol())     # per-row green/yellow/red attribute
+    elif vis == "text5":
+        _emit_tcell(a)
+        _emit_t3seg(a)                               # scope box-line trace
+        _emit_t5grid(a)                              # one unified border grid
+        _emit_t5spec_drawcol(a)
+        _emit_t5vu_draw(a)
+        _emit_text5_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+        a.label("sharm"); a.bytes(_t5_spec_harm())   # spectrum harmonic bins (18 bars)
+        a.label("srowcol"); a.bytes(_t5_spec_rowcol())   # spectrum row colours
+
+
+def _emit_scope_vars(a: "_Asm", vis: str) -> None:
+    """Emit the shared draw state + the per-vis scope variables. (viz[]/strike[]
+    are emitted by the caller, right before this.)"""
+    if vis:                                          # shared draw state
+        a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
+        a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
+        a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
+        a.label("msum"); a.db(0x00)                       # master-sum accumulator
+        a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
+        a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
+    if vis == "graphics":                            # mode-9 vline/frame state
+        a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
+        a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
+        a.label("vtop"); a.db(0x00, 0x00)                # vline top y
+        a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
+        a.label("hend"); a.db(0x00, 0x00)                # hline end column
+    elif vis == "text1":                             # text-1 block-fill state
+        a.label("ftop"); a.db(0x00, 0x00)                # tfill top row
+        a.label("fbot"); a.db(0x00, 0x00)                # tfill bottom row
+    elif vis == "text2":                             # text-2 line-trace state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
+        a.label("t2cur"); a.db(0x00, 0x00)               # this column's row
+        a.label("t2prev"); a.db(0x00, 0x00)              # previous column's row
+        a.label("t2top"); a.db(0x00, 0x00)               # segment top row
+        a.label("t2bot"); a.db(0x00, 0x00)               # segment bottom row
+        a.label("t2attr"); a.db(0x00)                    # current band colour
+    elif vis == "text3":                             # text-3 grid line-trace state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
+        a.label("t3col"); a.db(0x00, 0x00)               # this band's screen column
+        a.label("t3cur"); a.db(0x00, 0x00)               # this column's row
+        a.label("t3prev"); a.db(0x00, 0x00)              # previous column's row
+        a.label("t3top"); a.db(0x00, 0x00)               # segment top row
+        a.label("t3bot"); a.db(0x00, 0x00)               # segment bottom row
+        a.label("t3attr"); a.db(0x00)                    # current band colour
+        a.label("fx0"); a.db(0x00, 0x00)                 # frame rectangle (x0,x1,y0,y1)
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
+        a.label("mbuf"); a.bytes(bytes(_T3_QW))          # per-column master sum (38)
+    elif vis == "text4":                             # spectrum-analyzer state
+        a.label("tgt"); a.bytes(bytes(_S4_N))            # this frame's target heights
+        a.label("bar"); a.bytes(bytes(_S4_N))            # current bar heights (persist)
+        a.label("peak"); a.bytes(bytes(_S4_N))           # peak-hold heights (persist)
+        a.label("bar_h"); a.db(0x00)                     # drawcol: this bar's height
+        a.label("peak_h"); a.db(0x00)                    # drawcol: this bar's peak
+        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
+    elif vis == "text5":                             # combined-monitor state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0)   # 4 scope bands' previous row
+        a.label("t3col"); a.db(0x00, 0x00)               # scope segment column
+        a.label("t3cur"); a.db(0x00, 0x00)
+        a.label("t3prev"); a.db(0x00, 0x00)
+        a.label("t3top"); a.db(0x00, 0x00)
+        a.label("t3bot"); a.db(0x00, 0x00)
+        a.label("t3attr"); a.db(0x00)
+        a.label("stgt"); a.bytes(bytes(_T5_SPEC_N))      # spectrum target/current
+        a.label("sbar"); a.bytes(bytes(_T5_SPEC_N))
+        a.label("sbar_h"); a.db(0x00)                    # spectrum drawcol height
+        a.label("vu"); a.db(0x00, 0x00, 0x00, 0x00)      # VU level/peak per channel
+        a.label("vupeak"); a.db(0x00, 0x00, 0x00, 0x00)
+        a.label("vu_h"); a.db(0x00)                      # VU drawcol level/peak
+        a.label("vupeak_h"); a.db(0x00)
+        a.label("t5row"); a.db(0x00, 0x00)               # current VU meter row
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
               silence: bytes, stream: bytes, vis: str = "") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
@@ -1665,58 +1793,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # mov al,0x20 ; out 0x20,al (EOI)
     a.db(0x1F, 0x5F, 0x5E, 0x5A, 0x59, 0x58, 0xCF)   # pop ds,di,si,dx,cx,ax ; iret
-    if vis == "graphics":
-        _emit_ploty(a)
-        _emit_vline(a)
-        _emit_hline(a)
-        _emit_drawframe(a)
-        _emit_blit(a)
-        a.label("rowaddr")                           # mode-9 byte offset of each scanline
-        a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
-    elif vis == "text1":
-        _emit_tcell(a)
-        _emit_tfill(a)
-        _emit_text_drawframe(a)
-        _emit_text_blit(a)
-        a.label("textrow")                           # byte offset of each text row
-        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
-    elif vis == "text2":
-        _emit_tcell(a)
-        _emit_t2seg(a)
-        _emit_text2_drawframe(a)
-        _emit_text_blit(a)
-        a.label("textrow")
-        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
-    elif vis == "text3":
-        _emit_tcell(a)
-        _emit_t3seg(a)
-        _emit_t3frame(a)
-        _emit_text3_drawframe(a)
-        _emit_text_blit(a)
-        a.label("textrow")
-        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
-    elif vis == "text4":
-        _emit_tcell(a)
-        _emit_t3frame(a)                             # reuse the box-drawing border
-        _emit_s4_drawcol(a)
-        _emit_s4_drawframe(a)
-        _emit_text_blit(a)
-        a.label("textrow")
-        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
-        a.label("harm"); a.bytes(_s4_harm())         # per-period fundamental+harmonic bins
-        a.label("rowcol"); a.bytes(_s4_rowcol())     # per-row green/yellow/red attribute
-    elif vis == "text5":
-        _emit_tcell(a)
-        _emit_t3seg(a)                               # scope box-line trace
-        _emit_t5grid(a)                              # one unified border grid
-        _emit_t5spec_drawcol(a)
-        _emit_t5vu_draw(a)
-        _emit_text5_drawframe(a)
-        _emit_text_blit(a)
-        a.label("textrow")
-        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
-        a.label("sharm"); a.bytes(_t5_spec_harm())   # spectrum harmonic bins (18 bars)
-        a.label("srowcol"); a.bytes(_t5_spec_rowcol())   # spectrum row colours
+    _emit_scope_code(a, vis)                          # scope renderers (shared)
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -1725,68 +1802,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("subcount"); a.db(subdiv & 0xFF)
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-channel scope periods
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-channel note-on latch (VU)
-    if vis:                                          # shared draw state
-        a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
-        a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
-        a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
-        a.label("msum"); a.db(0x00)                       # master-sum accumulator
-        a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
-        a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
-    if vis == "graphics":                            # mode-9 vline/frame state
-        a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
-        a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
-        a.label("vtop"); a.db(0x00, 0x00)                # vline top y
-        a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
-        a.label("hend"); a.db(0x00, 0x00)                # hline end column
-    elif vis == "text1":                             # text-1 block-fill state
-        a.label("ftop"); a.db(0x00, 0x00)                # tfill top row
-        a.label("fbot"); a.db(0x00, 0x00)                # tfill bottom row
-    elif vis == "text2":                             # text-2 line-trace state
-        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
-        a.label("t2cur"); a.db(0x00, 0x00)               # this column's row
-        a.label("t2prev"); a.db(0x00, 0x00)              # previous column's row
-        a.label("t2top"); a.db(0x00, 0x00)               # segment top row
-        a.label("t2bot"); a.db(0x00, 0x00)               # segment bottom row
-        a.label("t2attr"); a.db(0x00)                    # current band colour
-    elif vis == "text3":                             # text-3 grid line-trace state
-        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # 5 bands' previous row
-        a.label("t3col"); a.db(0x00, 0x00)               # this band's screen column
-        a.label("t3cur"); a.db(0x00, 0x00)               # this column's row
-        a.label("t3prev"); a.db(0x00, 0x00)              # previous column's row
-        a.label("t3top"); a.db(0x00, 0x00)               # segment top row
-        a.label("t3bot"); a.db(0x00, 0x00)               # segment bottom row
-        a.label("t3attr"); a.db(0x00)                    # current band colour
-        a.label("fx0"); a.db(0x00, 0x00)                 # frame rectangle (x0,x1,y0,y1)
-        a.label("fx1"); a.db(0x00, 0x00)
-        a.label("fy0"); a.db(0x00, 0x00)
-        a.label("fy1"); a.db(0x00, 0x00)
-        a.label("mbuf"); a.bytes(bytes(_T3_QW))          # per-column master sum (38)
-    elif vis == "text4":                             # spectrum-analyzer state
-        a.label("tgt"); a.bytes(bytes(_S4_N))            # this frame's target heights
-        a.label("bar"); a.bytes(bytes(_S4_N))            # current bar heights (persist)
-        a.label("peak"); a.bytes(bytes(_S4_N))           # peak-hold heights (persist)
-        a.label("bar_h"); a.db(0x00)                     # drawcol: this bar's height
-        a.label("peak_h"); a.db(0x00)                    # drawcol: this bar's peak
-        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
-        a.label("fx1"); a.db(0x00, 0x00)
-        a.label("fy0"); a.db(0x00, 0x00)
-        a.label("fy1"); a.db(0x00, 0x00)
-    elif vis == "text5":                             # combined-monitor state
-        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0)   # 4 scope bands' previous row
-        a.label("t3col"); a.db(0x00, 0x00)               # scope segment column
-        a.label("t3cur"); a.db(0x00, 0x00)
-        a.label("t3prev"); a.db(0x00, 0x00)
-        a.label("t3top"); a.db(0x00, 0x00)
-        a.label("t3bot"); a.db(0x00, 0x00)
-        a.label("t3attr"); a.db(0x00)
-        a.label("stgt"); a.bytes(bytes(_T5_SPEC_N))      # spectrum target/current
-        a.label("sbar"); a.bytes(bytes(_T5_SPEC_N))
-        a.label("sbar_h"); a.db(0x00)                    # spectrum drawcol height
-        a.label("vu"); a.db(0x00, 0x00, 0x00, 0x00)      # VU level/peak per channel
-        a.label("vupeak"); a.db(0x00, 0x00, 0x00, 0x00)
-        a.label("vu_h"); a.db(0x00)                      # VU drawcol level/peak
-        a.label("vupeak_h"); a.db(0x00)
-        a.label("t5row"); a.db(0x00, 0x00)               # current VU meter row
+    _emit_scope_vars(a, vis)                          # shared + per-vis draw state
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -1799,13 +1815,19 @@ def _tandy_silence() -> List[Tuple[int, int]]:
 
 
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
-                   stream: bytes) -> bytes:
-    """The 4-voice (currently 3) software-mixed PC-speaker engine. PIT ch0 fires
-    the ISR at Fs; each interrupt it advances the phase accumulators, sums their
-    top bits, delta-sigma modulates the sum to the speaker bit, and every
-    `samps_per_sub` samples applies the next sub-tick's inc changes. Auto-repeats;
-    a keypress restores everything and exits."""
+                   stream: bytes, vis: str = "") -> bytes:
+    """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
+    each interrupt it advances the phase accumulators (3 squares + an LFSR noise
+    voice), delta-sigma modulates the summed bits to the speaker, and every
+    `samps_per_sub` samples applies the next sub-tick's changes (which also update
+    viz[]/strike[] for the scopes). With `vis` (a text-mode scope) the foreground
+    draws the visualisation between audio interrupts. Auto-repeats; a keypress
+    restores everything and exits."""
     a = _Asm()
+    if vis:                                          # text-mode scope: set up video
+        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (80x25 text)
+        a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)        # mov ax,cs; add ax,0x1000
+        a.db(0xA3).abs16("bufseg")                   # [bufseg] = back-buffer segment
     # ---- start: hook INT 8, set up the speaker, program the sample timer -------
     a.db(0xFA)                                       # cli
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
@@ -1828,10 +1850,20 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
     a.db(0xB8).bytes(_w(divider)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
     a.db(0xFB)                                        # sti
-    # ---- foreground: wait for a key --------------------------------------------
-    a.label("wait")
-    a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
-    a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
+    # ---- foreground: draw the scope (if any) between interrupts, until a key ----
+    if vis:
+        a.label("wait")
+        a.db(0xE8).rel16("drawframe")                # render the frame off-screen
+        a.db(0xBA, 0xDA, 0x03)                       # mov dx,0x3DA (CRTC status)
+        a.label("vs1"); a.db(0xEC).db(0xA8, 0x08).db(0x75).rel8("vs1")   # wait end of retrace
+        a.label("vs2"); a.db(0xEC).db(0xA8, 0x08).db(0x74).rel8("vs2")   # wait retrace
+        a.db(0xE8).rel16("blit")                     # copy back buffer -> B800
+        a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")
+        a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
+    else:
+        a.label("wait")
+        a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
+        a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
     # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
     a.db(0xFA)                                        # cli
     a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61
@@ -1841,6 +1873,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xA1).abs16("old_off").db(0x26, 0xA3, 0x20, 0x00)
     a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)
     a.db(0xFB)                                        # sti
+    if vis:
+        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (clear/restore text)
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
     # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
     a.label("isr")
@@ -1876,7 +1910,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # out speaker
     # timing: every samps_per_sub samples, apply the next sub-tick
     a.db(0xFF, 0x0E).abs16("sampctr")                # dec word[sampctr]
-    a.db(0x75).rel8("isr_eoi")                       # jnz eoi
+    a.db(0x75).rel8("isr_eoi")                       # jnz eoi (fast path skips di)
+    a.db(0x57)                                        # push di (the event path uses it)
     a.db(0xA1).abs16("sampsub").db(0xA3).abs16("sampctr")   # reload sampctr
     a.db(0x83, 0x3E).abs16("ticksleft").db(0x00)     # cmp word[ticksleft],0
     a.db(0x75).rel8("sp_apply")                      # jne apply
@@ -1887,17 +1922,25 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xAC).db(0x88, 0xC1).db(0x30, 0xED)         # lodsb (nchanges); cl=al; ch=0
     a.db(0xE3).rel8("sp_noev")                       # jcxz noev
     a.label("sp_evl")
-    a.db(0xAC).db(0x88, 0xC3).db(0x30, 0xFF).db(0x01, 0xDB)   # lodsb voice; bx=voice*2
+    a.db(0xAC).db(0x30, 0xE4)                        # lodsb (voice); xor ah,ah
+    a.db(0x89, 0xC7)                                 # mov di,ax (voice: byte index)
+    a.db(0x89, 0xC3).db(0x01, 0xDB)                 # mov bx,ax; add bx,bx (voice*2: word)
     a.db(0xAD)                                        # lodsw (inc)
     a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
     a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
+    a.db(0xAC).db(0x88, 0x85).abs16("viz")           # lodsb (viz); [viz+di]=al
+    a.db(0x08, 0xC0).db(0x74).rel8("sp_nostr")       # or al,al; jz (note-off, no strike)
+    a.db(0xC6, 0x85).abs16("strike").db(0x01)        # [strike+di]=1 (VU onset)
+    a.label("sp_nostr")
     a.db(0xE2).rel8("sp_evl")                        # loop
     a.label("sp_noev")
     a.db(0x89, 0x36).abs16("streamptr")              # [streamptr]=si
     a.db(0xFF, 0x0E).abs16("ticksleft")              # dec word[ticksleft]
+    a.db(0x5F)                                        # pop di
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
+    _emit_scope_code(a, vis)                          # scope renderers (shared)
     # ---- variables + data ------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -1911,23 +1954,37 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("nlfsr"); a.bytes(_w(_NOISE_SEED))       # noise LFSR state (nonzero)
     a.label("acc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase accumulators (0-2 tone, 3 noise)
     a.label("inc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase increments
+    a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
+    a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
+    _emit_scope_vars(a, vis)                          # shared + per-vis draw state
     a.label("stream"); a.bytes(stream)
     return a.resolve()
+
+
+def _vis_for(scope: bool, text_scope) -> str:
+    """The vis string a `scope`/`text_scope` request selects: "" / "graphics" /
+    "text1".."text5"."""
+    if text_scope:
+        ts = int(text_scope)
+        return ("text5" if ts == 5 else "text4" if ts == 4 else
+                "text3" if ts == 3 else "text2" if ts == 2 else "text1")
+    return "graphics" if scope else ""
 
 
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
-    `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
-    (Tandy only) adds a lighter 80x25 text-mode scope instead -- 1 = block bars,
-    2 = box-drawing line trace, 3 = box-line 2x2 grid + master (graphics layout),
-    4 = faux spectrum analyzer (colour bars + peak caps), 5 = combined monitor
-    (2x2 scopes + spectrum + VU meters)."""
+    `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
+    an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
+    box-line 2x2 grid + master, 4 = faux spectrum analyzer, 5 = combined monitor
+    (Tandy or 4-voice PC speaker)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if mode == "4voice":                             # software-mixed PC speaker
-        if scope or text_scope:
-            raise ValueError("the scope display is not available with --4voice")
+        if scope:
+            raise ValueError("the graphics scope is Tandy-only; use a text scope "
+                             "(--scope-text..) with --4voice")
+        vis = _vis_for(False, text_scope)            # text scopes only
         stream, total = _build_spk4_stream(song)
         if total <= 1:
             raise ValueError("nothing to play (no notes)")
@@ -1936,20 +1993,13 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
                              "count exceeds 16 bits)")
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(_SPK4_FS * subtick_s)))
-        com = _assemble_spk4(_SPK4_DIV, samps, total, stream)
+        com = _assemble_spk4(_SPK4_DIV, samps, total, stream, vis)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
-    if text_scope:
-        ts = int(text_scope)
-        vis = ("text5" if ts == 5 else "text4" if ts == 4 else
-               "text3" if ts == 3 else "text2" if ts == 2 else "text1")
-    elif scope:
-        vis = "graphics"
-    else:
-        vis = ""
+    vis = _vis_for(scope, text_scope)                # remaining modes: tandy / 1voice
     if vis and mode != "tandy":
-        raise ValueError("the scope display is only implemented for --tandy")
+        raise ValueError("scopes are only available with --tandy or --4voice")
     stream, total = _build_stream(song, mode, bool(vis))
     if total == 0:
         raise ValueError("nothing to play (no notes)")
