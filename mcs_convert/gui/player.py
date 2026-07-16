@@ -791,10 +791,10 @@ class ImportPreview(tk.Toplevel):
         # Tandy noise channel). The scope dropdown picks the on-screen display:
         # none, 320x200 graphics, or lighter 80x25 text (60 fps on real Tandy).
         tk.Label(btns, text="scope", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
-        self.com_scope = tk.StringVar(value="text 4")
+        self.com_scope = tk.StringVar(value="text 5")
         ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
-                     values=("none", "graphics", "text 1", "text 2", "text 3", "text 4")
-                     ).pack(side="left", padx=(0, 6))
+                     values=("none", "graphics", "text 1", "text 2", "text 3",
+                             "text 4", "text 5")).pack(side="left", padx=(0, 6))
         tk.Button(btns, text="Export .COM", command=self._export_com).pack(
             side="left", padx=(0, 6))
         tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
@@ -1059,7 +1059,8 @@ class ImportPreview(tk.Toplevel):
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
                              scope=(kind == "graphics"),
-                             text_scope=(4 if kind == "text 4" else
+                             text_scope=(5 if kind == "text 5" else
+                                         4 if kind == "text 4" else
                                          3 if kind == "text 3" else
                                          2 if kind == "text 2" else
                                          1 if kind == "text 1" else 0))

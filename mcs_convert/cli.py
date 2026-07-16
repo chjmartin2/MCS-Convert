@@ -72,8 +72,9 @@ def _cmd_convert(args) -> int:
                 raise NotImplementedError(
                     "the 4-voice PC-speaker player is phase 2; use --tandy or "
                     "--1voice for now")
-            text_scope = (4 if args.scope_text4 else 3 if args.scope_text3 else
-                          2 if args.scope_text2 else 1 if args.scope_text else 0)
+            text_scope = (5 if args.scope_text5 else 4 if args.scope_text4 else
+                          3 if args.scope_text3 else 2 if args.scope_text2 else
+                          1 if args.scope_text else 0)
             if (args.scope or text_scope) and target != "tandy":
                 raise ValueError("--scope/--scope-text is only available with --tandy")
             from .dosplayer import build_com
@@ -168,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--scope-text4", dest="scope_text4", action="store_true",
                         help="Tandy .COM only: 80x25 text-mode faux spectrum "
                              "analyzer (green/yellow/red bars + peak caps)")
+    p_conv.add_argument("--scope-text5", dest="scope_text5", action="store_true",
+                        help="Tandy .COM only: 80x25 text-mode combined monitor "
+                             "(2x2 scopes + spectrum + VU meters)")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
                         default="clicks",

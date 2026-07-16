@@ -1112,6 +1112,319 @@ def _emit_s4_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+# ---- text-mode 5: combined monitor (2x2 scopes + spectrum + VU) -------------
+# One screen, three instruments watching the same signal: the top half is the
+# 2x2 box-line scope grid (no master), the bottom-left is the spectrum analyzer,
+# the bottom-right is four onset-kicked VU meters. Reuses t3seg (scope traces),
+# the text-4 deposit/attack/peak model (spectrum), and t3frame (all borders).
+_BLK_LEFT = 0xDD                      # ▌ left-half block (horizontal VU smoothing)
+# -- top: 2x2 scope grid --
+_T5_SCEN = (3, 3, 9, 9)               # scope centre rows: ch0, ch1, ch2, noise
+_T5_SCOL0 = (1, 41, 1, 41)            # scope left columns
+_T5_SQW = 38                          # scope quadrant interior width
+_T5_SFRAMES = [(0, 39, 0, 6), (40, 79, 0, 6), (0, 39, 6, 12), (40, 79, 6, 12)]
+# -- bottom-left: spectrum --
+_T5_SPEC_FRAME = (0, 39, 12, 24)
+_T5_SPEC_N = 18                       # bars
+_T5_SPEC_FIRST, _T5_SPEC_STRIDE = 2, 2
+_T5_SPEC_BASE, _T5_SPEC_TOP = 23, 13
+_T5_SPEC_HH = (18, 6, 4, 3)           # deposit: fundamental, 3rd, 5th, 7th
+_T5_SPEC_NOISE = 5
+# -- bottom-right: VU meters --
+_T5_VU_FRAME = (40, 79, 12, 24)
+_T5_VU_ROWS = (15, 17, 19, 21)        # one horizontal meter per channel
+_T5_VU_LABELS = ("P1", "P2", "Tr", "Nz")
+_T5_VU_LABEL_COL = 42
+_T5_VU_COL = 46                       # bar start column
+_T5_VU_LEN = 30                       # bar length in cells
+_T5_VU_MAX = 2 * _T5_VU_LEN           # full level in half-cells (kick target)
+_T5_VU_GREEN, _T5_VU_YELLOW = 20, 26  # cell thresholds: <20 green, <26 yellow, else red
+_T5_VU_FALL, _T5_VU_PEAK_FALL = 4, 1
+_T5_FRAMES = _T5_SFRAMES + [_T5_SPEC_FRAME, _T5_VU_FRAME]
+
+
+def _t5_spec_rowcol() -> bytes:
+    """Green (low) -> yellow -> red (high) attribute per row, for the bottom-left
+    spectrum box (rows 13..23)."""
+    out = []
+    for r in range(25):
+        if r < _T5_SPEC_TOP or r > _T5_SPEC_BASE:
+            out.append(0)
+        elif r >= 20:
+            out.append(_S4_GREEN)
+        elif r >= 16:
+            out.append(_S4_YELLOW)
+        else:
+            out.append(_S4_RED)
+    return bytes(out)
+
+
+def _t5_spec_harm() -> bytes:
+    """Per-period fundamental + 3rd/5th/7th harmonic bins for the 18-bar box."""
+    import math
+    n = _T5_SPEC_N
+
+    def binof(p: int) -> int:
+        p = max(1, min(50, p))
+        t = (math.log(50) - math.log(p)) / (math.log(50) - math.log(1))
+        return max(0, min(n - 1, round(t * (n - 1))))
+
+    out = bytearray()
+    for p in range(51):
+        if p == 0:
+            out += bytes(4)
+            continue
+        for k in (1, 3, 5, 7):
+            out.append(binof(max(1, round(p / k))))
+    return bytes(out)
+
+
+def _emit_t5_scope_channel(a: "_Asm", ch: int, cen: int, col0: int) -> None:
+    """Top-grid tone scope: HI/LO/CENTRE row from the scroll counter (no master
+    sum), then the box-line segment at (BP + col0)."""
+    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
+    a.db(0x75).rel8(f"z{ch}_s")                         # jne snd
+    a.db(0xB9).bytes(_w(cen)).db(0xEB).rel8(f"z{ch}_r")  # mov cx,cen; jmp row
+    a.label(f"z{ch}_s")
+    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
+    a.db(0x74).rel8(f"z{ch}_lo")                        # je lo
+    a.db(0xB9).bytes(_w(cen - 2)).db(0xEB).rel8(f"z{ch}_a")  # mov cx,hi; jmp adv
+    a.label(f"z{ch}_lo")
+    a.db(0xB9).bytes(_w(cen + 2))                       # mov cx,lo
+    a.label(f"z{ch}_a")
+    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
+    a.db(0x75).rel8(f"z{ch}_r")                         # jnz row
+    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
+    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
+    a.label(f"z{ch}_r")
+    a.db(0x89, 0xEB)                                    # mov bx,bp
+    if col0 == 1:
+        a.db(0x43)                                      # inc bx
+    else:
+        a.db(0x81, 0xC3).bytes(_w(col0))               # add bx,col0
+    a.db(0x89, 0x1E).abs16("t3col")                     # mov [t3col],bx
+    _emit_t3row(a, ch)
+
+
+def _emit_t5_scope_noise(a: "_Asm", cen: int, col0: int) -> None:
+    """Top-grid noise scope: a jagged line near the centre."""
+    a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
+    a.db(0x75).rel8("zn_a")                             # jne active
+    a.db(0xB9).bytes(_w(cen)).db(0xEB).rel8("zn_r")     # mov cx,cen; jmp row
+    a.label("zn_a")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)   # LCG
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")
+    a.db(0x88, 0xE1).db(0x80, 0xE1, 0x03).db(0x30, 0xED)   # cl=ah; and cl,3; xor ch,ch
+    a.db(0x81, 0xE9, 0x01, 0x00).db(0x81, 0xC1).bytes(_w(cen))   # sub cx,1; add cx,cen
+    a.label("zn_r")
+    a.db(0x89, 0xEB)                                    # mov bx,bp
+    a.db(0x81, 0xC3).bytes(_w(col0))                   # add bx,col0
+    a.db(0x89, 0x1E).abs16("t3col")                     # mov [t3col],bx
+    _emit_t3row(a, 3)
+
+
+def _emit_t5spec_drawcol(a: "_Asm") -> None:
+    """Draw one spectrum column BX: [sbar_h] blocks up from row 23 (coloured by
+    row via srowcol), then the [speak_h] white cap. Like s4drawcol, 1 col wide."""
+    a.label("t5sdraw")
+    a.db(0xA0).abs16("sbar_h")                          # al=[sbar_h]
+    a.db(0x08, 0xC0).db(0x74).rel8("t5s_peak")          # or al,al; jz peak
+    a.db(0x88, 0xC6).db(0xD0, 0xEE)                     # dh=al; shr dh,1 (full rows)
+    a.db(0xB2, _T5_SPEC_BASE)                           # dl=baseline row
+    a.label("t5s_full")
+    a.db(0x08, 0xF6).db(0x74).rel8("t5s_part")          # or dh,dh; jz partial
+    a.db(0x88, 0xD1).db(0x30, 0xED)                     # cx=row
+    a.db(0x89, 0xCE).db(0x8A, 0xA4).abs16("srowcol")    # si=cx; ah=[si+srowcol]
+    a.db(0xB0, _BLK_FULL).db(0xE8).rel16("tcell")       # █
+    a.db(0xFE, 0xCA).db(0xFE, 0xCE).db(0xEB).rel8("t5s_full")   # dec dl; dec dh; loop
+    a.label("t5s_part")
+    a.db(0xA0).abs16("sbar_h").db(0xA8, 0x01).db(0x74).rel8("t5s_peak")   # test 1; jz peak
+    a.db(0x88, 0xD1).db(0x30, 0xED)
+    a.db(0x89, 0xCE).db(0x8A, 0xA4).abs16("srowcol")
+    a.db(0xB0, _BLK_LOWER).db(0xE8).rel16("tcell")      # ▄
+    a.label("t5s_peak")
+    a.db(0xA0).abs16("speak_h")                         # al=[speak_h]
+    a.db(0x08, 0xC0).db(0x74).rel8("t5s_done")          # or al,al; jz done
+    a.db(0xD0, 0xE8)                                    # shr al,1
+    a.db(0xB6, _T5_SPEC_BASE).db(0x28, 0xC6)            # dh=baseline; sub dh,al
+    a.db(0x88, 0xF1).db(0x30, 0xED)
+    a.db(0xB4, _S4_PEAK_ATTR).db(0xB0, _BLK_UPPER).db(0xE8).rel16("tcell")   # ▀ white
+    a.label("t5s_done")
+    a.db(0xC3)
+
+
+def _emit_t5vu_colour(a: "_Asm", tag: str) -> None:
+    """AH = green/yellow/red from the cell index in DL (green < 20, yellow < 26)."""
+    a.db(0xB4, _S4_GREEN)                               # mov ah,green
+    a.db(0x80, 0xFA, _T5_VU_GREEN).db(0x72).rel8(tag)   # cmp dl,20; jb have
+    a.db(0xB4, _S4_YELLOW)                              # mov ah,yellow
+    a.db(0x80, 0xFA, _T5_VU_YELLOW).db(0x72).rel8(tag)  # cmp dl,26; jb have
+    a.db(0xB4, _S4_RED)                                 # mov ah,red
+    a.label(tag)
+
+
+def _emit_t5vu_draw(a: "_Asm") -> None:
+    """Draw one horizontal VU meter on row [t5row]: [vu_h] half-cells growing
+    right (full block, ▌ for the odd half), coloured by cell, then a white │ peak
+    tick at [vupeak_h]. tcell keeps CX(row)/DX(index), scratches AX/BX/SI/DI."""
+    a.label("t5vu")
+    a.db(0xA0).abs16("vu_h").db(0x88, 0xC6).db(0xD0, 0xEE)   # al=vu_h; dh=al; shr dh,1 (cells)
+    a.db(0x8B, 0x0E).abs16("t5row")                     # cx=row
+    a.db(0x30, 0xD2)                                    # xor dl,dl (cell index)
+    a.label("t5v_full")
+    a.db(0x08, 0xF6).db(0x74).rel8("t5v_part")          # or dh,dh; jz partial
+    _emit_t5vu_colour(a, "t5v_c1")
+    a.db(0x88, 0xD3).db(0x80, 0xC3, _T5_VU_COL).db(0x30, 0xFF)   # bl=dl; add bl,col; bh=0
+    a.db(0xB0, _BLK_FULL).db(0xE8).rel16("tcell")       # █
+    a.db(0xFE, 0xC2).db(0xFE, 0xCE).db(0xEB).rel8("t5v_full")   # inc dl; dec dh; loop
+    a.label("t5v_part")
+    a.db(0xA0).abs16("vu_h").db(0xA8, 0x01).db(0x74).rel8("t5v_peak")   # test vu_h,1; jz peak
+    _emit_t5vu_colour(a, "t5v_c2")
+    a.db(0x88, 0xD3).db(0x80, 0xC3, _T5_VU_COL).db(0x30, 0xFF)
+    a.db(0xB0, _BLK_LEFT).db(0xE8).rel16("tcell")       # ▌ (partial right edge)
+    a.label("t5v_peak")
+    a.db(0xA0).abs16("vupeak_h").db(0x08, 0xC0).db(0x74).rel8("t5v_done")   # or al,al; jz done
+    a.db(0xD0, 0xE8)                                    # shr al,1 (peak cell)
+    a.db(0x88, 0xC3).db(0x80, 0xC3, _T5_VU_COL).db(0x30, 0xFF)   # bl=al; add bl,col; bh=0
+    a.db(0xB4, _S4_PEAK_ATTR).db(0xB0, _BOX_V).db(0xE8).rel16("tcell")   # white │
+    a.label("t5v_done")
+    a.db(0xC3)
+
+
+def _emit_t5vu_channel(a: "_Asm", ch: int, row: int) -> None:
+    """One VU channel: onset-kick (strike -> full) or slow release, peak-hold,
+    label, and draw the meter."""
+    lbl = _T5_VU_LABELS[ch]
+    # kick on a latched strike, else decay
+    a.db(0xA0).abs16("strike", ch).db(0x08, 0xC0)       # al=[strike+ch]; or al,al
+    a.db(0x74).rel8(f"vk{ch}d")                         # jz decay
+    a.db(0xC6, 0x06).abs16("strike", ch).db(0x00)       # strike[ch]=0
+    a.db(0xC6, 0x06).abs16("vu", ch).db(_T5_VU_MAX)     # vu[ch]=MAX (kick)
+    a.db(0xEB).rel8(f"vk{ch}p")                         # jmp peak
+    a.label(f"vk{ch}d")
+    a.db(0xA0).abs16("vu", ch).db(0x2C, _T5_VU_FALL)    # al=vu[ch]; sub al,FALL
+    a.db(0x73).rel8(f"vk{ch}s").db(0x30, 0xC0)          # jnc set; xor al,al
+    a.label(f"vk{ch}s")
+    a.db(0xA2).abs16("vu", ch)                          # vu[ch]=al
+    a.label(f"vk{ch}p")
+    a.db(0x8A, 0x26).abs16("vu", ch)                    # ah=vu[ch]
+    a.db(0xA0).abs16("vupeak", ch)                      # al=vupeak[ch]
+    a.db(0x38, 0xC4).db(0x76).rel8(f"vk{ch}pd")         # cmp ah,al; jbe pdec
+    a.db(0x88, 0x26).abs16("vupeak", ch).db(0xEB).rel8(f"vk{ch}dr")   # vupeak=vu
+    a.label(f"vk{ch}pd")
+    a.db(0x2C, _T5_VU_PEAK_FALL).db(0x73).rel8(f"vk{ch}ps").db(0x30, 0xC0)   # sub al,PF; jnc; 0
+    a.label(f"vk{ch}ps")
+    a.db(0xA2).abs16("vupeak", ch)                      # vupeak[ch]=al
+    a.label(f"vk{ch}dr")
+    # label (2 chars in the channel colour), then the bar
+    a.db(0xB9).bytes(_w(row)).db(0xBB).bytes(_w(_T5_VU_LABEL_COL))   # cx=row; bx=labelcol
+    a.db(0xB4, _TATTR[ch])                              # ah=channel colour
+    a.db(0xB0, ord(lbl[0])).db(0xE8).rel16("tcell")     # char 0
+    a.db(0x43).db(0xB0, ord(lbl[1])).db(0xE8).rel16("tcell")   # inc bx; char 1
+    a.db(0xA0).abs16("vu", ch).db(0xA2).abs16("vu_h")   # vu_h = vu[ch]
+    a.db(0xA0).abs16("vupeak", ch).db(0xA2).abs16("vupeak_h")   # vupeak_h = vupeak[ch]
+    a.db(0xC7, 0x06).abs16("t5row").bytes(_w(row))      # t5row = row
+    a.db(0xE8).rel16("t5vu")
+
+
+def _emit_text5_drawframe(a: "_Asm") -> None:
+    """The whole combined frame: clear, the 2x2 scope grid, the spectrum, the VU
+    meters, then every border."""
+    a.label("drawframe")
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # ax=0x0720; di=0
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # cx=2000; rep stosw (clear)
+    a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
+    # ---- top: 2x2 scope grid ---------------------------------------------------
+    for ch in range(3):                                 # phase each tone by scroll
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
+        a.db(0x75).rel8(f"w5{ch}").db(0xB0, 0x01)
+        a.label(f"w5{ch}")
+        a.db(0x30, 0xE4).db(0x89, 0xC3)
+        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
+        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
+        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+    for i in range(4):
+        a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_T5_SCEN[i]))
+    a.db(0x31, 0xED)                                    # xor bp,bp
+    a.label("z5loop")
+    _emit_t5_scope_channel(a, 0, _T5_SCEN[0], _T5_SCOL0[0])
+    _emit_t5_scope_channel(a, 1, _T5_SCEN[1], _T5_SCOL0[1])
+    _emit_t5_scope_channel(a, 2, _T5_SCEN[2], _T5_SCOL0[2])
+    _emit_t5_scope_noise(a, _T5_SCEN[3], _T5_SCOL0[3])
+    a.db(0x45).db(0x83, 0xFD, _T5_SQW)                 # inc bp; cmp bp,38
+    a.db(0x73).rel8("z5done").db(0xE9).rel16("z5loop")
+    a.label("z5done")
+    # ---- bottom-left: spectrum -------------------------------------------------
+    a.db(0x31, 0xF6)                                    # xor si,si
+    a.label("qclr")
+    a.db(0xC6, 0x84).abs16("stgt").db(0x00)             # mov byte[si+stgt],0
+    a.db(0x46).db(0x83, 0xFE, _T5_SPEC_N).db(0x72).rel8("qclr")
+    for ch in range(3):
+        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
+        a.db(0x74).rel8(f"qd{ch}")                      # jz skip
+        a.db(0x88, 0xC3).db(0x30, 0xFF).db(0x01, 0xDB).db(0x01, 0xDB)   # bx = period*4
+        for k in range(4):
+            a.db(0x8A, 0x87).abs16("sharm", k)          # al=[bx+sharm+k]
+            a.db(0x30, 0xE4).db(0x89, 0xC6)             # ah=0; si=ax (bin)
+            a.db(0xB0, _T5_SPEC_HH[k])                  # al=height
+            a.db(0x3A, 0x84).abs16("stgt").db(0x76).rel8(f"qn{ch}_{k}")   # cmp; jbe
+            a.db(0x88, 0x84).abs16("stgt")              # [si+stgt]=al
+            a.label(f"qn{ch}_{k}")
+        a.label(f"qd{ch}")
+    a.db(0xA0).abs16("viz", 3).db(0x08, 0xC0)           # noise floor
+    a.db(0x74).rel8("qnn")
+    a.db(0x31, 0xF6)
+    a.label("qnl")
+    a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)
+    a.db(0x05, 0x19, 0x36).db(0xA3).abs16("seed")
+    a.db(0x88, 0xE0).db(0x24, 0x07).db(0x04, _T5_SPEC_NOISE)   # al=ah; and 7; add base
+    a.db(0x3A, 0x84).abs16("stgt").db(0x76).rel8("qn2")
+    a.db(0x88, 0x84).abs16("stgt")
+    a.label("qn2")
+    a.db(0x46).db(0x83, 0xFE, _T5_SPEC_N).db(0x72).rel8("qnl")
+    a.label("qnn")
+    a.db(0x31, 0xED)                                    # xor bp,bp (bar index)
+    a.label("qbl")
+    a.db(0x89, 0xEE)                                    # mov si,bp
+    a.db(0x8A, 0x84).abs16("stgt").db(0x8A, 0xA4).abs16("sbar")   # al=target; ah=current
+    a.db(0x38, 0xC4).db(0x72).rel8("qatk")              # cmp ah,al; jb attack
+    a.db(0x80, 0xEC, _S4_FALL).db(0x73).rel8("qset").db(0x30, 0xE4).db(0xEB).rel8("qset")
+    a.label("qatk")
+    a.db(0x88, 0xC4)                                    # ah=al
+    a.label("qset")
+    a.db(0x88, 0xA4).abs16("sbar")                      # [si+sbar]=ah
+    a.db(0x8A, 0x84).abs16("speak")                     # al=peak
+    a.db(0x38, 0xC4).db(0x76).rel8("qpdec")             # cmp ah,al; jbe
+    a.db(0x88, 0xE0).db(0x88, 0x84).abs16("speak").db(0xEB).rel8("qpdrw")
+    a.label("qpdec")
+    a.db(0x2C, _S4_PEAK_FALL).db(0x73).rel8("qpset").db(0x30, 0xC0)
+    a.label("qpset")
+    a.db(0x88, 0x84).abs16("speak")
+    a.label("qpdrw")
+    a.db(0x8A, 0x84).abs16("sbar").db(0xA2).abs16("sbar_h")
+    a.db(0x8A, 0x84).abs16("speak").db(0xA2).abs16("speak_h")
+    a.db(0x89, 0xE8)                                    # ax=bp
+    for _ in range(_T5_SPEC_STRIDE - 1):
+        a.db(0x01, 0xE8)                                # add ax,bp (stride*bp)
+    a.db(0x05).bytes(_w(_T5_SPEC_FIRST)).db(0x89, 0xC3)   # add ax,first; bx=col
+    a.db(0xE8).rel16("t5sdraw")
+    a.db(0x45).db(0x83, 0xFD, _T5_SPEC_N)
+    a.db(0x73).rel8("qbdone").db(0xE9).rel16("qbl")
+    a.label("qbdone")
+    # ---- bottom-right: VU meters ----------------------------------------------
+    for ch in range(4):
+        _emit_t5vu_channel(a, ch, _T5_VU_ROWS[ch])
+    # ---- borders ---------------------------------------------------------------
+    for x0, x1, y0, y1 in _T5_FRAMES:
+        a.db(0xC7, 0x06).abs16("fx0").bytes(_w(x0))
+        a.db(0xC7, 0x06).abs16("fx1").bytes(_w(x1))
+        a.db(0xC7, 0x06).abs16("fy0").bytes(_w(y0))
+        a.db(0xC7, 0x06).abs16("fy1").bytes(_w(y1))
+        a.db(0xE8).rel16("t3frame")
+    a.db(0xC3)                                          # ret
+
+
 def _assemble(divider: int, subdiv: int, total_ticks: int,
               silence: bytes, stream: bytes, vis: str = "") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
@@ -1179,6 +1492,10 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0x72).rel8("pr_hw")                         # jb pr_hw (real port)
     a.db(0x80, 0xE2, 0x03).db(0x89, 0xD7)            # and dl,3 ; mov di,dx
     a.db(0x88, 0x85).abs16("viz")                    # mov [viz+di],al
+    # a non-zero viz write is a real note-on/drum hit -> latch a strike for ch di
+    # (the VU meters in text5 read + clear it; other modes ignore the table).
+    a.db(0x08, 0xC0).db(0x74).rel8("pr_next")        # or al,al; jz pr_next (note-off)
+    a.db(0xC6, 0x85).abs16("strike").db(0x01)        # mov byte[strike+di],1
     a.db(0xEB).rel8("pr_next")                       # jmp pr_next
     a.label("pr_hw")
     a.db(0x80, 0xFA, _SPEAKER)                       # cmp dl,0x61
@@ -1251,6 +1568,18 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
         a.label("harm"); a.bytes(_s4_harm())         # per-period fundamental+harmonic bins
         a.label("rowcol"); a.bytes(_s4_rowcol())     # per-row green/yellow/red attribute
+    elif vis == "text5":
+        _emit_tcell(a)
+        _emit_t3seg(a)                               # scope box-line trace
+        _emit_t3frame(a)                             # all six borders
+        _emit_t5spec_drawcol(a)
+        _emit_t5vu_draw(a)
+        _emit_text5_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
+        a.label("sharm"); a.bytes(_t5_spec_harm())   # spectrum harmonic bins (18 bars)
+        a.label("srowcol"); a.bytes(_t5_spec_rowcol())   # spectrum row colours
     # ---- variables ----------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -1258,6 +1587,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.label("ticksleft"); a.db(0x00, 0x00)
     a.label("subcount"); a.db(subdiv & 0xFF)
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-channel scope periods
+    a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-channel note-on latch (VU)
     if vis:                                          # shared draw state
         a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
         a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
@@ -1304,6 +1634,28 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("fx1"); a.db(0x00, 0x00)
         a.label("fy0"); a.db(0x00, 0x00)
         a.label("fy1"); a.db(0x00, 0x00)
+    elif vis == "text5":                             # combined-monitor state
+        a.label("prevrow"); a.db(0, 0, 0, 0, 0, 0, 0, 0)   # 4 scope bands' previous row
+        a.label("t3col"); a.db(0x00, 0x00)               # scope segment column
+        a.label("t3cur"); a.db(0x00, 0x00)
+        a.label("t3prev"); a.db(0x00, 0x00)
+        a.label("t3top"); a.db(0x00, 0x00)
+        a.label("t3bot"); a.db(0x00, 0x00)
+        a.label("t3attr"); a.db(0x00)
+        a.label("stgt"); a.bytes(bytes(_T5_SPEC_N))      # spectrum target/current/peak
+        a.label("sbar"); a.bytes(bytes(_T5_SPEC_N))
+        a.label("speak"); a.bytes(bytes(_T5_SPEC_N))
+        a.label("sbar_h"); a.db(0x00)                    # spectrum drawcol height/peak
+        a.label("speak_h"); a.db(0x00)
+        a.label("vu"); a.db(0x00, 0x00, 0x00, 0x00)      # VU level/peak per channel
+        a.label("vupeak"); a.db(0x00, 0x00, 0x00, 0x00)
+        a.label("vu_h"); a.db(0x00)                      # VU drawcol level/peak
+        a.label("vupeak_h"); a.db(0x00)
+        a.label("t5row"); a.db(0x00, 0x00)               # current VU meter row
+        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -1321,13 +1673,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     `scope` (Tandy only) adds the mode-9 graphics oscilloscopes; `text_scope`
     (Tandy only) adds a lighter 80x25 text-mode scope instead -- 1 = block bars,
     2 = box-drawing line trace, 3 = box-line 2x2 grid + master (graphics layout),
-    4 = faux spectrum analyzer (colour bars + peak caps)."""
+    4 = faux spectrum analyzer (colour bars + peak caps), 5 = combined monitor
+    (2x2 scopes + spectrum + VU meters)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if text_scope:
         ts = int(text_scope)
-        vis = ("text4" if ts == 4 else "text3" if ts == 3 else
-               "text2" if ts == 2 else "text1")
+        vis = ("text5" if ts == 5 else "text4" if ts == 4 else
+               "text3" if ts == 3 else "text2" if ts == 2 else "text1")
     elif scope:
         vis = "graphics"
     else:

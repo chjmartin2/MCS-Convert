@@ -96,6 +96,46 @@ def test_com_header_and_layout():
     assert com[isr_off - 0x100] == 0x50              # isr begins with push ax
 
 
+def test_text5_combined_monitor_has_all_three_views():
+    # text_scope=5 is the combined monitor: text mode 3, with the scope box glyphs
+    # (grid traces), the block + half-blocks (spectrum + VU bars), and the strike
+    # latch wired into playrec so the VU meters kick on note-ons.
+    t5 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72), (12, 2, 48)]),
+                     "tandy", 0x80, text_scope=5)
+    assert t5[:5] == b"\xB8\x03\x00\xCD\x10"          # text mode 3
+    for glyph in (0xC4, 0xB3, 0xDA, 0xDB, 0xDC, 0xDD, 0xDF):   # scope + bar + VU glyphs
+        assert bytes([0xB0, glyph]) in t5
+    # the VU meter labels are drawn ('P','1','N','z' etc.)
+    for ch in "P1TrNz":
+        assert bytes([0xB0, ord(ch)]) in t5
+    # it's the heaviest text renderer (three views + six borders)
+    big = _song([(0, 4, 60), (4, 4, 67), (8, 4, 72)])
+    assert len(D.build_com(big, "tandy", 0x80, text_scope=5)) > \
+        len(D.build_com(big, "tandy", 0x80, text_scope=4))
+
+
+def test_strike_latch_fires_on_noteon_only():
+    # playrec latches strike[ch]=1 only when it stores a NON-zero viz value (a real
+    # note-on / drum hit), never on the note-off (viz=0) write. The table is always
+    # present so playrec links in every mode.
+    cap = {}
+    real = D._Asm.resolve
+
+    def capture(self):
+        out = real(self)
+        cap["labels"], cap["com"] = dict(self.labels), out
+        return out
+
+    D._Asm.resolve = capture
+    try:
+        D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, text_scope=5)
+    finally:
+        D._Asm.resolve = real
+    L, com = cap["labels"], cap["com"]
+    # 'mov byte [di+strike], 1' guarded by 'or al,al / jz' after the viz store
+    assert b"\xC6\x85" + struct.pack("<H", L["strike"]) + b"\x01" in com
+
+
 def test_com_auto_repeats_until_keypress():
     # When the song ends (ticksleft hits 0) the ISR rewinds streamptr + ticksleft
     # to the top instead of halting, so the .COM loops until a key is pressed.
