@@ -68,16 +68,19 @@ def _cmd_convert(args) -> int:
             return 1
 
         if target:                                   # standalone DOS .COM player
-            text_scope = (5 if args.scope_text5 else 4 if args.scope_text4 else
-                          3 if args.scope_text3 else 2 if args.scope_text2 else
-                          1 if args.scope_text else 0)
+            text_scope = (6 if args.scope_vu else 5 if args.scope_text5 else
+                          4 if args.scope_text4 else 3 if args.scope_text3 else
+                          2 if args.scope_text2 else 1 if args.scope_text else 0)
             if args.scope and target != "tandy":
                 raise ValueError("--scope (graphics oscilloscope) needs --tandy")
             if text_scope and target not in ("tandy", "4voice"):
-                raise ValueError("--scope-text.. needs --tandy or --4voice")
+                raise ValueError("--scope-text.. / --scope-vu needs --tandy or --4voice")
+            if args.mix_rate and target != "4voice":
+                raise ValueError("--mix-rate only applies to --4voice")
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
-                             text_scope=text_scope)
+                             text_scope=text_scope, mix_rate=args.mix_rate,
+                             draw_skip=args.draw_skip)
         else:                                        # the default .MCS song file
             data = encode_song(song, tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
@@ -171,6 +174,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--scope-text5", dest="scope_text5", action="store_true",
                         help="Tandy .COM only: 80x25 text-mode combined monitor "
                              "(2x2 scopes + spectrum + VU meters)")
+    p_conv.add_argument("--scope-vu", dest="scope_vu", action="store_true",
+                        help="Tandy/4voice .COM: lightweight 80x25 VU-meter display "
+                             "(cheap enough for a real XT)")
+    p_conv.add_argument("--mix-rate", dest="mix_rate", type=int, default=None,
+                        metavar="HZ",
+                        help="4voice .COM only: software mixing sample rate in Hz "
+                             "(~11900 default; lower to ~6000 for a real XT)")
+    p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
+                        metavar="N",
+                        help="redraw the scope every Nth frame (default 1; higher "
+                             "= lighter/slower visuals on slow machines)")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
                         default="clicks",

@@ -58,8 +58,9 @@ _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat nois
 # OUT is forced high and the cone follows the data bit. Note events (per sub-
 # tick) reload the voices' `inc`. Phase 1 = 3 tone voices; the 4th (noise) voice
 # just swaps its accumulator-bit for an LFSR bit -- same mixer.
-_SPK4_DIV = 100                  # PIT ch0 divider -> Fs = 1193182/100 ≈ 11.9 kHz
+_SPK4_DIV = 100                  # default PIT ch0 divider -> Fs = 1193182/100 ≈ 11.9 kHz
 _SPK4_FS = _PIT_HZ / _SPK4_DIV
+_SPK4_DIV_MIN, _SPK4_DIV_MAX = 40, 600   # Fs clamp ~ 2 kHz .. 30 kHz
 _SPK4_TONES = 3                  # square-wave voices
 _SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
 _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
@@ -67,25 +68,34 @@ _SPK4_NOISE_BRIGHT_HZ = 5500     # hi-hat: fast LFSR clock (hiss)
 _SPK4_NOISE_DARK_HZ = 1200       # kick: slow LFSR clock (rumble)
 
 
-def _spk4_inc(freq: float) -> int:
-    """Phase-accumulator increment for `freq`: the 16-bit accumulator wraps once
-    per cycle, so inc = freq * 2^16 / Fs. Its top bit is the square wave (for the
-    noise voice it's the overflow that clocks the LFSR)."""
-    return max(1, min(65535, round(freq * 65536.0 / _SPK4_FS)))
+def _spk4_div_for(mix_rate) -> int:
+    """PIT ch0 divider for a requested mixing rate in Hz (clamped), or the default
+    when `mix_rate` is falsy. Fs = 1193182 / divider."""
+    if not mix_rate:
+        return _SPK4_DIV
+    return max(_SPK4_DIV_MIN, min(_SPK4_DIV_MAX, round(_PIT_HZ / mix_rate)))
 
 
-def _spk4_noise_inc(bright: bool) -> int:
+def _spk4_inc(freq: float, fs: float = _SPK4_FS) -> int:
+    """Phase-accumulator increment for `freq` at sample rate `fs`: the 16-bit
+    accumulator wraps once per cycle, so inc = freq * 2^16 / Fs. Its top bit is
+    the square wave (for the noise voice it's the overflow that clocks the LFSR)."""
+    return max(1, min(65535, round(freq * 65536.0 / fs)))
+
+
+def _spk4_noise_inc(bright: bool, fs: float = _SPK4_FS) -> int:
     """Accumulator increment for the noise voice -- it sets how fast the LFSR is
     clocked, i.e. the noise brightness (hi-hat vs kick)."""
-    return _spk4_inc(_SPK4_NOISE_BRIGHT_HZ if bright else _SPK4_NOISE_DARK_HZ)
+    return _spk4_inc(_SPK4_NOISE_BRIGHT_HZ if bright else _SPK4_NOISE_DARK_HZ, fs)
 
 
-def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int, int]]]:
+def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, int, int]]]:
     """sub-tick -> [(voice, inc, viz)] changes: each note-on sets its voice's
-    increment, each articulated note-off sets it to 0 (silent). `viz` is the
-    on-screen scope period (0 = silent) that the text visualisations read -- same
-    units as the Tandy player, so the scope renderers are reused verbatim. Voices
-    0-2 are the tone squares; voice 3 is the noise channel from percussion."""
+    increment (at sample rate `fs`), each articulated note-off sets it to 0
+    (silent). `viz` is the on-screen scope period (0 = silent) that the text
+    visualisations read -- same units as the Tandy player, so the scope renderers
+    are reused verbatim. Voices 0-2 are the tone squares; voice 3 is the noise
+    channel from percussion."""
     per_track, perc = _split_notes(song)
     voices = _allocate_voices(per_track, n=3)
     events: Dict[int, List[Tuple[int, int, int]]] = {}
@@ -94,7 +104,7 @@ def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int, int]]]:
             on = start * _SUBTICKS
             off = _artic_off(on, dur)
             freq = midi_to_freq(midi)
-            events.setdefault(on, []).append((v, _spk4_inc(freq), _viz_period(freq)))
+            events.setdefault(on, []).append((v, _spk4_inc(freq, fs), _viz_period(freq)))
             events.setdefault(off, []).append((v, 0, 0))
     seen = set()
     for start, midi in perc:                        # drums -> noise voice (3)
@@ -104,17 +114,17 @@ def _spk4_events(song: Song) -> Dict[int, List[Tuple[int, int, int]]]:
         seen.add(on)
         off = on + max(1, _SUBTICKS - 1)
         events.setdefault(on, []).append(
-            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI), _NOISE_VIZ_P))
+            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI, fs), _NOISE_VIZ_P))
         events.setdefault(off, []).append((3, 0, 0))
     return events
 
 
-def _build_spk4_stream(song: Song) -> Tuple[bytes, int]:
+def _build_spk4_stream(song: Song, fs: float = _SPK4_FS) -> Tuple[bytes, int]:
     """(stream bytes, total sub-ticks). One record per sub-tick:
-    [nchanges][voice, inc_lo, inc_hi]* -- only voices that CHANGE are listed, so a
-    held note emits nothing and keeps its phase. A final all-off record silences
-    the voices before the loop restarts."""
-    events = _spk4_events(song)
+    [nchanges][voice, inc_lo, inc_hi, viz]* -- only voices that CHANGE are listed,
+    so a held note emits nothing and keeps its phase. A final all-off record
+    silences the voices before the loop restarts. `fs` is the mixing sample rate."""
+    events = _spk4_events(song, fs)
     ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
     total = ticks * _SUBTICKS
     out = bytearray()
@@ -1565,6 +1575,109 @@ def _emit_text5_drawframe(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
+# ---- lightweight VU-only display (XT-friendly) ------------------------------
+# Just four full-width horizontal VU meters + a border -- a few hundred cell
+# writes/frame, so it keeps up alongside the audio ISR on a real 4.77 MHz XT
+# (where the full scopes/spectrum are too heavy). Onset-kick ballistics, same as
+# text 5's meters, but roomier and labelled.
+_VU_ROWS = (6, 11, 16, 21)            # one meter per channel
+_VU_LABELS = ("Pulse 1 ", "Pulse 2 ", "Triangle", "Noise   ")   # 8 chars each
+_VU_LABEL_COL = 3
+_VU_COL = 13                          # bar start column
+_VU_LEN = 62                          # bar length in cells (col 13..74)
+_VU_MAX = 2 * _VU_LEN                 # full level in half-cells (kick target)
+_VU_GREEN, _VU_YELLOW = 42, 52        # cell thresholds: <42 green, <52 yellow, else red
+_VU_FALL, _VU_PEAK_FALL = 4, 1
+
+
+def _emit_vu_colour(a: "_Asm", tag: str) -> None:
+    """AH = green/yellow/red from the cell index in DL."""
+    a.db(0xB4, _S4_GREEN)
+    a.db(0x80, 0xFA, _VU_GREEN).db(0x72).rel8(tag)     # cmp dl,42; jb have
+    a.db(0xB4, _S4_YELLOW)
+    a.db(0x80, 0xFA, _VU_YELLOW).db(0x72).rel8(tag)    # cmp dl,52; jb have
+    a.db(0xB4, _S4_RED)
+    a.label(tag)
+
+
+def _emit_vu_draw(a: "_Asm") -> None:
+    """Draw one horizontal VU meter on row [vurow]: [vu_h] half-cells growing
+    right (full block, ▌ for the odd half), coloured by cell, then a white │ peak
+    tick at [vupeak_h]."""
+    a.label("vudraw")
+    a.db(0xA0).abs16("vu_h").db(0x88, 0xC6).db(0xD0, 0xEE)   # al=vu_h; dh=al; shr dh,1 (cells)
+    a.db(0x8B, 0x0E).abs16("vurow")                    # cx=row
+    a.db(0x30, 0xD2)                                   # xor dl,dl (cell index)
+    a.label("vu_full")
+    a.db(0x08, 0xF6).db(0x74).rel8("vu_part")          # or dh,dh; jz partial
+    _emit_vu_colour(a, "vu_c1")
+    a.db(0x88, 0xD3).db(0x80, 0xC3, _VU_COL).db(0x30, 0xFF)   # bl=dl; add bl,col; bh=0
+    a.db(0xB0, _BLK_FULL).db(0xE8).rel16("tcell")      # █
+    a.db(0xFE, 0xC2).db(0xFE, 0xCE).db(0xEB).rel8("vu_full")  # inc dl; dec dh; loop
+    a.label("vu_part")
+    a.db(0xA0).abs16("vu_h").db(0xA8, 0x01).db(0x74).rel8("vu_peak")   # test vu_h,1; jz peak
+    _emit_vu_colour(a, "vu_c2")
+    a.db(0x88, 0xD3).db(0x80, 0xC3, _VU_COL).db(0x30, 0xFF)
+    a.db(0xB0, _BLK_LEFT).db(0xE8).rel16("tcell")      # ▌ (partial right edge)
+    a.label("vu_peak")
+    a.db(0xA0).abs16("vupeak_h").db(0x08, 0xC0).db(0x74).rel8("vu_done")   # or al,al; jz done
+    a.db(0xD0, 0xE8)                                   # shr al,1 (peak cell)
+    a.db(0x88, 0xC3).db(0x80, 0xC3, _VU_COL).db(0x30, 0xFF)
+    a.db(0xB4, _S4_PEAK_ATTR).db(0xB0, _BOX_V).db(0xE8).rel16("tcell")   # white │
+    a.label("vu_done")
+    a.db(0xC3)
+
+
+def _emit_vu_channel(a: "_Asm", ch: int, row: int) -> None:
+    """One meter: onset-kick (strike -> full) or slow release, peak-hold, label,
+    then draw the bar."""
+    lbl = _VU_LABELS[ch]
+    a.db(0xA0).abs16("strike", ch).db(0x08, 0xC0)      # al=[strike+ch]; or al,al
+    a.db(0x74).rel8(f"vq{ch}d")                        # jz decay
+    a.db(0xC6, 0x06).abs16("strike", ch).db(0x00)      # strike[ch]=0
+    a.db(0xC6, 0x06).abs16("vu", ch).db(_VU_MAX)       # vu[ch]=MAX (kick)
+    a.db(0xEB).rel8(f"vq{ch}p")
+    a.label(f"vq{ch}d")
+    a.db(0xA0).abs16("vu", ch).db(0x2C, _VU_FALL)      # al=vu[ch]; sub al,FALL
+    a.db(0x73).rel8(f"vq{ch}s").db(0x30, 0xC0)         # jnc set; xor al,al
+    a.label(f"vq{ch}s")
+    a.db(0xA2).abs16("vu", ch)                         # vu[ch]=al
+    a.label(f"vq{ch}p")
+    a.db(0x8A, 0x26).abs16("vu", ch)                   # ah=vu[ch]
+    a.db(0xA0).abs16("vupeak", ch)                     # al=vupeak[ch]
+    a.db(0x38, 0xC4).db(0x76).rel8(f"vq{ch}pd")        # cmp ah,al; jbe pdec
+    a.db(0x88, 0x26).abs16("vupeak", ch).db(0xEB).rel8(f"vq{ch}dr")   # vupeak=vu
+    a.label(f"vq{ch}pd")
+    a.db(0x2C, _VU_PEAK_FALL).db(0x73).rel8(f"vq{ch}ps").db(0x30, 0xC0)
+    a.label(f"vq{ch}ps")
+    a.db(0xA2).abs16("vupeak", ch)                     # vupeak[ch]=al
+    a.label(f"vq{ch}dr")
+    a.db(0xB9).bytes(_w(row)).db(0xBB).bytes(_w(_VU_LABEL_COL))   # cx=row; bx=label col
+    a.db(0xB4, _TATTR[ch])                             # ah=channel colour
+    for chch in lbl:
+        a.db(0xB0, ord(chch)).db(0xE8).rel16("tcell").db(0x43)   # al=char; tcell; inc bx
+    a.db(0xA0).abs16("vu", ch).db(0xA2).abs16("vu_h")            # vu_h = vu[ch]
+    a.db(0xA0).abs16("vupeak", ch).db(0xA2).abs16("vupeak_h")   # vupeak_h = vupeak[ch]
+    a.db(0xC7, 0x06).abs16("vurow").bytes(_w(row))              # vurow = row
+    a.db(0xE8).rel16("vudraw")
+
+
+def _emit_vu_drawframe(a: "_Asm") -> None:
+    """Clear, draw the four labelled meters, then the border."""
+    a.label("drawframe")
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)          # es=bufseg
+    a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)              # ax=0x0720; di=0
+    a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)              # cx=2000; rep stosw (clear)
+    for ch in range(4):
+        _emit_vu_channel(a, ch, _VU_ROWS[ch])
+    a.db(0xC7, 0x06).abs16("fx0").bytes(_w(0))         # full-screen border
+    a.db(0xC7, 0x06).abs16("fx1").bytes(_w(79))
+    a.db(0xC7, 0x06).abs16("fy0").bytes(_w(0))
+    a.db(0xC7, 0x06).abs16("fy1").bytes(_w(24))
+    a.db(0xE8).rel16("t3frame")
+    a.db(0xC3)
+
+
 def _emit_scope_code(a: "_Asm", vis: str) -> None:
     """Emit the scope renderer routines + baked tables for `vis`. Audio-agnostic:
     they only read the viz[]/strike[] tables and draw to the back buffer, so both
@@ -1621,6 +1734,14 @@ def _emit_scope_code(a: "_Asm", vis: str) -> None:
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
         a.label("sharm"); a.bytes(_t5_spec_harm())   # spectrum harmonic bins (18 bars)
         a.label("srowcol"); a.bytes(_t5_spec_rowcol())   # spectrum row colours
+    elif vis == "vu":
+        _emit_tcell(a)
+        _emit_t3frame(a)                             # the box-drawing border
+        _emit_vu_draw(a)
+        _emit_vu_drawframe(a)
+        _emit_text_blit(a)
+        a.label("textrow")
+        a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
 
 
 def _emit_scope_vars(a: "_Asm", vis: str) -> None:
@@ -1688,10 +1809,40 @@ def _emit_scope_vars(a: "_Asm", vis: str) -> None:
         a.label("vu_h"); a.db(0x00)                      # VU drawcol level/peak
         a.label("vupeak_h"); a.db(0x00)
         a.label("t5row"); a.db(0x00, 0x00)               # current VU meter row
+    elif vis == "vu":                                # lightweight VU-only state
+        a.label("vu"); a.db(0x00, 0x00, 0x00, 0x00)      # VU level per channel
+        a.label("vupeak"); a.db(0x00, 0x00, 0x00, 0x00)  # peak-hold per channel
+        a.label("vu_h"); a.db(0x00)                      # drawcol level/peak
+        a.label("vupeak_h"); a.db(0x00)
+        a.label("vurow"); a.db(0x00, 0x00)               # current meter row
+        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
+        a.label("fx1"); a.db(0x00, 0x00)
+        a.label("fy0"); a.db(0x00, 0x00)
+        a.label("fy1"); a.db(0x00, 0x00)
 
 
-def _assemble(divider: int, subdiv: int, total_ticks: int,
-              silence: bytes, stream: bytes, vis: str = "") -> bytes:
+def _emit_draw_wait(a: "_Asm", draw_skip: int) -> None:
+    """Foreground scope loop (label 'wait'): render the frame off-screen, wait
+    `draw_skip` vertical retraces (the throttle -- 1 = every frame/60 fps, higher
+    = lighter/slower), blit on retrace, then poll for a quit key. Shared by both
+    engines; calls the `drawframe`/`blit` routines the vis emitted."""
+    a.label("wait")
+    a.db(0xE8).rel16("drawframe")                    # render the whole frame off-screen
+    if draw_skip > 1:
+        a.db(0xB9).bytes(_w(draw_skip))              # mov cx, draw_skip (retraces to wait)
+        a.label("dpace")
+    a.db(0xBA, 0xDA, 0x03)                           # mov dx,0x3DA (CRTC status)
+    a.label("vs1"); a.db(0xEC).db(0xA8, 0x08).db(0x75).rel8("vs1")   # wait end of retrace
+    a.label("vs2"); a.db(0xEC).db(0xA8, 0x08).db(0x74).rel8("vs2")   # wait retrace start
+    if draw_skip > 1:
+        a.db(0xE2).rel8("dpace")                     # loop dpace (wait draw_skip retraces)
+    a.db(0xE8).rel16("blit")                         # copy back buffer -> screen
+    a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
+    a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
+
+
+def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
+              stream: bytes, vis: str = "", draw_skip: int = 1) -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
     ISR, run — waiting for a key or redrawing the scopes — then tear down.
     Followed by the silence record and per-sub-tick event stream. `vis` is "",
@@ -1719,17 +1870,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     a.db(0xFB)                                       # sti
     # ---- main loop: redraw scopes (vis) or just wait, until a key ----------
     if vis:
-        a.label("wait")
-        a.db(0xE8).rel16("drawframe")                # render the whole frame off-screen
-        a.db(0xBA, 0xDA, 0x03)                       # mov dx,0x3DA (CRTC status)
-        a.label("vs1")
-        a.db(0xEC).db(0xA8, 0x08).db(0x75).rel8("vs1")   # in al,dx;test al,8;jnz vs1 (wait end)
-        a.label("vs2")
-        a.db(0xEC).db(0xA8, 0x08).db(0x74).rel8("vs2")   # in al,dx;test al,8;jz vs2 (retrace)
-        a.db(0xE8).rel16("blit")                     # pack+copy back buffer -> Tandy screen
-        a.db(0xB4, 0x01).db(0xCD, 0x16)              # mov ah,1 ; int 0x16
-        a.db(0x74).rel8("wait")                      # jz wait
-        a.db(0x30, 0xE4).db(0xCD, 0x16)              # xor ah,ah ; int 0x16 (consume)
+        _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
         a.db(0xB4, 0x01).db(0xCD, 0x16)              # mov ah,1 ; int 0x16
@@ -1815,7 +1956,7 @@ def _tandy_silence() -> List[Tuple[int, int]]:
 
 
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
-                   stream: bytes, vis: str = "") -> bytes:
+                   stream: bytes, vis: str = "", draw_skip: int = 1) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -1852,14 +1993,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xFB)                                        # sti
     # ---- foreground: draw the scope (if any) between interrupts, until a key ----
     if vis:
-        a.label("wait")
-        a.db(0xE8).rel16("drawframe")                # render the frame off-screen
-        a.db(0xBA, 0xDA, 0x03)                       # mov dx,0x3DA (CRTC status)
-        a.label("vs1"); a.db(0xEC).db(0xA8, 0x08).db(0x75).rel8("vs1")   # wait end of retrace
-        a.label("vs2"); a.db(0xEC).db(0xA8, 0x08).db(0x74).rel8("vs2")   # wait retrace
-        a.db(0xE8).rel16("blit")                     # copy back buffer -> B800
-        a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")
-        a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
+        _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
         a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
@@ -1966,34 +2100,40 @@ def _vis_for(scope: bool, text_scope) -> str:
     "text1".."text5"."""
     if text_scope:
         ts = int(text_scope)
-        return ("text5" if ts == 5 else "text4" if ts == 4 else
-                "text3" if ts == 3 else "text2" if ts == 2 else "text1")
+        return ("vu" if ts == 6 else "text5" if ts == 5 else "text4" if ts == 4
+                else "text3" if ts == 3 else "text2" if ts == 2 else "text1")
     return "graphics" if scope else ""
 
 
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
-              text_scope: bool = False) -> bytes:
+              text_scope: bool = False, mix_rate=None, draw_skip: int = 1) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
-    box-line 2x2 grid + master, 4 = faux spectrum analyzer, 5 = combined monitor
-    (Tandy or 4-voice PC speaker)."""
+    box-line 2x2 grid + master, 4 = faux spectrum analyzer, 5 = combined monitor,
+    6/"vu" = lightweight VU meters (Tandy or 4-voice PC speaker). `mix_rate` (Hz,
+    4-voice only) sets the software mixing sample rate -- lower it (~6 kHz) for a
+    real XT. `draw_skip` redraws the scope every Nth frame (>=2 lightens a heavy
+    scope on slow machines)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    draw_skip = max(1, min(255, int(draw_skip)))
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
             raise ValueError("the graphics scope is Tandy-only; use a text scope "
                              "(--scope-text..) with --4voice")
         vis = _vis_for(False, text_scope)            # text scopes only
-        stream, total = _build_spk4_stream(song)
+        div = _spk4_div_for(mix_rate)
+        fs = _PIT_HZ / div
+        stream, total = _build_spk4_stream(song, fs)
         if total <= 1:
             raise ValueError("nothing to play (no notes)")
         if total > 65535:
             raise ValueError("song too long for the 4-voice player (sub-tick "
                              "count exceeds 16 bits)")
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
-        samps = max(1, min(65535, round(_SPK4_FS * subtick_s)))
-        com = _assemble_spk4(_SPK4_DIV, samps, total, stream, vis)
+        samps = max(1, min(65535, round(fs * subtick_s)))
+        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
@@ -2018,7 +2158,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     # its end instead of hanging the final chord until a key is pressed
     stream += sil_bytes
     total += 1
-    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis)
+    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis, draw_skip)
     if len(com) > 0xFF00:
         raise ValueError(f".COM is {len(com)} bytes — too big for one segment; "
                          "shorten the song or split it")

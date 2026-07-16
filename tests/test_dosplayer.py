@@ -203,6 +203,53 @@ def test_4voice_text_scope_reuses_the_renderer():
     assert plain[:5] != b"\xB8\x03\x00\xCD\x10"
 
 
+def test_vu_only_display_is_light_and_labelled():
+    # text_scope=6 is the lightweight VU-only display: text mode 3, labelled bars,
+    # much smaller than the full combined monitor. Works on Tandy and 4-voice.
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    vu = D.build_com(song, "4voice", 0x80, text_scope=6)
+    assert vu[:5] == b"\xB8\x03\x00\xCD\x10"          # text mode 3
+    for glyph in (0xDB, 0xDD, 0xB3, 0xC4):            # █ ▌ │ ─ (bar + peak + border)
+        assert bytes([0xB0, glyph]) in vu
+    for chch in "Triangle":                           # a channel label is drawn
+        assert bytes([0xB0, ord(chch)]) in vu
+    t5 = D.build_com(song, "4voice", 0x80, text_scope=5)
+    assert len(vu) < len(t5)                          # VU-only is much lighter
+    assert len(D.build_com(song, "tandy", 0x80, text_scope=6)) > 0   # also on Tandy
+
+
+def test_4voice_mix_rate_is_controllable():
+    # --mix-rate sets the software sample rate: it changes the PIT divider (a lower
+    # rate => a larger divider) and rescales the phase increments.
+    song = Song(title="t", source="t")
+    tr = Track(name="v")
+    tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=69))   # A4 440 Hz
+    song.add_track(tr)
+    assert D._spk4_div_for(6000) > D._spk4_div_for(12000)   # lower Fs, bigger divider
+    assert D._spk4_div_for(None) == D._SPK4_DIV             # default
+    assert D._spk4_div_for(999999) == D._SPK4_DIV_MIN       # clamped
+    lo = D.build_com(song, "4voice", 0x80, mix_rate=6000)
+    hi = D.build_com(song, "4voice", 0x80, mix_rate=16000)
+    # the ISR programs PIT ch0 with the divider (mov ax, div right after cmd 0x36)
+    def divider(com):
+        m = com.index(b"\xB0\x36\xE6\x43") + 4
+        return com[m + 1] | (com[m + 2] << 8)
+    assert divider(lo) > divider(hi)                  # 6 kHz uses a bigger divider
+
+
+def test_draw_skip_throttles_the_scope():
+    # draw_skip>1 makes the foreground wait N retraces per frame (a mov cx,N + a
+    # loop) before blitting, so the .COM differs from the every-frame build.
+    song = _song([(0, 4, 60), (4, 4, 67)])
+    every = D.build_com(song, "tandy", 0x80, text_scope=6, draw_skip=1)
+    third = D.build_com(song, "tandy", 0x80, text_scope=6, draw_skip=3)
+    assert len(third) > len(every)                    # the pace loop adds a few bytes
+
+
 def test_com_auto_repeats_until_keypress():
     # When the song ends (ticksleft hits 0) the ISR rewinds streamptr + ticksleft
     # to the top instead of halting, so the .COM loops until a key is pressed.
