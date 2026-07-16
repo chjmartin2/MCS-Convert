@@ -1118,6 +1118,11 @@ def _emit_s4_drawframe(a: "_Asm") -> None:
 # the bottom-right is four onset-kicked VU meters. Reuses t3seg (scope traces),
 # the text-4 deposit/attack/peak model (spectrum), and t3frame (all borders).
 _BLK_LEFT = 0xDD                      # ▌ left-half block (horizontal VU smoothing)
+# box-drawing junctions for the one unified grid (where │ and ─ meet)
+_BOX_CROSS, _BOX_TDOWN, _BOX_TUP = 0xC5, 0xC2, 0xC1     # ┼ ┬ ┴
+_BOX_TRIGHT, _BOX_TLEFT = 0xC3, 0xB4                    # ├ ┤
+_T5_VD = 39                          # the single full-height vertical divider column
+_T5_HD = (6, 12)                     # horizontal divider rows (scope mid, scope/bottom)
 # -- top: 2x2 scope grid --
 _T5_SCEN = (3, 3, 9, 9)               # scope centre rows: ch0, ch1, ch2, noise
 _T5_SCOL0 = (1, 41, 1, 41)            # scope left columns
@@ -1224,11 +1229,12 @@ def _emit_t5_scope_noise(a: "_Asm", cen: int, col0: int) -> None:
 
 
 def _emit_t5spec_drawcol(a: "_Asm") -> None:
-    """Draw one spectrum column BX: [sbar_h] blocks up from row 23 (coloured by
-    row via srowcol), then the [speak_h] white cap. Like s4drawcol, 1 col wide."""
+    """Draw one spectrum column BX: [sbar_h] blocks up from row 23, coloured by row
+    via srowcol, with a ▄ half-block top edge. (No peak cap -- the spectrum bars
+    read cleaner without the white markers; the VU meters keep their peaks.)"""
     a.label("t5sdraw")
     a.db(0xA0).abs16("sbar_h")                          # al=[sbar_h]
-    a.db(0x08, 0xC0).db(0x74).rel8("t5s_peak")          # or al,al; jz peak
+    a.db(0x08, 0xC0).db(0x74).rel8("t5s_done")          # or al,al; jz done (empty)
     a.db(0x88, 0xC6).db(0xD0, 0xEE)                     # dh=al; shr dh,1 (full rows)
     a.db(0xB2, _T5_SPEC_BASE)                           # dl=baseline row
     a.label("t5s_full")
@@ -1238,17 +1244,10 @@ def _emit_t5spec_drawcol(a: "_Asm") -> None:
     a.db(0xB0, _BLK_FULL).db(0xE8).rel16("tcell")       # █
     a.db(0xFE, 0xCA).db(0xFE, 0xCE).db(0xEB).rel8("t5s_full")   # dec dl; dec dh; loop
     a.label("t5s_part")
-    a.db(0xA0).abs16("sbar_h").db(0xA8, 0x01).db(0x74).rel8("t5s_peak")   # test 1; jz peak
+    a.db(0xA0).abs16("sbar_h").db(0xA8, 0x01).db(0x74).rel8("t5s_done")   # test 1; jz done
     a.db(0x88, 0xD1).db(0x30, 0xED)
     a.db(0x89, 0xCE).db(0x8A, 0xA4).abs16("srowcol")
     a.db(0xB0, _BLK_LOWER).db(0xE8).rel16("tcell")      # ▄
-    a.label("t5s_peak")
-    a.db(0xA0).abs16("speak_h")                         # al=[speak_h]
-    a.db(0x08, 0xC0).db(0x74).rel8("t5s_done")          # or al,al; jz done
-    a.db(0xD0, 0xE8)                                    # shr al,1
-    a.db(0xB6, _T5_SPEC_BASE).db(0x28, 0xC6)            # dh=baseline; sub dh,al
-    a.db(0x88, 0xF1).db(0x30, 0xED)
-    a.db(0xB4, _S4_PEAK_ATTR).db(0xB0, _BLK_UPPER).db(0xE8).rel16("tcell")   # ▀ white
     a.label("t5s_done")
     a.db(0xC3)
 
@@ -1327,9 +1326,84 @@ def _emit_t5vu_channel(a: "_Asm", ch: int, row: int) -> None:
     a.db(0xE8).rel16("t5vu")
 
 
+def _emit_t5grid(a: "_Asm") -> None:
+    """Draw ONE grid for the whole screen: a full outer square (0,0)-(79,24) with
+    a full-height vertical divider at col 39 and horizontal dividers at rows 6 and
+    12, joined with box-drawing junctions (┼ ┬ ┴ ├ ┤). That partitions the screen
+    into the six cells -- four scopes, spectrum, VU -- with a single clean frame
+    instead of six overlapping boxes. Grey; uses tcell (AH=colour survives)."""
+    vd, (h1, h2) = _T5_VD, _T5_HD
+    a.label("t5grid")
+    a.db(0xB4, _T3_FRAME_ATTR)                          # mov ah, grey
+    # -- top edge (row 0): ┌ ─ ┬ ─ ┐ --
+    a.db(0xB9, 0x00, 0x00).db(0xBB, 0x00, 0x00)         # cx=0; bx=0
+    a.label("g_top")
+    a.db(0xB0, _BOX_H)                                  # al=─
+    a.db(0x83, 0xFB, 0x00).db(0x75).rel8("g_t1").db(0xB0, _BOX_TL)     # bx==0 -> ┌
+    a.label("g_t1")
+    a.db(0x83, 0xFB, 79).db(0x75).rel8("g_t2").db(0xB0, _BOX_TR)       # bx==79 -> ┐
+    a.label("g_t2")
+    a.db(0x83, 0xFB, vd).db(0x75).rel8("g_t3").db(0xB0, _BOX_TDOWN)    # bx==vd -> ┬
+    a.label("g_t3")
+    a.db(0xE8).rel16("tcell")
+    a.db(0x43).db(0x83, 0xFB, 80).db(0x72).rel8("g_top")   # inc bx; cmp bx,80; jb
+    # -- bottom edge (row 24): └ ─ ┴ ─ ┘ --
+    a.db(0xB9, 24, 0x00).db(0xBB, 0x00, 0x00)
+    a.label("g_bot")
+    a.db(0xB0, _BOX_H)
+    a.db(0x83, 0xFB, 0x00).db(0x75).rel8("g_b1").db(0xB0, _BOX_BL)
+    a.label("g_b1")
+    a.db(0x83, 0xFB, 79).db(0x75).rel8("g_b2").db(0xB0, _BOX_BR)
+    a.label("g_b2")
+    a.db(0x83, 0xFB, vd).db(0x75).rel8("g_b3").db(0xB0, _BOX_TUP)
+    a.label("g_b3")
+    a.db(0xE8).rel16("tcell")
+    a.db(0x43).db(0x83, 0xFB, 80).db(0x72).rel8("g_bot")
+    # -- left edge (col 0), rows 1..23: │ with ├ at the divider rows --
+    a.db(0xBB, 0x00, 0x00).db(0xB9, 0x01, 0x00)
+    a.label("g_left")
+    a.db(0xB0, _BOX_V)
+    a.db(0x83, 0xF9, h1).db(0x74).rel8("g_lj")          # cx==6 -> ├
+    a.db(0x83, 0xF9, h2).db(0x75).rel8("g_l1")          # cx!=12 -> keep │
+    a.label("g_lj")
+    a.db(0xB0, _BOX_TRIGHT)
+    a.label("g_l1")
+    a.db(0xE8).rel16("tcell")
+    a.db(0x41).db(0x83, 0xF9, 24).db(0x72).rel8("g_left")   # inc cx; cmp cx,24; jb
+    # -- right edge (col 79), rows 1..23: │ with ┤ at the divider rows --
+    a.db(0xBB, 79, 0x00).db(0xB9, 0x01, 0x00)
+    a.label("g_right")
+    a.db(0xB0, _BOX_V)
+    a.db(0x83, 0xF9, h1).db(0x74).rel8("g_rj")
+    a.db(0x83, 0xF9, h2).db(0x75).rel8("g_r1")
+    a.label("g_rj")
+    a.db(0xB0, _BOX_TLEFT)
+    a.label("g_r1")
+    a.db(0xE8).rel16("tcell")
+    a.db(0x41).db(0x83, 0xF9, 24).db(0x72).rel8("g_right")
+    # -- horizontal dividers (rows 6, 12), cols 1..78: ─ with ┼ at the divider col --
+    for tag, hd in (("h1", h1), ("h2", h2)):
+        a.db(0xB9, hd, 0x00).db(0xBB, 0x01, 0x00)       # cx=hd; bx=1
+        a.label(f"g_{tag}")
+        a.db(0xB0, _BOX_H)
+        a.db(0x83, 0xFB, vd).db(0x75).rel8(f"g_{tag}a").db(0xB0, _BOX_CROSS)   # bx==vd -> ┼
+        a.label(f"g_{tag}a")
+        a.db(0xE8).rel16("tcell")
+        a.db(0x43).db(0x83, 0xFB, 79).db(0x72).rel8(f"g_{tag}")   # inc bx; cmp bx,79; jb
+    # -- vertical divider (col 39), rows 1..23: │, skipping the ┼ crossings --
+    a.db(0xBB, vd, 0x00).db(0xB9, 0x01, 0x00)           # bx=vd; cx=1
+    a.label("g_v")
+    a.db(0x83, 0xF9, h1).db(0x74).rel8("g_vs")          # cx==6 -> skip (┼ drawn already)
+    a.db(0x83, 0xF9, h2).db(0x74).rel8("g_vs")          # cx==12 -> skip
+    a.db(0xB0, _BOX_V).db(0xE8).rel16("tcell")
+    a.label("g_vs")
+    a.db(0x41).db(0x83, 0xF9, 24).db(0x72).rel8("g_v")
+    a.db(0xC3)                                          # ret
+
+
 def _emit_text5_drawframe(a: "_Asm") -> None:
     """The whole combined frame: clear, the 2x2 scope grid, the spectrum, the VU
-    meters, then every border."""
+    meters, then the one unified border grid."""
     a.label("drawframe")
     a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # es=bufseg
     a.db(0xB8, 0x20, 0x07).db(0x31, 0xFF)               # ax=0x0720; di=0
@@ -1394,16 +1468,7 @@ def _emit_text5_drawframe(a: "_Asm") -> None:
     a.db(0x88, 0xC4)                                    # ah=al
     a.label("qset")
     a.db(0x88, 0xA4).abs16("sbar")                      # [si+sbar]=ah
-    a.db(0x8A, 0x84).abs16("speak")                     # al=peak
-    a.db(0x38, 0xC4).db(0x76).rel8("qpdec")             # cmp ah,al; jbe
-    a.db(0x88, 0xE0).db(0x88, 0x84).abs16("speak").db(0xEB).rel8("qpdrw")
-    a.label("qpdec")
-    a.db(0x2C, _S4_PEAK_FALL).db(0x73).rel8("qpset").db(0x30, 0xC0)
-    a.label("qpset")
-    a.db(0x88, 0x84).abs16("speak")
-    a.label("qpdrw")
-    a.db(0x8A, 0x84).abs16("sbar").db(0xA2).abs16("sbar_h")
-    a.db(0x8A, 0x84).abs16("speak").db(0xA2).abs16("speak_h")
+    a.db(0x88, 0x26).abs16("sbar_h")                    # sbar_h = ah (height to draw; no peak)
     a.db(0x89, 0xE8)                                    # ax=bp
     for _ in range(_T5_SPEC_STRIDE - 1):
         a.db(0x01, 0xE8)                                # add ax,bp (stride*bp)
@@ -1415,13 +1480,8 @@ def _emit_text5_drawframe(a: "_Asm") -> None:
     # ---- bottom-right: VU meters ----------------------------------------------
     for ch in range(4):
         _emit_t5vu_channel(a, ch, _T5_VU_ROWS[ch])
-    # ---- borders ---------------------------------------------------------------
-    for x0, x1, y0, y1 in _T5_FRAMES:
-        a.db(0xC7, 0x06).abs16("fx0").bytes(_w(x0))
-        a.db(0xC7, 0x06).abs16("fx1").bytes(_w(x1))
-        a.db(0xC7, 0x06).abs16("fy0").bytes(_w(y0))
-        a.db(0xC7, 0x06).abs16("fy1").bytes(_w(y1))
-        a.db(0xE8).rel16("t3frame")
+    # ---- one unified grid: outer square + cross-joined dividers ----------------
+    a.db(0xE8).rel16("t5grid")
     a.db(0xC3)                                          # ret
 
 
@@ -1571,7 +1631,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
     elif vis == "text5":
         _emit_tcell(a)
         _emit_t3seg(a)                               # scope box-line trace
-        _emit_t3frame(a)                             # all six borders
+        _emit_t5grid(a)                              # one unified border grid
         _emit_t5spec_drawcol(a)
         _emit_t5vu_draw(a)
         _emit_text5_drawframe(a)
@@ -1642,20 +1702,14 @@ def _assemble(divider: int, subdiv: int, total_ticks: int,
         a.label("t3top"); a.db(0x00, 0x00)
         a.label("t3bot"); a.db(0x00, 0x00)
         a.label("t3attr"); a.db(0x00)
-        a.label("stgt"); a.bytes(bytes(_T5_SPEC_N))      # spectrum target/current/peak
+        a.label("stgt"); a.bytes(bytes(_T5_SPEC_N))      # spectrum target/current
         a.label("sbar"); a.bytes(bytes(_T5_SPEC_N))
-        a.label("speak"); a.bytes(bytes(_T5_SPEC_N))
-        a.label("sbar_h"); a.db(0x00)                    # spectrum drawcol height/peak
-        a.label("speak_h"); a.db(0x00)
+        a.label("sbar_h"); a.db(0x00)                    # spectrum drawcol height
         a.label("vu"); a.db(0x00, 0x00, 0x00, 0x00)      # VU level/peak per channel
         a.label("vupeak"); a.db(0x00, 0x00, 0x00, 0x00)
         a.label("vu_h"); a.db(0x00)                      # VU drawcol level/peak
         a.label("vupeak_h"); a.db(0x00)
         a.label("t5row"); a.db(0x00, 0x00)               # current VU meter row
-        a.label("fx0"); a.db(0x00, 0x00)                 # border rectangle
-        a.label("fx1"); a.db(0x00, 0x00)
-        a.label("fy0"); a.db(0x00, 0x00)
-        a.label("fy1"); a.db(0x00, 0x00)
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)

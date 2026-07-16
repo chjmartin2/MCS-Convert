@@ -103,8 +103,12 @@ def test_text5_combined_monitor_has_all_three_views():
     t5 = D.build_com(_song([(0, 4, 60), (4, 4, 67), (8, 4, 72), (12, 2, 48)]),
                      "tandy", 0x80, text_scope=5)
     assert t5[:5] == b"\xB8\x03\x00\xCD\x10"          # text mode 3
-    for glyph in (0xC4, 0xB3, 0xDA, 0xDB, 0xDC, 0xDD, 0xDF):   # scope + bar + VU glyphs
+    for glyph in (0xC4, 0xB3, 0xDA, 0xDB, 0xDC, 0xDD):   # scope + bar + VU glyphs
         assert bytes([0xB0, glyph]) in t5
+    # one unified border grid: cross + tee junctions join the cells
+    for junction in (0xC5, 0xC2, 0xC1, 0xC3, 0xB4):   # ┼ ┬ ┴ ├ ┤
+        assert bytes([0xB0, junction]) in t5
+    assert bytes([0xB0, 0xDF]) not in t5              # no white spectrum peak caps
     # the VU meter labels are drawn ('P','1','N','z' etc.)
     for ch in "P1TrNz":
         assert bytes([0xB0, ord(ch)]) in t5
