@@ -81,9 +81,14 @@ def _spin_cell(col: int) -> int:
     return _SPIN_ROW * 160 + col * 2
 
 
+_SPIN_FPS = 10                   # character updates/second (low, to spare the XT's CPU)
+
+
 def _spk4_poll_n(fs: float) -> int:
-    """Sample-interrupts between spinner updates: ~45 redraws/second."""
-    return max(1, min(65535, round(fs / 45.0)))
+    """Sample-interrupts between character updates. The display runs in the CPU
+    time the audio ISR leaves behind, so keep the redraw rate low (~10/sec) -- the
+    characters don't need to dance, and this frees the foreground on a slow XT."""
+    return max(1, min(65535, round(fs / _SPIN_FPS)))
 
 
 def _spk4_div_for(mix_rate) -> int:
