@@ -250,6 +250,19 @@ def test_draw_skip_throttles_the_scope():
     assert len(third) > len(every)                    # the pace loop adds a few bytes
 
 
+def test_no_scope_wait_loop_uses_hlt():
+    # The no-scope foreground must HLT (sleep until the next interrupt) rather than
+    # spin on int 0x16 -- a tight keyboard poll on a very fast CPU / DOSBox
+    # cycles=max starves the timer IRQ and the audio skips. The wait loop is
+    # 'hlt; mov ah,1; int 0x16; jz wait'.
+    for mode in ("tandy", "4voice"):
+        com = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), mode, 0x80)
+        assert b"\xF4\xB4\x01\xCD\x16" in com         # hlt; mov ah,1; int 0x16
+    # a scope build paces itself to the vertical retrace, so it doesn't hlt-spin
+    scoped = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, text_scope=6)
+    assert b"\xF4\xB4\x01\xCD\x16" not in scoped
+
+
 def test_com_auto_repeats_until_keypress():
     # When the song ends (ticksleft hits 0) the ISR rewinds streamptr + ticksleft
     # to the top instead of halting, so the .COM loops until a key is pressed.

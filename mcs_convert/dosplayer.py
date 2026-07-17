@@ -1873,6 +1873,9 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
         _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
+        a.db(0xF4)                                   # hlt: sleep until the next IRQ
+        #  (don't spin int 0x16 -- a tight poll on a very fast CPU / DOSBox
+        #   cycles=max starves the timer and makes playback skip)
         a.db(0xB4, 0x01).db(0xCD, 0x16)              # mov ah,1 ; int 0x16
         a.db(0x74).rel8("wait")                      # jz wait  (ZF=1: no key)
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # xor ah,ah ; int 0x16 (consume)
@@ -1996,6 +1999,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
+        a.db(0xF4)                                   # hlt: sleep until the next sample IRQ
+        #  (a tight int 0x16 spin on a very fast CPU / DOSBox cycles=max starves
+        #   the timer and makes the audio skip)
         a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
     # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
