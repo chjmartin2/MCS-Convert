@@ -68,9 +68,10 @@ def _cmd_convert(args) -> int:
             return 1
 
         if target:                                   # standalone DOS .COM player
-            text_scope = (6 if args.scope_vu else 5 if args.scope_text5 else
-                          4 if args.scope_text4 else 3 if args.scope_text3 else
-                          2 if args.scope_text2 else 1 if args.scope_text else 0)
+            text_scope = (7 if args.scope_spin else 6 if args.scope_vu else
+                          5 if args.scope_text5 else 4 if args.scope_text4 else
+                          3 if args.scope_text3 else 2 if args.scope_text2 else
+                          1 if args.scope_text else 0)
             if args.scope and target != "tandy":
                 raise ValueError("--scope (graphics oscilloscope) needs --tandy")
             if text_scope and target not in ("tandy", "4voice"):
@@ -175,8 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Tandy .COM only: 80x25 text-mode combined monitor "
                              "(2x2 scopes + spectrum + VU meters)")
     p_conv.add_argument("--scope-vu", dest="scope_vu", action="store_true",
-                        help="Tandy/4voice .COM: lightweight 80x25 VU-meter display "
-                             "(cheap enough for a real XT)")
+                        help="Tandy/4voice .COM: lightweight 80x25 VU-meter display")
+    p_conv.add_argument("--scope-spin", dest="scope_spin", action="store_true",
+                        help="4voice .COM: minimal 4 spinning-character voice "
+                             "indicators (no clear/blit; runs on a real 6 MHz XT)")
     p_conv.add_argument("--mix-rate", dest="mix_rate", type=int, default=None,
                         metavar="HZ",
                         help="4voice .COM only: software mixing sample rate in Hz "

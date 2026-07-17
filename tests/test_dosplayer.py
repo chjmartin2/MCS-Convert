@@ -250,6 +250,27 @@ def test_draw_skip_throttles_the_scope():
     assert len(third) > len(every)                    # the pace loop adds a few bytes
 
 
+def test_spinners_display_is_minimal_and_direct():
+    # text_scope=7 is the XT-minimal 'spinners': it writes straight to B800 (es-
+    # prefixed word stores) with NO full-screen clear or blit, so it's far smaller
+    # and cheaper than the VU meters. 4-voice only.
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    spin = D.build_com(song, "4voice", 0x80, text_scope=7)
+    assert spin[:5] == b"\xB8\x03\x00\xCD\x10"        # text mode 3
+    for glyph in (0x7C, 0x2F, 0x2D, 0x5C):            # the spinner glyphs | / - \
+        assert bytes([glyph]) in spin
+    assert b"\x26\xA3" in spin                        # mov es:[imm16], ax (direct B800 write)
+    assert b"\xF3\xAB" not in spin                    # no 'rep stosw' full-screen clear
+    assert len(spin) < len(D.build_com(song, "4voice", 0x80, text_scope=6))  # < VU meters
+    assert b"\xF4" in spin                            # still hlt-paced (fast-CPU safe)
+    with pytest.raises(ValueError):                   # not on Tandy
+        D.build_com(song, "tandy", 0x80, text_scope=7)
+
+
 def test_no_scope_wait_loop_uses_hlt():
     # The no-scope foreground must HLT (sleep until the next interrupt) rather than
     # spin on int 0x16 -- a tight keyboard poll on a very fast CPU / DOSBox

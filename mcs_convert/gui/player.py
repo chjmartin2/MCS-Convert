@@ -794,7 +794,8 @@ class ImportPreview(tk.Toplevel):
         self.com_scope = tk.StringVar(value="text 5")
         ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
                      values=("none", "graphics", "text 1", "text 2", "text 3",
-                             "text 4", "text 5", "VU meters")).pack(side="left", padx=(0, 6))
+                             "text 4", "text 5", "VU meters", "spinners")
+                     ).pack(side="left", padx=(0, 6))
         # 4-voice-only: software mixing rate (lower = XT-friendly)
         tk.Label(btns, text="mix", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
         self.com_mix = tk.StringVar(value="12 kHz")
@@ -1058,7 +1059,8 @@ class ImportPreview(tk.Toplevel):
         # Scopes: Tandy allows graphics + text; 4-voice allows text scopes (the
         # graphics mode is Tandy-only); 1-voice has no per-channel data to show.
         kind = self.com_scope.get()
-        if mode == "1voice" or (mode == "4voice" and kind == "graphics"):
+        if mode == "1voice" or (mode == "4voice" and kind == "graphics") \
+                or (mode != "4voice" and kind == "spinners"):
             kind = "none"
         mix_rate = ({"6 kHz (XT)": 6000, "9 kHz": 9000, "12 kHz": 12000,
                      "16 kHz": 16000}.get(self.com_mix.get())
@@ -1067,7 +1069,8 @@ class ImportPreview(tk.Toplevel):
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
                              scope=(kind == "graphics"), mix_rate=mix_rate,
-                             text_scope=(6 if kind == "VU meters" else
+                             text_scope=(7 if kind == "spinners" else
+                                         6 if kind == "VU meters" else
                                          5 if kind == "text 5" else
                                          4 if kind == "text 4" else
                                          3 if kind == "text 3" else

@@ -67,6 +67,25 @@ _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source
 _SPK4_NOISE_BRIGHT_HZ = 5500     # hi-hat: fast LFSR clock (hiss)
 _SPK4_NOISE_DARK_HZ = 1200       # kick: slow LFSR clock (rumble)
 
+# "spinners" -- the minimal XT-safe visual: no back buffer, no clear, no blit,
+# just 4 characters written straight to B800. A hlt-paced counter advances a
+# per-voice spinner (| / - \) while that voice sounds, a dim '.' when it's silent.
+_SPIN_ROW = 12                   # the meters sit on one row, centred
+_SPIN_GROUPS = ((24, "P1:"), (34, "P2:"), (44, "Tr:"), (54, "Nz:"))
+_SPIN_GLYPHS = (0x7C, 0x2F, 0x2D, 0x5C)   # | / - \
+_SPIN_DOT = 0x2E                 # '.' shown when a voice is silent
+_SPIN_ATTR = (0x0E, 0x0C, 0x0B, 0x0A)     # yellow / bright-red / cyan / green (visible)
+
+
+def _spin_cell(col: int) -> int:
+    """B800 byte offset of the text cell at (_SPIN_ROW, col)."""
+    return _SPIN_ROW * 160 + col * 2
+
+
+def _spk4_poll_n(fs: float) -> int:
+    """Sample-interrupts between spinner updates: ~45 redraws/second."""
+    return max(1, min(65535, round(fs / 45.0)))
+
 
 def _spk4_div_for(mix_rate) -> int:
     """PIT ch0 divider for a requested mixing rate in Hz (clamped), or the default
@@ -1958,18 +1977,56 @@ def _tandy_silence() -> List[Tuple[int, int]]:
             (_SN76489, 0xDF), (_SN76489, 0xFF)]      # and the noise channel
 
 
+def _emit_spin_foreground(a: "_Asm", poll_n: int) -> None:
+    """The whole 'spinners' foreground (label 'wait'): draw the static labels once,
+    then hlt-sleep, and every `poll_n` sample interrupts write 4 characters
+    straight to B800 -- a spinner per sounding voice, a dim '.' per silent one.
+    No back buffer / clear / blit. Runs until a key is pressed."""
+    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)            # mov ax,0xB800; mov es,ax
+    for i, (lc, label) in enumerate(_SPIN_GROUPS):   # static labels (drawn once)
+        for j, chch in enumerate(label):
+            cell = (_SPIN_ATTR[i] << 8) | ord(chch)
+            a.db(0x26, 0xC7, 0x06).bytes(_w(_spin_cell(lc + j))).bytes(_w(cell))
+    a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # pollctr = poll_n
+    a.label("wait")
+    a.db(0xF4)                                       # hlt (sleep until an IRQ)
+    a.db(0xFF, 0x0E).abs16("pollctr")                # dec word[pollctr]
+    a.db(0x75).rel8("wait")                          # jnz wait (not yet time to redraw)
+    a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # reload
+    for i, (lc, label) in enumerate(_SPIN_GROUPS):
+        cell = _spin_cell(lc + len(label))           # the spinner cell for this voice
+        a.db(0xA0).abs16("viz", i).db(0x08, 0xC0)    # al=[viz+i]; or al,al
+        a.db(0x74).rel8(f"spsil{i}")                 # jz silent
+        a.db(0x8A, 0x1E).abs16("spinph", i)          # mov bl,[spinph+i]
+        a.db(0xFE, 0xC3).db(0x80, 0xE3, 0x03).db(0x88, 0x1E).abs16("spinph", i)  # inc;and 3;store
+        a.db(0x30, 0xFF).db(0x8A, 0x87).abs16("spingly")   # bh=0; al=[bx+spingly]
+        a.db(0xB4, _SPIN_ATTR[i]).db(0x26, 0xA3).bytes(_w(cell))   # ah=attr; es:[cell]=ax
+        a.db(0xEB).rel8(f"spdone{i}")
+        a.label(f"spsil{i}")
+        a.db(0x26, 0xC7, 0x06).bytes(_w(cell)).bytes(_w((_SPIN_ATTR[i] << 8) | _SPIN_DOT))
+        a.label(f"spdone{i}")
+    a.db(0xB4, 0x01).db(0xCD, 0x16)                  # int16 ah=1
+    a.db(0x75).rel8("spkey")                         # jnz spkey (a key is waiting)
+    a.db(0xE9).rel16("wait")                         # jmp wait (no key; back-edge is >rel8)
+    a.label("spkey")
+    a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
+
+
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
-                   stream: bytes, vis: str = "", draw_skip: int = 1) -> bytes:
+                   stream: bytes, vis: str = "", draw_skip: int = 1,
+                   poll_n: int = 1) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
     `samps_per_sub` samples applies the next sub-tick's changes (which also update
-    viz[]/strike[] for the scopes). With `vis` (a text-mode scope) the foreground
-    draws the visualisation between audio interrupts. Auto-repeats; a keypress
-    restores everything and exits."""
+    viz[]/strike[] for the scopes). `vis` picks the foreground: a text-mode scope
+    (drawframe/blit), the lightweight 'spin' meters (direct 4-cell writes, XT-safe),
+    or nothing. Auto-repeats; a keypress restores everything and exits."""
     a = _Asm()
-    if vis:                                          # text-mode scope: set up video
-        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (80x25 text)
+    spin = vis == "spin"
+    if vis:                                          # any display: set 80x25 text mode
+        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10
+    if vis and not spin:                             # scopes need a back buffer
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)        # mov ax,cs; add ax,0x1000
         a.db(0xA3).abs16("bufseg")                   # [bufseg] = back-buffer segment
     # ---- start: hook INT 8, set up the speaker, program the sample timer -------
@@ -1994,8 +2051,10 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
     a.db(0xB8).bytes(_w(divider)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
     a.db(0xFB)                                        # sti
-    # ---- foreground: draw the scope (if any) between interrupts, until a key ----
-    if vis:
+    # ---- foreground: spinners / scope / plain wait, until a key ----------------
+    if spin:
+        _emit_spin_foreground(a, poll_n)
+    elif vis:
         _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
@@ -2080,7 +2139,10 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
-    _emit_scope_code(a, vis)                          # scope renderers (shared)
+    if spin:
+        a.label("spingly"); a.db(*_SPIN_GLYPHS)      # spinner glyph table
+    else:
+        _emit_scope_code(a, vis)                      # scope renderers (shared)
     # ---- variables + data ------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -2096,7 +2158,11 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("inc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase increments
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
-    _emit_scope_vars(a, vis)                          # shared + per-vis draw state
+    if spin:
+        a.label("spinph"); a.db(0x00, 0x00, 0x00, 0x00)   # per-voice spinner phase
+        a.label("pollctr"); a.db(0x00, 0x00)              # sample countdown to next redraw
+    else:
+        _emit_scope_vars(a, vis)                      # shared + per-vis draw state
     a.label("stream"); a.bytes(stream)
     return a.resolve()
 
@@ -2106,8 +2172,9 @@ def _vis_for(scope: bool, text_scope) -> str:
     "text1".."text5"."""
     if text_scope:
         ts = int(text_scope)
-        return ("vu" if ts == 6 else "text5" if ts == 5 else "text4" if ts == 4
-                else "text3" if ts == 3 else "text2" if ts == 2 else "text1")
+        return ("spin" if ts == 7 else "vu" if ts == 6 else "text5" if ts == 5
+                else "text4" if ts == 4 else "text3" if ts == 3
+                else "text2" if ts == 2 else "text1")
     return "graphics" if scope else ""
 
 
@@ -2139,11 +2206,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
                              "count exceeds 16 bits)")
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
-        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip)
+        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip,
+                             _spk4_poll_n(fs))
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
     vis = _vis_for(scope, text_scope)                # remaining modes: tandy / 1voice
+    if vis == "spin":
+        raise ValueError("the 'spinners' display is 4-voice only")
     if vis and mode != "tandy":
         raise ValueError("scopes are only available with --tandy or --4voice")
     stream, total = _build_stream(song, mode, bool(vis))
