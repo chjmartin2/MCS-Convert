@@ -178,8 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--scope-vu", dest="scope_vu", action="store_true",
                         help="Tandy/4voice .COM: lightweight 80x25 VU-meter display")
     p_conv.add_argument("--scope-spin", dest="scope_spin", action="store_true",
-                        help="4voice .COM: minimal 4 spinning-character voice "
-                             "indicators (no clear/blit; runs on a real 6 MHz XT)")
+                        help="4voice .COM: minimal 4 per-voice character cells (the "
+                             "raw note byte dumped to screen; runs on a real 6 MHz XT)")
     p_conv.add_argument("--mix-rate", dest="mix_rate", type=int, default=None,
                         metavar="HZ",
                         help="4voice .COM only: software mixing sample rate in Hz "

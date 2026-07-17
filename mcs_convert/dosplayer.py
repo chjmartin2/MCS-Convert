@@ -67,13 +67,12 @@ _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source
 _SPK4_NOISE_BRIGHT_HZ = 5500     # hi-hat: fast LFSR clock (hiss)
 _SPK4_NOISE_DARK_HZ = 1200       # kick: slow LFSR clock (rumble)
 
-# "spinners" -- the minimal XT-safe visual: no back buffer, no clear, no blit,
-# just 4 characters written straight to B800. A hlt-paced counter advances a
-# per-voice spinner (| / - \) while that voice sounds, a dim '.' when it's silent.
-_SPIN_ROW = 12                   # the meters sit on one row, centred
+# "spinners" -- the minimal XT-safe visual: no back buffer, no clear, no blit, no
+# math. A hlt-paced counter just dumps each voice's raw viz[] byte straight into
+# its cell as the character (no phase, no branch, no glyph table) -- so the cell
+# shows an arbitrary character determined by the note, and blanks when silent.
+_SPIN_ROW = 12                   # the indicators sit on one row, centred
 _SPIN_GROUPS = ((24, "P1:"), (34, "P2:"), (44, "Tr:"), (54, "Nz:"))
-_SPIN_GLYPHS = (0x7C, 0x2F, 0x2D, 0x5C)   # | / - \
-_SPIN_DOT = 0x2E                 # '.' shown when a voice is silent
 _SPIN_ATTR = (0x0E, 0x0C, 0x0B, 0x0A)     # yellow / bright-red / cyan / green (visible)
 
 
@@ -1978,10 +1977,11 @@ def _tandy_silence() -> List[Tuple[int, int]]:
 
 
 def _emit_spin_foreground(a: "_Asm", poll_n: int) -> None:
-    """The whole 'spinners' foreground (label 'wait'): draw the static labels once,
-    then hlt-sleep, and every `poll_n` sample interrupts write 4 characters
-    straight to B800 -- a spinner per sounding voice, a dim '.' per silent one.
-    No back buffer / clear / blit. Runs until a key is pressed."""
+    """The XT-minimal voice display (label 'wait'): draw the static labels once,
+    then hlt-sleep, and every `poll_n` sample interrupts dump each voice's raw
+    viz[] byte straight into its cell as the character -- no phase, no branch, no
+    table, just load a byte and store it. A blank cell (viz 0) = that voice is
+    silent. No back buffer / clear / blit. Runs until a key is pressed."""
     a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)            # mov ax,0xB800; mov es,ax
     for i, (lc, label) in enumerate(_SPIN_GROUPS):   # static labels (drawn once)
         for j, chch in enumerate(label):
@@ -1990,25 +1990,14 @@ def _emit_spin_foreground(a: "_Asm", poll_n: int) -> None:
     a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # pollctr = poll_n
     a.label("wait")
     a.db(0xF4)                                       # hlt (sleep until an IRQ)
-    a.db(0xFF, 0x0E).abs16("pollctr")                # dec word[pollctr]
-    a.db(0x75).rel8("wait")                          # jnz wait (not yet time to redraw)
+    a.db(0xFF, 0x0E).abs16("pollctr").db(0x75).rel8("wait")   # dec[pollctr]; jnz wait
     a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # reload
     for i, (lc, label) in enumerate(_SPIN_GROUPS):
-        cell = _spin_cell(lc + len(label))           # the spinner cell for this voice
-        a.db(0xA0).abs16("viz", i).db(0x08, 0xC0)    # al=[viz+i]; or al,al
-        a.db(0x74).rel8(f"spsil{i}")                 # jz silent
-        a.db(0x8A, 0x1E).abs16("spinph", i)          # mov bl,[spinph+i]
-        a.db(0xFE, 0xC3).db(0x80, 0xE3, 0x03).db(0x88, 0x1E).abs16("spinph", i)  # inc;and 3;store
-        a.db(0x30, 0xFF).db(0x8A, 0x87).abs16("spingly")   # bh=0; al=[bx+spingly]
-        a.db(0xB4, _SPIN_ATTR[i]).db(0x26, 0xA3).bytes(_w(cell))   # ah=attr; es:[cell]=ax
-        a.db(0xEB).rel8(f"spdone{i}")
-        a.label(f"spsil{i}")
-        a.db(0x26, 0xC7, 0x06).bytes(_w(cell)).bytes(_w((_SPIN_ATTR[i] << 8) | _SPIN_DOT))
-        a.label(f"spdone{i}")
-    a.db(0xB4, 0x01).db(0xCD, 0x16)                  # int16 ah=1
-    a.db(0x75).rel8("spkey")                         # jnz spkey (a key is waiting)
-    a.db(0xE9).rel16("wait")                         # jmp wait (no key; back-edge is >rel8)
-    a.label("spkey")
+        cell = _spin_cell(lc + len(label))           # this voice's character cell
+        a.db(0xA0).abs16("viz", i)                   # mov al,[viz+i] (raw note byte)
+        a.db(0xB4, _SPIN_ATTR[i])                    # mov ah, colour
+        a.db(0x26, 0xA3).bytes(_w(cell))             # mov es:[cell],ax
+    a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
     a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
 
 
@@ -2139,9 +2128,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
-    if spin:
-        a.label("spingly"); a.db(*_SPIN_GLYPHS)      # spinner glyph table
-    else:
+    if not spin:                                     # 'spin' needs no renderer/table
         _emit_scope_code(a, vis)                      # scope renderers (shared)
     # ---- variables + data ------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
@@ -2159,7 +2146,6 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
     if spin:
-        a.label("spinph"); a.db(0x00, 0x00, 0x00, 0x00)   # per-voice spinner phase
         a.label("pollctr"); a.db(0x00, 0x00)              # sample countdown to next redraw
     else:
         _emit_scope_vars(a, vis)                      # shared + per-vis draw state
