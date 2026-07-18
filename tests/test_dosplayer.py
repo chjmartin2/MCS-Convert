@@ -270,6 +270,31 @@ def test_mcs_drive_uses_the_timer2_one_shot():
         D.build_com(song, "tandy", 0x80, mcs=True)
 
 
+def test_soundblaster_output_uses_the_dsp_dac():
+    # --sb outputs through a real SoundBlaster DAC: reset the DSP, speaker on
+    # (0xD1), then one 'direct DAC' (cmd 0x10) sample per interrupt. No PC-speaker
+    # port 0x61, no 1-bit PWM -- a full-amplitude 8-bit mix.
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    sb = D.build_com(song, "4voice", 0x80, sb=True, mix_rate=16000)
+    assert b"\xB0\xD1" in sb                           # DSP cmd 0xD1: speaker on
+    assert b"\xB0\x10\xEE" in sb                       # DSP cmd 0x10: direct DAC write
+    assert b"\xB0\xD3" in sb                           # DSP cmd 0xD3: speaker off (teardown)
+    assert b"\xBA\x26\x02" in sb                       # mov dx, 0x226 (base+6 reset port)
+    assert b"\xE6\x61" not in sb                       # never touches the PC speaker port
+    # a custom base port relocates every DSP access (0x240 -> reset 0x246)
+    sb240 = D.build_com(song, "4voice", 0x80, sb=True, sb_port=0x240)
+    assert b"\xBA\x46\x02" in sb240 and b"\xBA\x26\x02" not in sb240
+    # sb is 4-voice only and is a distinct drive from mcs
+    with pytest.raises(ValueError):
+        D.build_com(song, "tandy", 0x80, sb=True)
+    with pytest.raises(ValueError):
+        D.build_com(song, "4voice", 0x80, sb=True, mcs=True)
+
+
 def test_draw_skip_throttles_the_scope():
     # draw_skip>1 makes the foreground wait N retraces per frame (a mov cx,N + a
     # loop) before blitting, so the .COM differs from the every-frame build.

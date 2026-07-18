@@ -2065,10 +2065,78 @@ def _emit_static_setup(a: "_Asm") -> None:
 
 _SPK4_MCS_PULSE = 24             # timer-2 one-shot pulse width in PIT ticks (MCS drive)
 
+# SoundBlaster output: a real 8-bit DAC, so we drop the 1-bit PWM tricks entirely
+# and mix the voices at full amplitude (the same phase accumulators, but summed as
+# signed levels and written to the DSP), which reproduces the NES/PT3 waveform far
+# more faithfully than the 1-bit speaker. Uses DSP "direct DAC" (command 0x10), one
+# sample per timer interrupt -- no DMA -- so it drops straight into the ISR engine.
+_SB_PORT = 0x220                 # default SoundBlaster base I/O port (BLASTER A220)
+_SB_AMP = 30                     # per-voice amplitude in the 8-bit (0..255) mix
+
+
+def _emit_sb_write(a: "_Asm", value: int) -> None:
+    """Poll the DSP write-status port (base+0xC bit7) then write command `value`.
+    DX must be base+0xC on entry (and is left there)."""
+    a.db(0xEC).db(0xA8, 0x80).db(0x75, 0xFB)         # .w: in al,dx; test al,0x80; jnz .w (-5)
+    a.db(0xB0, value).db(0xEE)                       # mov al, value; out dx, al
+
+
+def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
+    """Reset the DSP, then turn the speaker (DAC output) on. No sample-rate setup:
+    'direct DAC' plays each byte the instant we write it, so the timer sets the rate."""
+    a.db(0xBA).bytes(_w(sb_port + 0x06))             # mov dx, base+6 (reset)
+    a.db(0xB0, 0x01).db(0xEE)                        # al=1; out (assert reset)
+    a.db(0xB9).bytes(_w(200)).db(0xE2, 0xFE)         # mov cx,200; .d: loop .d (~delay)
+    a.db(0x30, 0xC0).db(0xEE)                        # al=0; out (release reset)
+    a.db(0xBA).bytes(_w(sb_port + 0x0E))             # mov dx, base+0xE (read-status)
+    a.db(0xEC).db(0xA8, 0x80).db(0x74, 0xFB)         # .r: in al,dx; test al,0x80; jz .r (wait ready)
+    a.db(0xBA).bytes(_w(sb_port + 0x0A)).db(0xEC)    # mov dx, base+0xA; in al,dx (read 0xAA)
+    a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC (write port)
+    _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
+
+
+def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
+    """One 8-bit sample: sum the 4 voices as signed levels (+/-AMP each) and write it
+    to the DSP DAC. bh accumulates the signed mix; the tone bit and the noise LFSR
+    bit each add +AMP (high) or -AMP (low)."""
+    a.db(0x30, 0xFF)                                 # xor bh,bh (signed sum)
+    for i in range(_SPK4_TONES):
+        a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
+        a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
+        a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
+        a.db(0x01, 0xC0)                             # add ax,ax (CF = bit15 = square level)
+        a.db(0x18, 0xD2)                             # sbb dl,dl (0x00 or 0xFF)
+        a.db(0x80, 0xE2, 2 * _SB_AMP)                # and dl, 2*AMP
+        a.db(0x80, 0xEA, _SB_AMP)                    # sub dl, AMP  -> -AMP or +AMP
+        a.db(0x00, 0xD7)                             # add bh, dl
+    nz = _SPK4_TONES * 2                             # noise voice
+    a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
+    a.db(0x74).rel8("sb_nmute")                      # jz muted (contributes 0)
+    a.db(0xA1).abs16("acc", nz).db(0x03, 0x06).abs16("inc", nz).db(0xA3).abs16("acc", nz)
+    a.db(0x73).rel8("sb_nobit")                      # jnc: no overflow -> don't clock
+    a.db(0xA1).abs16("nlfsr").db(0xD1, 0xE8)         # ax=[nlfsr]; shr ax,1
+    a.db(0x73).rel8("sb_nf").db(0x35).bytes(_w(_SPK4_LFSR))   # jnc; xor ax,taps
+    a.label("sb_nf")
+    a.db(0xA3).abs16("nlfsr")
+    a.label("sb_nobit")
+    a.db(0xF6, 0x06).abs16("nlfsr").db(0x01)         # test byte[nlfsr],1
+    a.db(0x74).rel8("sb_nlo")                        # jz low
+    a.db(0x80, 0xC7, _SB_AMP).db(0xEB).rel8("sb_nmute")   # add bh,AMP; jmp done
+    a.label("sb_nlo")
+    a.db(0x80, 0xEF, _SB_AMP)                        # sub bh,AMP
+    a.label("sb_nmute")
+    # sample = bh + 0x80 (signed level -> 0..255); write cmd 0x10 then the sample
+    a.db(0x88, 0xF8).db(0x04, 0x80).db(0x88, 0xC4)   # al=bh; add al,0x80; ah=al
+    a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
+    _emit_sb_write(a, 0x10)                          # DSP cmd 0x10 (direct DAC)
+    a.db(0xEC).db(0xA8, 0x80).db(0x75, 0xFB)         # poll write-ready
+    a.db(0x88, 0xE0).db(0xEE)                        # al=ah (the sample); out dx,al
+
 
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
-                   poster: bytes = b"", mcs: bool = False) -> bytes:
+                   poster: bytes = b"", mcs: bool = False, sb: bool = False,
+                   sb_port: int = _SB_PORT) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -2094,21 +2162,24 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
     a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("isr")  # [es:0x20] = isr
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
-    a.db(0xE4, 0x61).db(0xA2).abs16("old61")         # in al,0x61; save
-    if mcs:
-        # MCS drive: timer 2 = retriggerable one-shot (mode 1), count = pulse width;
-        # speaker DATA enabled (bit1=1), gate low (bit0=0). A gate rising edge fires
-        # a fixed-width pulse on OUT2 -> a click. base61 = data on, gate low.
-        a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # and 0xFC; or 0x02
-        a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)          # mov al,0xB2; out 0x43 (ch2 mode 1)
-        a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
+    if sb:                                           # SoundBlaster: reset DSP + speaker on
+        _emit_sb_init(a, sb_port)
     else:
-        # direct drive: timer 2 mode 3 + gate low forces OUT2 high, so the cone
-        # follows data bit 1 -- our 1-bit level DAC.
-        a.db(0x24, 0xFC).db(0xA2).abs16("base61")    # and al,0xFC; base61
-        a.db(0xB0, 0xB6).db(0xE6, _PIT_CMD)          # mov al,0xB6; out 0x43 (ch2 mode3)
-        a.db(0xB0, 0x01).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)   # count=1
-    a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
+        a.db(0xE4, 0x61).db(0xA2).abs16("old61")     # in al,0x61; save
+        if mcs:
+            # MCS drive: timer 2 = retriggerable one-shot (mode 1), count = pulse
+            # width; speaker DATA on (bit1=1), gate low (bit0=0). A gate rising edge
+            # fires a fixed-width pulse on OUT2 -> a click. base61 = data on, gate low.
+            a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # and 0xFC; or 0x02
+            a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)      # mov al,0xB2; out 0x43 (ch2 mode 1)
+            a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
+        else:
+            # direct drive: timer 2 mode 3 + gate low forces OUT2 high, so the cone
+            # follows data bit 1 -- our 1-bit level DAC.
+            a.db(0x24, 0xFC).db(0xA2).abs16("base61")    # and al,0xFC; base61
+            a.db(0xB0, 0xB6).db(0xE6, _PIT_CMD)      # mov al,0xB6; out 0x43 (ch2 mode3)
+            a.db(0xB0, 0x01).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)   # count=1
+        a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
     # stream pointers; sampctr=1 so the first sub-tick applies immediately
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
     a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
@@ -2131,9 +2202,13 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.db(0xC7, 0x06).abs16("kbctr").bytes(_w(kb_n))         # reload (~20/sec)
         a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
-    # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
+    # ---- teardown: silence, restore timer + vector, exit -----------------------
     a.db(0xFA)                                        # cli
-    a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61
+    if sb:                                            # SoundBlaster speaker off (cmd 0xD3)
+        a.db(0xBA).bytes(_w(sb_port + 0x0C))
+        _emit_sb_write(a, 0xD3)
+    else:
+        a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER) # restore port 0x61
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
     a.db(0x30, 0xC0).db(0xE6, _PIT_CH0).db(0xE6, _PIT_CH0)   # divisor 0 (65536) = 18.2 Hz
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # es=0
@@ -2146,43 +2221,46 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
-    # synth: bl = sum of the voices' bits (3 tone squares + 1 noise)
-    a.db(0x31, 0xDB)                                 # xor bx,bx
-    for i in range(_SPK4_TONES):
-        a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
-        a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
-        a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
-        a.db(0x01, 0xC0).db(0x80, 0xD3, 0x00)        # add ax,ax (CF=bit15); adc bl,0
-    # noise voice (index 3): clock a Galois LFSR each time its accumulator
-    # overflows (the inc sets the clock rate = brightness); its bit0 joins the sum.
-    nz = _SPK4_TONES * 2
-    a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
-    a.db(0x74).rel8("sp_nmute")                      # jz muted -> contributes 0
-    a.db(0xA1).abs16("acc", nz).db(0x03, 0x06).abs16("inc", nz).db(0xA3).abs16("acc", nz)  # nacc+=ninc
-    a.db(0x73).rel8("sp_nobit")                      # jnc: no overflow -> don't clock
-    a.db(0xA1).abs16("nlfsr").db(0xD1, 0xE8)         # ax=[nlfsr]; shr ax,1 (CF=lsb)
-    a.db(0x73).rel8("sp_nf").db(0x35).bytes(_w(_SPK4_LFSR))   # jnc; xor ax,taps
-    a.label("sp_nf")
-    a.db(0xA3).abs16("nlfsr")                        # [nlfsr]=ax
-    a.label("sp_nobit")
-    a.db(0xA0).abs16("nlfsr").db(0x24, 0x01).db(0x00, 0xC3)   # al=[nlfsr]; and al,1; add bl,al
-    a.label("sp_nmute")
-    # delta-sigma: err += sum; if err>=VOICES: err-=VOICES -> this sample is 'high'
-    # (dl = the port bit to raise: gate bit0 for the MCS one-shot, data bit1 direct)
-    highbit = 0x01 if mcs else 0x02
-    a.db(0xA0).abs16("sderr").db(0x00, 0xD8)         # al=[sderr]; add al,bl
-    a.db(0x30, 0xD2)                                 # xor dl,dl
-    a.db(0x3C, _SPK4_VOICES).db(0x72).rel8("sd_lo")  # cmp al,4; jb lo
-    a.db(0x2C, _SPK4_VOICES).db(0xB2, highbit)       # sub al,4; dl=highbit
-    a.label("sd_lo")
-    a.db(0xA2).abs16("sderr")                        # [sderr]=al
-    if mcs:
-        # fire the one-shot on a 'high' sample: base|gate up (rising edge triggers a
-        # fixed-width pulse), then gate back down for the next edge.
-        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl; out (edge)
-        a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)                  # al=base (gate low); out
+    if sb:
+        _emit_sb_synth_out(a, sb_port)               # 8-bit amplitude mix -> SB DAC
     else:
-        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl(bit1); out
+        # synth: bl = sum of the voices' bits (3 tone squares + 1 noise)
+        a.db(0x31, 0xDB)                             # xor bx,bx
+        for i in range(_SPK4_TONES):
+            a.db(0xA1).abs16("acc", i * 2)           # mov ax,[acc+i]
+            a.db(0x03, 0x06).abs16("inc", i * 2)     # add ax,[inc+i]
+            a.db(0xA3).abs16("acc", i * 2)           # mov [acc+i],ax
+            a.db(0x01, 0xC0).db(0x80, 0xD3, 0x00)    # add ax,ax (CF=bit15); adc bl,0
+        # noise voice (index 3): clock a Galois LFSR each time its accumulator
+        # overflows (the inc sets the clock rate = brightness); its bit0 joins the sum.
+        nz = _SPK4_TONES * 2
+        a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)   # ax=ninc; or ax,ax
+        a.db(0x74).rel8("sp_nmute")                  # jz muted -> contributes 0
+        a.db(0xA1).abs16("acc", nz).db(0x03, 0x06).abs16("inc", nz).db(0xA3).abs16("acc", nz)
+        a.db(0x73).rel8("sp_nobit")                  # jnc: no overflow -> don't clock
+        a.db(0xA1).abs16("nlfsr").db(0xD1, 0xE8)     # ax=[nlfsr]; shr ax,1 (CF=lsb)
+        a.db(0x73).rel8("sp_nf").db(0x35).bytes(_w(_SPK4_LFSR))   # jnc; xor ax,taps
+        a.label("sp_nf")
+        a.db(0xA3).abs16("nlfsr")                    # [nlfsr]=ax
+        a.label("sp_nobit")
+        a.db(0xA0).abs16("nlfsr").db(0x24, 0x01).db(0x00, 0xC3)   # al=[nlfsr]; and al,1; add bl,al
+        a.label("sp_nmute")
+        # delta-sigma: err += sum; if err>=VOICES: err-=VOICES -> this sample is 'high'
+        # (dl = the port bit to raise: gate bit0 for the MCS one-shot, data bit1 direct)
+        highbit = 0x01 if mcs else 0x02
+        a.db(0xA0).abs16("sderr").db(0x00, 0xD8)     # al=[sderr]; add al,bl
+        a.db(0x30, 0xD2)                             # xor dl,dl
+        a.db(0x3C, _SPK4_VOICES).db(0x72).rel8("sd_lo")  # cmp al,4; jb lo
+        a.db(0x2C, _SPK4_VOICES).db(0xB2, highbit)   # sub al,4; dl=highbit
+        a.label("sd_lo")
+        a.db(0xA2).abs16("sderr")                    # [sderr]=al
+        if mcs:
+            # fire the one-shot on a 'high' sample: base|gate up (edge triggers a
+            # fixed-width pulse), then gate back down for the next edge.
+            a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl; out
+            a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)                  # gate low; out
+        else:
+            a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl(bit1); out
     # timing: every samps_per_sub samples, apply the next sub-tick
     a.db(0xFF, 0x0E).abs16("sampctr")                # dec word[sampctr]
     a.db(0x75).rel8("isr_eoi")                       # jnz eoi (fast path skips di)
@@ -2254,7 +2332,7 @@ def _vis_for(scope: bool, text_scope) -> str:
 
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False, mix_rate=None, draw_skip: int = 1,
-              mcs: bool = False) -> bytes:
+              mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
@@ -2268,6 +2346,10 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if mcs and mode != "4voice":
         raise ValueError("the MCS speaker drive is only available with --4voice")
+    if sb and mode != "4voice":
+        raise ValueError("SoundBlaster output is only available with --4voice")
+    if sb and mcs:
+        raise ValueError("--sb and --mcs are different speaker drives; pick one")
     draw_skip = max(1, min(255, int(draw_skip)))
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
@@ -2285,7 +2367,8 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
         poster = _render_static_poster(song) if vis == "static" else b""
-        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster, mcs)
+        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster,
+                             mcs, sb, sb_port)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com

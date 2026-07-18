@@ -80,10 +80,13 @@ def _cmd_convert(args) -> int:
                 raise ValueError("--mix-rate only applies to --4voice")
             if args.mcs and target != "4voice":
                 raise ValueError("--mcs only applies to --4voice")
+            if args.sb and target != "4voice":
+                raise ValueError("--sb (SoundBlaster) only applies to --4voice")
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope, mix_rate=args.mix_rate,
-                             draw_skip=args.draw_skip, mcs=args.mcs)
+                             draw_skip=args.draw_skip, mcs=args.mcs,
+                             sb=args.sb, sb_port=args.sb_port)
         else:                                        # the default .MCS song file
             data = encode_song(song, tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
@@ -191,6 +194,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="4voice .COM only: drive the speaker the original Music "
                              "Construction Set way (timer-2 one-shot pulse-density "
                              "DAC) instead of the direct data-bit level")
+    p_conv.add_argument("--sb", dest="sb", action="store_true",
+                        help="4voice .COM only: output through a SoundBlaster (real "
+                             "8-bit DAC, full-amplitude mix -- far closer to the NES/"
+                             "PT3 sound than the 1-bit speaker)")
+    p_conv.add_argument("--sb-port", dest="sb_port", type=lambda s: int(s, 0),
+                        default=0x220, metavar="PORT",
+                        help="SoundBlaster base I/O port (default 0x220)")
     p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
                         metavar="N",
                         help="redraw the scope every Nth frame (default 1; higher "
