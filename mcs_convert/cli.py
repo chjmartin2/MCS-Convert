@@ -182,8 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "the whole song (drawn once; zero runtime cost -- for a real XT)")
     p_conv.add_argument("--mix-rate", dest="mix_rate", type=int, default=None,
                         metavar="HZ",
-                        help="4voice .COM only: software mixing sample rate in Hz "
-                             "(~11900 default; lower to ~6000 for a real XT)")
+                        help="4voice .COM only: software mixing sample rate in Hz, "
+                             "any value ~1000-48000 (4000 for a real XT; ~24000 is "
+                             "ultrasonic/best quality on a fast CPU or DOSBox max)")
     p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
                         metavar="N",
                         help="redraw the scope every Nth frame (default 1; higher "

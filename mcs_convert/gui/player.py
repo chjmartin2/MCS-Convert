@@ -796,11 +796,13 @@ class ImportPreview(tk.Toplevel):
                      values=("none", "graphics", "text 1", "text 2", "text 3",
                              "text 4", "text 5", "VU meters", "static screen")
                      ).pack(side="left", padx=(0, 6))
-        # 4-voice-only: software mixing rate (lower = XT-friendly)
-        tk.Label(btns, text="mix", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
-        self.com_mix = tk.StringVar(value="12 kHz")
-        ttk.Combobox(btns, textvariable=self.com_mix, width=8, state="readonly",
-                     values=("6 kHz (XT)", "9 kHz", "12 kHz", "16 kHz")
+        # 4-voice-only: software mixing rate in Hz -- an editable box (type any
+        # value for your target), defaulting to 4000 for a real XT. Higher = better
+        # quality but needs a faster CPU (~24000 is ultrasonic, for DOSBox max).
+        tk.Label(btns, text="mix Hz", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
+        self.com_mix = tk.StringVar(value="4000")
+        ttk.Combobox(btns, textvariable=self.com_mix, width=7, state="normal",
+                     values=("4000", "6000", "9000", "12000", "16000", "24000")
                      ).pack(side="left", padx=(0, 6))
         tk.Button(btns, text="Export .COM", command=self._export_com).pack(
             side="left", padx=(0, 6))
@@ -1062,9 +1064,10 @@ class ImportPreview(tk.Toplevel):
         if mode == "1voice" or (mode == "4voice" and kind == "graphics") \
                 or (mode != "4voice" and kind == "static screen"):
             kind = "none"
-        mix_rate = ({"6 kHz (XT)": 6000, "9 kHz": 9000, "12 kHz": 12000,
-                     "16 kHz": 16000}.get(self.com_mix.get())
-                    if mode == "4voice" else None)
+        mix_rate = None                              # 4-voice: parse the mix-Hz box
+        if mode == "4voice":
+            digits = "".join(c for c in self.com_mix.get() if c.isdigit())
+            mix_rate = int(digits) if digits else 4000
         try:
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),

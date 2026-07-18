@@ -60,7 +60,11 @@ _DRUM_BRIGHT_MIDI = 72          # drum pitch at/above this -> bright hi-hat nois
 # just swaps its accumulator-bit for an LFSR bit -- same mixer.
 _SPK4_DIV = 100                  # default PIT ch0 divider -> Fs = 1193182/100 ≈ 11.9 kHz
 _SPK4_FS = _PIT_HZ / _SPK4_DIV
-_SPK4_DIV_MIN, _SPK4_DIV_MAX = 40, 600   # Fs clamp ~ 2 kHz .. 30 kHz
+# Mixing-rate range the user may request (any value in between is fine):
+#   ~1 kHz (div 1200) for very slow targets .. ~48 kHz (div 25) for an ultrasonic
+#   carrier on a fast CPU / DOSBox cycles=max, where the PWM carrier is inaudible
+#   and only the audio band survives -- the highest quality the mixer can reach.
+_SPK4_DIV_MIN, _SPK4_DIV_MAX = 25, 1200
 _SPK4_TONES = 3                  # square-wave voices
 _SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
 _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
