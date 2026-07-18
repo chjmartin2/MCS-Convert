@@ -250,39 +250,43 @@ def test_draw_skip_throttles_the_scope():
     assert len(third) > len(every)                    # the pace loop adds a few bytes
 
 
-def test_spinners_display_is_minimal_and_direct():
-    # text_scope=7 is the XT-minimal voice display: each cell's CHARACTER is just
-    # the raw viz[] byte dumped straight to B800 (mov al,[viz]; mov es:[cell],ax) --
-    # no phase, no branch, no glyph table, no clear, no blit.
+def test_static_screen_bakes_a_cga_poster():
+    # text_scope=7 is the static full-song poster: a 320x200x4 CGA piano roll,
+    # rendered in Python and baked into the .COM, blitted once at startup, then no
+    # updates at all (just the hlt+keyboard wait). 4-voice only.
     song = Song(title="t", source="t")
-    for midi in (72, 64, 55):
-        tr = Track(name="v")
-        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
-        song.add_track(tr)
-    cap = {}
-    real = D._Asm.resolve
-
-    def capture(self):
-        out = real(self)
-        cap["labels"] = dict(self.labels)
-        return out
-
-    D._Asm.resolve = capture
-    try:
-        spin = D.build_com(song, "4voice", 0x80, text_scope=7)
-    finally:
-        D._Asm.resolve = real
-    L = cap["labels"]
-    assert spin[:5] == b"\xB8\x03\x00\xCD\x10"        # text mode 3
-    assert b"\x26\xA3" in spin                        # mov es:[imm16],ax (direct B800 write)
-    assert b"\xF3\xAB" not in spin                    # no 'rep stosw' full-screen clear
-    assert b"\xF3\xA5" not in spin                    # no 'rep movsw' blit
-    assert b"\xF4" in spin                            # hlt-paced (fast-CPU safe)
-    # the character source is the raw viz table: 'mov al,[viz]' (A0 <viz offset>)
-    assert b"\xA0" + struct.pack("<H", L["viz"]) in spin
-    assert len(spin) < len(D.build_com(song, "4voice", 0x80, text_scope=6))  # < VU meters
-    with pytest.raises(ValueError):                   # not on Tandy
+    lead = Track(name="lead")
+    for start, midi in ((0, 72), (4, 74), (8, 76)):
+        lead.add(NoteEvent(start_tick=start, duration_ticks=4, midi_note=midi))
+    bass = Track(name="bass")
+    bass.add(NoteEvent(start_tick=0, duration_ticks=12, midi_note=48))
+    song.add_track(lead)
+    song.add_track(Track(name="p2"))
+    song.add_track(bass)
+    com = D.build_com(song, "4voice", 0x80, text_scope=7)
+    assert com[:5] == b"\xB8\x04\x00\xCD\x10"         # CGA mode 4 (320x200x4)
+    assert b"\xBA\xD9\x03\xB0\x10\xEE" in com         # palette 0 + intensity via port 0x3D9
+    assert b"\xF3\xA5" in com                         # rep movsw: blit the poster
+    assert b"\xF4\xB4\x01\xCD\x16" in com             # static: hlt+keyboard wait (no updates)
+    # the poster is a full 16 KB CGA framebuffer, packed even/odd interleaved
+    poster = D._render_static_poster(song)
+    assert len(poster) == 0x4000
+    # the melody's rising notes must appear (non-zero pixels near the top rows)
+    assert any(b for b in poster)
+    with pytest.raises(ValueError):                   # 4-voice only
         D.build_com(song, "tandy", 0x80, text_scope=7)
+
+
+def test_static_poster_packs_cga_pixels():
+    # a lone yellow (colour 3) pixel at (0,0) lands in the top two bits of byte 0.
+    px = [[0] * 320 for _ in range(200)]
+    px[0][0] = 3
+    packed = D._pack_cga4(px)
+    assert packed[0] == 0xC0                          # 11_000000 : pixel 0 = colour 3
+    # a pixel on scanline 1 lands in the odd plane at 0x2000
+    px2 = [[0] * 320 for _ in range(200)]
+    px2[1][0] = 1
+    assert D._pack_cga4(px2)[0x2000] == 0x40          # 01_000000 at the odd-plane base
 
 
 def test_no_scope_wait_loop_uses_hlt():

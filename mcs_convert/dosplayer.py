@@ -67,28 +67,84 @@ _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source
 _SPK4_NOISE_BRIGHT_HZ = 5500     # hi-hat: fast LFSR clock (hiss)
 _SPK4_NOISE_DARK_HZ = 1200       # kick: slow LFSR clock (rumble)
 
-# "spinners" -- the minimal XT-safe visual: no back buffer, no clear, no blit, no
-# math. A hlt-paced counter just dumps each voice's raw viz[] byte straight into
-# its cell as the character (no phase, no branch, no glyph table) -- so the cell
-# shows an arbitrary character determined by the note, and blanks when silent.
-_SPIN_ROW = 12                   # the indicators sit on one row, centred
-_SPIN_GROUPS = ((24, "P1:"), (34, "P2:"), (44, "Tr:"), (54, "Nz:"))
-_SPIN_ATTR = (0x0E, 0x0C, 0x0B, 0x0A)     # yellow / bright-red / cyan / green (visible)
+# "static screen" -- the XT answer: there's no runtime CPU for a live display, so
+# render the WHOLE song ONCE as a picture. A piano roll (pitch x time, coloured by
+# voice) is built here in Python, packed into a CGA mode-4 (320x200x4) bitmap, and
+# baked into the .COM; the player just blits it once and then does nothing but play
+# + poll the keyboard. Palette: black / bright-green / bright-red / yellow.
+_CGA_GREEN, _CGA_RED, _CGA_YELLOW = 1, 2, 3        # palette-0 high-intensity indices
 
 
-def _spin_cell(col: int) -> int:
-    """B800 byte offset of the text cell at (_SPIN_ROW, col)."""
-    return _SPIN_ROW * 160 + col * 2
+def _pack_cga4(px: List[List[int]]) -> bytes:
+    """Pack a 200x320 array of 2-bit pixels into the CGA mode-4 framebuffer layout:
+    even scanlines at offset 0, odd at 0x2000, 80 bytes/line, 4 pixels/byte MSB
+    first. The framebuffer is 16 KB (0x4000) -- two 8 KB interleaved planes."""
+    buf = bytearray(0x4000)
+    for y in range(200):
+        base = (0x2000 if (y & 1) else 0) + (y // 2) * 80
+        row = px[y]
+        for bx in range(80):
+            x = bx * 4
+            buf[base + bx] = (row[x] << 6) | (row[x + 1] << 4) \
+                | (row[x + 2] << 2) | row[x + 3]
+    return bytes(buf)
 
 
-_SPIN_FPS = 10                   # character updates/second (low, to spare the XT's CPU)
+def _render_static_poster(song: Song) -> bytes:
+    """The whole song as a 320x200x4 piano roll: pitch (vertical) x time (across),
+    each voice a colour -- lead=yellow, 2nd=green, bass=red -- with dotted octave
+    gridlines and a drum-hit strip along the bottom. Returns the packed CGA bitmap
+    (16000 bytes). The colour legend text is drawn by the player via the BIOS."""
+    W, H = 320, 200
+    px = [[0] * W for _ in range(H)]
+    tone = [[], [], []]                             # (start, end, midi) per tone voice
+    for vi in range(min(3, len(song.tracks))):
+        for n in song.tracks[vi].notes:
+            if not n.is_rest and n.midi_note:
+                tone[vi].append((n.start_tick, n.end_tick, n.midi_note))
+    perc = [n.start_tick for t in song.tracks[3:] for n in t.notes
+            if n.percussive and not n.is_rest]
+    allnotes = [x for v in tone for x in v]
+    if not allnotes:
+        return bytes(0x4000)
+    tot = max(e for _, e, _ in allnotes) or 1
+    mn = min(m for _, _, m in allnotes)
+    mx = max((m for _, _, m in allnotes), default=mn) + 1
+    roll_top, roll_bot, roll_l, roll_r = 12, 188, 2, 317
+    drum_y0, drum_y1 = 191, 197
 
+    def xt(t):
+        return roll_l + int(t / tot * (roll_r - roll_l))
 
-def _spk4_poll_n(fs: float) -> int:
-    """Sample-interrupts between character updates. The display runs in the CPU
-    time the audio ISR leaves behind, so keep the redraw rate low (~10/sec) -- the
-    characters don't need to dance, and this frees the foreground on a slow XT."""
-    return max(1, min(65535, round(fs / _SPIN_FPS)))
+    def yp(m):
+        m = max(mn, min(mx, m))
+        return roll_bot - int((m - mn) / (mx - mn) * (roll_bot - roll_top))
+
+    def plot(x, y, c):
+        if 0 <= x < W and 0 <= y < H:
+            px[y][x] = c
+
+    def hbar(x0, x1, y, c):
+        for x in range(max(0, x0), min(W, x1 + 1)):
+            plot(x, y, c)
+            plot(x, y - 1, c)                       # 2 px thick
+
+    m = mn - (mn % 12)                              # dotted octave gridlines (at each C)
+    while m <= mx:
+        if m >= mn:
+            y = yp(m)
+            for x in range(roll_l, roll_r, 6):
+                plot(x, y, _CGA_GREEN)
+        m += 12
+    # bass (red), then 2nd voice (green), then lead (yellow) on top
+    for vi, col in ((2, _CGA_RED), (1, _CGA_GREEN), (0, _CGA_YELLOW)):
+        for s, e, mid in tone[vi]:
+            hbar(xt(s), xt(e), yp(mid), col)
+    for s in perc:                                  # drum-hit strip along the bottom
+        x = xt(s)
+        for y in range(drum_y0, drum_y1 + 1):
+            plot(x, y, _CGA_YELLOW)
+    return _pack_cga4(px)
 
 
 def _spk4_div_for(mix_rate) -> int:
@@ -1981,46 +2037,44 @@ def _tandy_silence() -> List[Tuple[int, int]]:
             (_SN76489, 0xDF), (_SN76489, 0xFF)]      # and the noise channel
 
 
-def _emit_spin_foreground(a: "_Asm", poll_n: int) -> None:
-    """The XT-minimal voice display (label 'wait'): draw the static labels once,
-    then hlt-sleep, and every `poll_n` sample interrupts dump each voice's raw
-    viz[] byte straight into its cell as the character -- no phase, no branch, no
-    table, just load a byte and store it. A blank cell (viz 0) = that voice is
-    silent. No back buffer / clear / blit. Runs until a key is pressed."""
-    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)            # mov ax,0xB800; mov es,ax
-    for i, (lc, label) in enumerate(_SPIN_GROUPS):   # static labels (drawn once)
-        for j, chch in enumerate(label):
-            cell = (_SPIN_ATTR[i] << 8) | ord(chch)
-            a.db(0x26, 0xC7, 0x06).bytes(_w(_spin_cell(lc + j))).bytes(_w(cell))
-    a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # pollctr = poll_n
-    a.label("wait")
-    a.db(0xF4)                                       # hlt (sleep until an IRQ)
-    a.db(0xFF, 0x0E).abs16("pollctr").db(0x75).rel8("wait")   # dec[pollctr]; jnz wait
-    a.db(0xC7, 0x06).abs16("pollctr").bytes(_w(poll_n))   # reload
-    for i, (lc, label) in enumerate(_SPIN_GROUPS):
-        cell = _spin_cell(lc + len(label))           # this voice's character cell
-        a.db(0xA0).abs16("viz", i)                   # mov al,[viz+i] (raw note byte)
-        a.db(0xB4, _SPIN_ATTR[i])                    # mov ah, colour
-        a.db(0x26, 0xA3).bytes(_w(cell))             # mov es:[cell],ax
-    a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
-    a.db(0x30, 0xE4).db(0xCD, 0x16)                  # consume the key
+# static-screen legend: text drawn once via the BIOS over the baked bitmap.
+# (col in 40x25 text cells, CGA colour, label) -- colour matches the voice.
+_STATIC_LEGEND = ((1, _CGA_YELLOW, "P1"), (6, _CGA_GREEN, "P2"),
+                  (11, _CGA_RED, "Tri"), (17, _CGA_YELLOW, "Drums"))
+
+
+def _emit_static_setup(a: "_Asm") -> None:
+    """One-time setup for the static-screen player: CGA mode 4, palette 0 +
+    intensity (yellow/green/red/black), blit the baked poster to B800, then write
+    the colour legend across the top with the BIOS. After this the foreground just
+    plays + polls the keyboard -- no display updates at all."""
+    a.db(0xB8, 0x04, 0x00).db(0xCD, 0x10)            # mov ax,0x0004; int 0x10 (CGA 320x200x4)
+    a.db(0xBA, 0xD9, 0x03).db(0xB0, 0x10).db(0xEE)   # mov dx,0x3D9; al=0x10; out (palette0+intensity)
+    a.db(0xB8, 0x00, 0xB8).db(0x8E, 0xC0)            # es = B800
+    a.db(0xBE).abs16("poster")                       # mov si, poster (ds=cs)
+    a.db(0x31, 0xFF).db(0xB9).bytes(_w(0x2000)).db(0xF3, 0xA5)   # di=0; cx=8192; rep movsw (16 KB)
+    for col, colour, text in _STATIC_LEGEND:         # BIOS legend text over the bitmap
+        a.db(0xB4, 0x02).db(0x30, 0xFF).db(0xBA, col, 0x00).db(0xCD, 0x10)  # set cursor row0,col
+        for chch in text:
+            a.db(0xB4, 0x0E).db(0xB3, colour).db(0xB0, ord(chch)).db(0xCD, 0x10)  # teletype char
 
 
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
-                   poll_n: int = 1) -> bytes:
+                   poster: bytes = b"") -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
     `samps_per_sub` samples applies the next sub-tick's changes (which also update
-    viz[]/strike[] for the scopes). `vis` picks the foreground: a text-mode scope
-    (drawframe/blit), the lightweight 'spin' meters (direct 4-cell writes, XT-safe),
-    or nothing. Auto-repeats; a keypress restores everything and exits."""
+    viz[]/strike[] for the scopes). `vis` picks the display: a live text-mode scope
+    (drawframe/blit), the 'static' full-song CGA poster (drawn once, zero runtime
+    cost -- the XT answer), or nothing. Auto-repeats; a keypress restores and exits."""
     a = _Asm()
-    spin = vis == "spin"
-    if vis:                                          # any display: set 80x25 text mode
+    static = vis == "static"
+    if static:                                       # draw the whole-song poster once
+        _emit_static_setup(a)
+    elif vis:                                         # live text-mode scope: mode 3 + buffer
         a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10
-    if vis and not spin:                             # scopes need a back buffer
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)        # mov ax,cs; add ax,0x1000
         a.db(0xA3).abs16("bufseg")                   # [bufseg] = back-buffer segment
     # ---- start: hook INT 8, set up the speaker, program the sample timer -------
@@ -2045,16 +2099,14 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
     a.db(0xB8).bytes(_w(divider)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
     a.db(0xFB)                                        # sti
-    # ---- foreground: spinners / scope / plain wait, until a key ----------------
-    if spin:
-        _emit_spin_foreground(a, poll_n)
-    elif vis:
+    # ---- foreground: a live scope redraws; static/none just wait for a key -----
+    if vis and not static:
         _emit_draw_wait(a, draw_skip)
     else:
         a.label("wait")
         a.db(0xF4)                                   # hlt: sleep until the next sample IRQ
         #  (a tight int 0x16 spin on a very fast CPU / DOSBox cycles=max starves
-        #   the timer and makes the audio skip)
+        #   the timer and makes the audio skip). The static poster never redraws.
         a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
     # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
@@ -2133,7 +2185,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr_eoi")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
-    if not spin:                                     # 'spin' needs no renderer/table
+    if not static:                                   # the static poster needs no renderer
         _emit_scope_code(a, vis)                      # scope renderers (shared)
     # ---- variables + data ------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
@@ -2150,8 +2202,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("inc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase increments
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
-    if spin:
-        a.label("pollctr"); a.db(0x00, 0x00)              # sample countdown to next redraw
+    if static:
+        a.label("poster"); a.bytes(poster)               # the baked 320x200x4 song picture
     else:
         _emit_scope_vars(a, vis)                      # shared + per-vis draw state
     a.label("stream"); a.bytes(stream)
@@ -2163,7 +2215,7 @@ def _vis_for(scope: bool, text_scope) -> str:
     "text1".."text5"."""
     if text_scope:
         ts = int(text_scope)
-        return ("spin" if ts == 7 else "vu" if ts == 6 else "text5" if ts == 5
+        return ("static" if ts == 7 else "vu" if ts == 6 else "text5" if ts == 5
                 else "text4" if ts == 4 else "text3" if ts == 3
                 else "text2" if ts == 2 else "text1")
     return "graphics" if scope else ""
@@ -2197,14 +2249,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
                              "count exceeds 16 bits)")
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
-        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip,
-                             _spk4_poll_n(fs))
+        poster = _render_static_poster(song) if vis == "static" else b""
+        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
     vis = _vis_for(scope, text_scope)                # remaining modes: tandy / 1voice
-    if vis == "spin":
-        raise ValueError("the 'spinners' display is 4-voice only")
+    if vis == "static":
+        raise ValueError("the 'static screen' poster is 4-voice only")
     if vis and mode != "tandy":
         raise ValueError("scopes are only available with --tandy or --4voice")
     stream, total = _build_stream(song, mode, bool(vis))
