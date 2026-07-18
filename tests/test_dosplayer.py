@@ -231,7 +231,14 @@ def test_4voice_mix_rate_is_controllable():
     song.add_track(tr)
     assert D._spk4_div_for(6000) > D._spk4_div_for(12000)   # lower Fs, bigger divider
     assert D._spk4_div_for(None) == D._SPK4_DIV             # default
-    assert D._spk4_div_for(999999) == D._SPK4_DIV_MIN       # clamped
+    assert D._spk4_div_for(999999) == D._SPK4_DIV_MIN       # clamped high
+    assert D._spk4_div_for(1) == D._SPK4_DIV_MAX            # clamped low
+    # arbitrary values are honoured (not just presets), across the whole range
+    for hz in (2000, 4000, 6000, 12000, 24000, 48000):
+        div = D._spk4_div_for(hz)
+        assert D._SPK4_DIV_MIN <= div <= D._SPK4_DIV_MAX
+    # the ultrasonic ceiling reaches ~48 kHz (inaudible carrier, best quality)
+    assert D._PIT_HZ / D._SPK4_DIV_MIN > 40000
     lo = D.build_com(song, "4voice", 0x80, mix_rate=6000)
     hi = D.build_com(song, "4voice", 0x80, mix_rate=16000)
     # the ISR programs PIT ch0 with the divider (mov ax, div right after cmd 0x36)
@@ -239,6 +246,28 @@ def test_4voice_mix_rate_is_controllable():
         m = com.index(b"\xB0\x36\xE6\x43") + 4
         return com[m + 1] | (com[m + 2] << 8)
     assert divider(lo) > divider(hi)                  # 6 kHz uses a bigger divider
+
+
+def test_mcs_drive_uses_the_timer2_one_shot():
+    # --mcs reproduces Music Construction Set's speaker technique: timer 2 as a
+    # retriggerable one-shot (mode 1) fired by a gate edge on each 'high' sample,
+    # rather than our direct data-bit level (timer 2 mode 3 + gate low).
+    song = Song(title="t", source="t")
+    for midi in (72, 64, 55):
+        tr = Track(name="v")
+        tr.add(NoteEvent(start_tick=0, duration_ticks=8, midi_note=midi))
+        song.add_track(tr)
+    normal = D.build_com(song, "4voice", 0x80, mix_rate=8000)
+    mcs = D.build_com(song, "4voice", 0x80, mix_rate=8000, mcs=True)
+    assert b"\xB0\xB6\xE6\x43" in normal               # direct: ch2 mode 3
+    assert b"\xB0\xB6\xE6\x43" not in mcs
+    assert b"\xB0\xB2\xE6\x43" in mcs                  # MCS: ch2 mode 1 (one-shot)
+    assert bytes([0xB0, D._SPK4_MCS_PULSE, 0xE6, 0x42]) in mcs   # one-shot pulse width
+    # the MCS mixer core is the same phase-accumulator sum, just a different drive
+    assert (b"\x3C\x04" in mcs) and (b"\x35\x00\xB4" in mcs)     # threshold 4 + LFSR taps
+    # mcs is only valid on 4-voice
+    with pytest.raises(ValueError):
+        D.build_com(song, "tandy", 0x80, mcs=True)
 
 
 def test_draw_skip_throttles_the_scope():

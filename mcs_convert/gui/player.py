@@ -738,9 +738,10 @@ class ImportPreview(tk.Toplevel):
         # sounds 3 tones, the PC speaker one note (multiplexed to 4 in MCS's
         # 4-voice mode). 1-note collapses to a single melodic line.
         tk.Label(bar, text="For", bg=_BG, fg=_ACCENT).pack(side="left", padx=(12, 4))
-        self._out_modes = {"Tandy (3 voices)": 3,
-                           "PC Speaker 1 Note": 1,
-                           "PC Speaker 4 Note": 4}
+        self._out_modes = {"Tandy (3 voices)": 3,      # value = voice count for the
+                           "PC Speaker 1 Note": 1,     # .MCS encoder; both 4-voice
+                           "PC Speaker 4 Note": 4,     # options allocate 4 voices
+                           "PC Speaker 4 (MCS)": 4}
         self.out_mode = tk.StringVar(value="Tandy (3 voices)")
         out_box = ttk.Combobox(bar, textvariable=self.out_mode, width=17,
                                state="readonly", values=list(self._out_modes))
@@ -1056,6 +1057,7 @@ class ImportPreview(tk.Toplevel):
                                    "Every channel is unchecked — nothing to export.",
                                    parent=self)
             return
+        mcs = self.out_mode.get() == "PC Speaker 4 (MCS)"   # the MCS one-shot drive
         mode = {3: "tandy", 1: "1voice",
                 4: "4voice"}[self._out_modes[self.out_mode.get()]]
         # Scopes: Tandy allows graphics + text; 4-voice allows text scopes (the
@@ -1071,7 +1073,7 @@ class ImportPreview(tk.Toplevel):
         try:
             from ..dosplayer import build_com
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
-                             scope=(kind == "graphics"), mix_rate=mix_rate,
+                             scope=(kind == "graphics"), mix_rate=mix_rate, mcs=mcs,
                              text_scope=(7 if kind == "static screen" else
                                          6 if kind == "VU meters" else
                                          5 if kind == "text 5" else

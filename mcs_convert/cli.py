@@ -78,10 +78,12 @@ def _cmd_convert(args) -> int:
                 raise ValueError("--scope-text.. / --scope-vu needs --tandy or --4voice")
             if args.mix_rate and target != "4voice":
                 raise ValueError("--mix-rate only applies to --4voice")
+            if args.mcs and target != "4voice":
+                raise ValueError("--mcs only applies to --4voice")
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope, mix_rate=args.mix_rate,
-                             draw_skip=args.draw_skip)
+                             draw_skip=args.draw_skip, mcs=args.mcs)
         else:                                        # the default .MCS song file
             data = encode_song(song, tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
@@ -185,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="4voice .COM only: software mixing sample rate in Hz, "
                              "any value ~1000-48000 (4000 for a real XT; ~24000 is "
                              "ultrasonic/best quality on a fast CPU or DOSBox max)")
+    p_conv.add_argument("--mcs", dest="mcs", action="store_true",
+                        help="4voice .COM only: drive the speaker the original Music "
+                             "Construction Set way (timer-2 one-shot pulse-density "
+                             "DAC) instead of the direct data-bit level")
     p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
                         metavar="N",
                         help="redraw the scope every Nth frame (default 1; higher "

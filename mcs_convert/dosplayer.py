@@ -2063,14 +2063,20 @@ def _emit_static_setup(a: "_Asm") -> None:
             a.db(0xB4, 0x0E).db(0xB3, colour).db(0xB0, ord(chch)).db(0xCD, 0x10)  # teletype char
 
 
+_SPK4_MCS_PULSE = 24             # timer-2 one-shot pulse width in PIT ticks (MCS drive)
+
+
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
-                   poster: bytes = b"") -> bytes:
+                   poster: bytes = b"", mcs: bool = False) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
     `samps_per_sub` samples applies the next sub-tick's changes (which also update
-    viz[]/strike[] for the scopes). `vis` picks the display: a live text-mode scope
+    viz[]/strike[] for the scopes). With `mcs`, the speaker is driven the way the
+    original Music Construction Set does it -- timer 2 as a retriggerable one-shot,
+    fired by a gate edge on each 'high' sample, so every high is a fixed-width click
+    (a pulse-density DAC) instead of our direct data-bit level. `vis` picks the display: a live text-mode scope
     (drawframe/blit), the 'static' full-song CGA poster (drawn once, zero runtime
     cost -- the XT answer), or nothing. Auto-repeats; a keypress restores and exits."""
     a = _Asm()
@@ -2088,14 +2094,21 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
     a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("isr")  # [es:0x20] = isr
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
-    # speaker: save port 0x61, base = it with gate(bit0)+data(bit1) cleared. With
-    # timer 2 in mode 3 and its gate low, OUT is forced high, so the cone follows
-    # bit 1 -- our 1-bit DAC output.
     a.db(0xE4, 0x61).db(0xA2).abs16("old61")         # in al,0x61; save
-    a.db(0x24, 0xFC).db(0xA2).abs16("base61")        # and al,0xFC; base61
-    a.db(0xB0, 0xB6).db(0xE6, _PIT_CMD)              # mov al,0xB6; out 0x43 (ch2 mode3)
-    a.db(0xB0, 0x01).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)   # count=1
-    a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base (gate off) now
+    if mcs:
+        # MCS drive: timer 2 = retriggerable one-shot (mode 1), count = pulse width;
+        # speaker DATA enabled (bit1=1), gate low (bit0=0). A gate rising edge fires
+        # a fixed-width pulse on OUT2 -> a click. base61 = data on, gate low.
+        a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # and 0xFC; or 0x02
+        a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)          # mov al,0xB2; out 0x43 (ch2 mode 1)
+        a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
+    else:
+        # direct drive: timer 2 mode 3 + gate low forces OUT2 high, so the cone
+        # follows data bit 1 -- our 1-bit level DAC.
+        a.db(0x24, 0xFC).db(0xA2).abs16("base61")    # and al,0xFC; base61
+        a.db(0xB0, 0xB6).db(0xE6, _PIT_CMD)          # mov al,0xB6; out 0x43 (ch2 mode3)
+        a.db(0xB0, 0x01).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)   # count=1
+    a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
     # stream pointers; sampctr=1 so the first sub-tick applies immediately
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
     a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
@@ -2154,14 +2167,22 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("sp_nobit")
     a.db(0xA0).abs16("nlfsr").db(0x24, 0x01).db(0x00, 0xC3)   # al=[nlfsr]; and al,1; add bl,al
     a.label("sp_nmute")
-    # delta-sigma: err += sum; if err>=VOICES: err-=VOICES, speaker high
+    # delta-sigma: err += sum; if err>=VOICES: err-=VOICES -> this sample is 'high'
+    # (dl = the port bit to raise: gate bit0 for the MCS one-shot, data bit1 direct)
+    highbit = 0x01 if mcs else 0x02
     a.db(0xA0).abs16("sderr").db(0x00, 0xD8)         # al=[sderr]; add al,bl
     a.db(0x30, 0xD2)                                 # xor dl,dl
     a.db(0x3C, _SPK4_VOICES).db(0x72).rel8("sd_lo")  # cmp al,4; jb lo
-    a.db(0x2C, _SPK4_VOICES).db(0xB2, 0x02)          # sub al,4; dl=bit1
+    a.db(0x2C, _SPK4_VOICES).db(0xB2, highbit)       # sub al,4; dl=highbit
     a.label("sd_lo")
     a.db(0xA2).abs16("sderr")                        # [sderr]=al
-    a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # out speaker
+    if mcs:
+        # fire the one-shot on a 'high' sample: base|gate up (rising edge triggers a
+        # fixed-width pulse), then gate back down for the next edge.
+        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl; out (edge)
+        a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)                  # al=base (gate low); out
+    else:
+        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl(bit1); out
     # timing: every samps_per_sub samples, apply the next sub-tick
     a.db(0xFF, 0x0E).abs16("sampctr")                # dec word[sampctr]
     a.db(0x75).rel8("isr_eoi")                       # jnz eoi (fast path skips di)
@@ -2232,17 +2253,21 @@ def _vis_for(scope: bool, text_scope) -> str:
 
 
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
-              text_scope: bool = False, mix_rate=None, draw_skip: int = 1) -> bytes:
+              text_scope: bool = False, mix_rate=None, draw_skip: int = 1,
+              mcs: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
     box-line 2x2 grid + master, 4 = faux spectrum analyzer, 5 = combined monitor,
-    6/"vu" = lightweight VU meters (Tandy or 4-voice PC speaker). `mix_rate` (Hz,
-    4-voice only) sets the software mixing sample rate -- lower it (~6 kHz) for a
-    real XT. `draw_skip` redraws the scope every Nth frame (>=2 lightens a heavy
-    scope on slow machines)."""
+    6/"vu" = lightweight VU meters, 7 = static full-song poster. `mix_rate` (Hz,
+    4-voice only, ~1000-48000) sets the software mixing sample rate -- 4000 for a
+    real XT, ~24000 (ultrasonic) for best quality on a fast CPU. `mcs` (4-voice
+    only) drives the speaker the original MCS way (timer-2 one-shot pulses).
+    `draw_skip` redraws the scope every Nth frame (>=2 lightens a heavy scope)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    if mcs and mode != "4voice":
+        raise ValueError("the MCS speaker drive is only available with --4voice")
     draw_skip = max(1, min(255, int(draw_skip)))
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
@@ -2260,7 +2285,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
         poster = _render_static_poster(song) if vis == "static" else b""
-        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster)
+        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster, mcs)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
