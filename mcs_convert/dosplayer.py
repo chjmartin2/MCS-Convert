@@ -2103,10 +2103,15 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     if vis and not static:
         _emit_draw_wait(a, draw_skip)
     else:
+        # hlt (sleep until an IRQ; a tight spin on a fast CPU / DOSBox cycles=max
+        # starves the timer and skips) -- but only poll the BIOS keyboard ~20x/sec.
+        # At Fs the hlt wakes thousands of times/sec; calling int 0x16 on every one
+        # is ~10% of a 4.77 MHz CPU, which we'd rather leave to the audio.
+        kb_n = max(1, min(65535, round(_PIT_HZ / divider / 20)))
         a.label("wait")
-        a.db(0xF4)                                   # hlt: sleep until the next sample IRQ
-        #  (a tight int 0x16 spin on a very fast CPU / DOSBox cycles=max starves
-        #   the timer and makes the audio skip). The static poster never redraws.
+        a.db(0xF4)                                   # hlt
+        a.db(0xFF, 0x0E).abs16("kbctr").db(0x75).rel8("wait")   # dec[kbctr]; jnz wait
+        a.db(0xC7, 0x06).abs16("kbctr").bytes(_w(kb_n))         # reload (~20/sec)
         a.db(0xB4, 0x01).db(0xCD, 0x16).db(0x74).rel8("wait")   # int16 ah=1; jz wait
         a.db(0x30, 0xE4).db(0xCD, 0x16)              # consume the key
     # ---- teardown: silence, restore timer + vector + port 0x61, exit -----------
@@ -2202,6 +2207,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("inc"); a.bytes(bytes(2 * _SPK4_VOICES))  # phase increments
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
+    a.label("kbctr"); a.db(0x01, 0x00)               # countdown to the next keyboard poll
     if static:
         a.label("poster"); a.bytes(poster)               # the baked 320x200x4 song picture
     else:

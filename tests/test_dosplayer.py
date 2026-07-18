@@ -267,7 +267,7 @@ def test_static_screen_bakes_a_cga_poster():
     assert com[:5] == b"\xB8\x04\x00\xCD\x10"         # CGA mode 4 (320x200x4)
     assert b"\xBA\xD9\x03\xB0\x10\xEE" in com         # palette 0 + intensity via port 0x3D9
     assert b"\xF3\xA5" in com                         # rep movsw: blit the poster
-    assert b"\xF4\xB4\x01\xCD\x16" in com             # static: hlt+keyboard wait (no updates)
+    assert b"\xF4\xFF\x0E" in com                     # static: hlt then throttled keyboard wait
     # the poster is a full 16 KB CGA framebuffer, packed even/odd interleaved
     poster = D._render_static_poster(song)
     assert len(poster) == 0x4000
@@ -292,11 +292,17 @@ def test_static_poster_packs_cga_pixels():
 def test_no_scope_wait_loop_uses_hlt():
     # The no-scope foreground must HLT (sleep until the next interrupt) rather than
     # spin on int 0x16 -- a tight keyboard poll on a very fast CPU / DOSBox
-    # cycles=max starves the timer IRQ and the audio skips. The wait loop is
-    # 'hlt; mov ah,1; int 0x16; jz wait'.
-    for mode in ("tandy", "4voice"):
-        com = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), mode, 0x80)
-        assert b"\xF4\xB4\x01\xCD\x16" in com         # hlt; mov ah,1; int 0x16
+    # cycles=max starves the timer IRQ and the audio skips.
+    song = _song([(0, 4, 60), (4, 4, 67)])
+    # Tandy fires the ISR at the (low) sub-tick rate, so a plain 'hlt; int 0x16'
+    # is cheap enough.
+    tandy = D.build_com(song, "tandy", 0x80)
+    assert b"\xF4\xB4\x01\xCD\x16" in tandy            # hlt; mov ah,1; int 0x16
+    # 4-voice wakes thousands of times/sec (Fs), so it hlts but THROTTLES the
+    # keyboard poll behind a counter ('hlt; dec [kbctr]; jnz wait').
+    v4 = D.build_com(song, "4voice", 0x80)
+    assert b"\xF4\xFF\x0E" in v4                       # hlt; dec word [kbctr]
+    assert b"\xCD\x16" in v4                           # still polls the keyboard (rarely)
     # a scope build paces itself to the vertical retrace, so it doesn't hlt-spin
     scoped = D.build_com(_song([(0, 4, 60)]), "tandy", 0x80, text_scope=6)
     assert b"\xF4\xB4\x01\xCD\x16" not in scoped
