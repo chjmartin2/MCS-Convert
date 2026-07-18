@@ -461,9 +461,45 @@ _FRAMES = [(2, 75, 6, 54), (84, 157, 6, 54),
            (2, 157, 120, 196)]
 _ROWADDR = [(y & 3) * 0x2000 + (y >> 2) * 160 for y in range(200)]
 
+# VGA mode 13h (320x200x256) port of the graphics scope: a LINEAR framebuffer at
+# A000 (1 byte/pixel), so no banks/packing -- and universal (any VGA card), unlike
+# the Tandy-only mode-9. Same 2x2-scopes+master layout and logic; only the pixel
+# writer, the blit and the colours change. Each mode-9 "column" (0..159) becomes 2
+# pixels so the 160-wide layout fills the full 320. Default-palette colour indices:
+_CH13 = [(*_TOP, 14, 4),         # ch0 yellow       top-left
+         (*_TOP, 12, 86),        # ch1 light red    top-right
+         (*_BOT, 11, 4),         # ch2 light cyan   bottom-left
+         (*_BOT, 10, 86)]        # ch3 noise green  bottom-right
+_VGA_WHITE = 15                  # frames / master
+_ROWADDR13 = [y * 320 for y in range(200)]
+
 
 def _w(v: int) -> bytes:
     return struct.pack("<H", v)
+
+
+def _emit_ploty13(a: "_Asm") -> None:
+    """VGA mode-13h pixel writer (emitted under the 'ploty' label so vline/hline/
+    the channel draws call it unchanged): plot column BX (0..159) as TWO pixels at
+    rowaddr[CX]*+BX*2, colour DL. Clobbers SI, DI."""
+    a.label("ploty")
+    a.db(0x89, 0xCE).db(0x01, 0xF6)                     # mov si,cx; add si,si (y*2)
+    a.db(0x8B, 0xBC).abs16("rowaddr")                   # mov di,[rowaddr+si]
+    a.db(0x01, 0xDF).db(0x01, 0xDF)                     # add di,bx; add di,bx (bx*2)
+    a.db(0x26, 0x88, 0x15)                              # mov es:[di],dl
+    a.db(0x26, 0x88, 0x55, 0x01)                        # mov es:[di+1],dl
+    a.db(0xC3)                                          # ret
+
+
+def _emit_blit13(a: "_Asm") -> None:
+    """Copy the 64000-byte linear back buffer to the VGA screen at A000."""
+    a.label("blit")
+    a.db(0x1E)                                          # push ds
+    a.db(0xA1).abs16("bufseg").db(0x8E, 0xD8)           # mov ax,[bufseg]; mov ds,ax
+    a.db(0xB8, 0x00, 0xA0).db(0x8E, 0xC0)               # mov ax,0xA000; mov es,ax
+    a.db(0x31, 0xF6).db(0x31, 0xFF)                     # xor si,si; xor di,di
+    a.db(0xB9).bytes(_w(32000)).db(0xF3, 0xA5)          # mov cx,32000; rep movsw (64000 bytes)
+    a.db(0x1F).db(0xC3)                                 # pop ds; ret
 
 
 def _emit_ploty(a: "_Asm") -> None:
@@ -499,9 +535,9 @@ def _emit_hline(a: "_Asm") -> None:
     a.db(0xC3)                                          # ret
 
 
-def _emit_frame(a: "_Asm", x0: int, x1: int, y0: int, y1: int) -> None:
+def _emit_frame(a: "_Asm", x0: int, x1: int, y0: int, y1: int, white: int = 0xFF) -> None:
     """Draw a white rectangle outline (top/bottom via hline, sides via vline)."""
-    a.db(0xB2, 0xFF)                                    # mov dl, white
+    a.db(0xB2, white)                                  # mov dl, white/border colour
     a.db(0xC7, 0x06).abs16("hend").bytes(_w(x1 + 1))    # mov word[hend], x1+1
     a.db(0xBB).bytes(_w(x0)).db(0xB9).bytes(_w(y0)).db(0xE8).rel16("hline")   # top
     a.db(0xBB).bytes(_w(x0)).db(0xB9).bytes(_w(y1)).db(0xE8).rel16("hline")   # bottom
@@ -511,12 +547,12 @@ def _emit_frame(a: "_Asm", x0: int, x1: int, y0: int, y1: int) -> None:
     a.db(0xBB).bytes(_w(x1)).db(0xE8).rel16("vline")    # right
 
 
-def _emit_channel_draw(a: "_Asm", ch: int) -> None:
+def _emit_channel_draw(a: "_Asm", ch: int, colors=_CH) -> None:
     """One tone channel per column (BX = its screen column): pick this column's y
     (HI/LO while sounding, CENTRE when silent), add ±1 to the master sum (HI =
     up = +1), advance its scroll counter, then connect the previous column's y to
     this one with a vline -- so the square is solid and edges stay crisp."""
-    hi, lo, cen, packed, _cs = _CH[ch]
+    hi, lo, cen, packed, _cs = colors[ch]
     a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
     a.db(0x75).rel8(f"c{ch}_s")                         # jne snd
@@ -543,11 +579,11 @@ def _emit_channel_draw(a: "_Asm", ch: int) -> None:
     a.db(0xE8).rel16("vline")                           # call vline
 
 
-def _emit_noise_draw(a: "_Asm") -> None:
+def _emit_noise_draw(a: "_Asm", colors=_CH) -> None:
     """Channel 3 is NOISE: a single-colour spike from the band centre to a random
     y that swings BOTH ways (an evolving LCG seed makes it shimmer). Silent -> a
     flat centre line. Contributes its spike direction (±1) to the master sum."""
-    _, _, cen, packed, _cs = _CH[3]
+    _, _, cen, packed, _cs = colors[3]
     a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
     a.db(0x75).rel8("n_act")                            # jne active
@@ -568,7 +604,7 @@ def _emit_noise_draw(a: "_Asm") -> None:
     a.label("n_done")
 
 
-def _emit_master_draw(a: "_Asm") -> None:
+def _emit_master_draw(a: "_Asm", white: int = 0xFF) -> None:
     """Master (framed, below the grid): y = 158 - (sum of the 3 tone levels)*12,
     so it steps between discrete bands, connected column to column. Drawn 2 wide
     (10+2L, 10+2L+1; BP = L = 0..69), centred in its frame."""
@@ -579,7 +615,7 @@ def _emit_master_draw(a: "_Asm") -> None:
     a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
     a.label("m_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
-    a.db(0xB2, 0xFF)                                    # mov dl,white (imul clobbered DL!)
+    a.db(0xB2, white)                                  # mov dl,white (imul clobbered DL!)
     a.db(0x89, 0xEB).db(0x01, 0xEB).db(0x83, 0xC3, 0x0A)    # mov bx,bp; add bx,bp; add bx,10 (=10+2L)
     a.db(0xE8).rel16("vline")                           # call vline (col 10+2L)
     a.db(0x43).db(0xE8).rel16("vline")                  # inc bx; call vline (col 10+2L+1)
@@ -597,14 +633,15 @@ def _emit_blit(a: "_Asm") -> None:
     a.db(0x1F).db(0xC3)                                 # pop ds; ret
 
 
-def _emit_drawframe(a: "_Asm") -> None:
-    """Redraw all five scopes straight into the packed back buffer, per column
-    (0..159). Tone channels scroll as solid squares; ch3 is noise; the master is
-    the summed trace."""
+def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
+                    clear_words: int = 16384) -> None:
+    """Redraw all five scopes straight into the back buffer, per column (0..159).
+    Tone channels scroll as solid squares; ch3 is noise; the master is the summed
+    trace. `colors`/`white`/`clear_words` retarget it (mode-9 packed vs VGA 256)."""
     a.label("drawframe")
     a.db(0xA1).abs16("bufseg").db(0x8E, 0xC0)           # mov ax,[bufseg]; mov es,ax
     a.db(0x31, 0xFF).db(0x31, 0xC0)                     # xor di,di; xor ax,ax
-    a.db(0xB9).bytes(_w(16384)).db(0xF3, 0xAB)          # mov cx,16384; rep stosw (clear all 4 banks)
+    a.db(0xB9).bytes(_w(clear_words)).db(0xF3, 0xAB)    # mov cx,N; rep stosw (clear buffer)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # add word[scroll], speed
     for ch in range(3):                                 # phase each tone channel by scroll
         a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)      # mov al,[viz+ch]; or al,al
@@ -614,22 +651,22 @@ def _emit_drawframe(a: "_Asm") -> None:
         a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)   # xor dx,dx;mov ax,[scroll];div bx
         a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)      # and al,1; mov [lev+ch],al (quotient&1)
         a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)  # mov ax,bx;sub ax,dx;mov[cnt+ch],al (P-rem)
-        a.db(0xC7, 0x06).abs16("prevy", ch * 2).bytes(_w(_CH[ch][2]))  # prevy[ch]=cen_y
+        a.db(0xC7, 0x06).abs16("prevy", ch * 2).bytes(_w(colors[ch][2]))  # prevy[ch]=cen_y
     a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=158
     a.db(0x31, 0xED)                                    # xor bp,bp  (L = column 0..69)
     a.label("xloop")
     a.db(0xC6, 0x06).abs16("msum").db(0x00)             # mov byte[msum],0
     for ch in range(3):
-        a.db(0xBB).bytes(_w(_CH[ch][4])).db(0x01, 0xEB)  # mov bx,col_start; add bx,bp
-        _emit_channel_draw(a, ch)
-    a.db(0xBB).bytes(_w(_CH[3][4])).db(0x01, 0xEB)     # mov bx,86; add bx,bp (noise)
-    _emit_noise_draw(a)
-    _emit_master_draw(a)
+        a.db(0xBB).bytes(_w(colors[ch][4])).db(0x01, 0xEB)  # mov bx,col_start; add bx,bp
+        _emit_channel_draw(a, ch, colors)
+    a.db(0xBB).bytes(_w(colors[3][4])).db(0x01, 0xEB)  # mov bx,86; add bx,bp (noise)
+    _emit_noise_draw(a, colors)
+    _emit_master_draw(a, white)
     a.db(0x45).db(0x83, 0xFD, _CHW)                    # inc bp; cmp bp,70
     a.db(0x73).rel8("xdone").db(0xE9).rel16("xloop")    # jae xdone; jmp xloop
     a.label("xdone")
-    for fr in _FRAMES:                                  # white frames on top
-        _emit_frame(a, *fr)
+    for fr in _FRAMES:                                  # frames on top
+        _emit_frame(a, *fr, white)
     a.db(0xC3)                                          # ret
 
 
@@ -1773,6 +1810,14 @@ def _emit_scope_code(a: "_Asm", vis: str) -> None:
         _emit_blit(a)
         a.label("rowaddr")                           # mode-9 byte offset of each scanline
         a.bytes(struct.pack(f"<{len(_ROWADDR)}H", *_ROWADDR))
+    elif vis == "vga":                               # 320x200x256 VGA (universal)
+        _emit_ploty13(a)                             # linear pixel writer (label 'ploty')
+        _emit_vline(a)
+        _emit_hline(a)
+        _emit_drawframe(a, _CH13, _VGA_WHITE, 32000)
+        _emit_blit13(a)
+        a.label("rowaddr")                           # linear byte offset of each scanline
+        a.bytes(struct.pack(f"<{len(_ROWADDR13)}H", *_ROWADDR13))
     elif vis == "text1":
         _emit_tcell(a)
         _emit_tfill(a)
@@ -1837,7 +1882,7 @@ def _emit_scope_vars(a: "_Asm", vis: str) -> None:
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
         a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
         a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
-    if vis == "graphics":                            # mode-9 vline/frame state
+    if vis in ("graphics", "vga"):                   # mode-9 / VGA vline/frame state
         a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
         a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
         a.label("vtop"); a.db(0x00, 0x00)                # vline top y
@@ -1932,7 +1977,8 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     "graphics" (mode 9) or "text" (mode 3)."""
     a = _Asm()
     if vis:
-        video_mode = 0x03 if vis.startswith("text") else 0x09
+        video_mode = (0x03 if vis.startswith("text") else 0x13 if vis == "vga"
+                      else 0x09)                        # text3 / VGA13h / Tandy9
         a.db(0xB8, video_mode, 0x00).db(0xCD, 0x10)     # mov ax,000N; int 0x10 (set video mode)
         # back buffer one 64 KB block past our program (a .COM owns all memory)
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)           # mov ax,cs; add ax,0x1000
@@ -2151,8 +2197,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     static = vis == "static"
     if static:                                       # draw the whole-song poster once
         _emit_static_setup(a)
-    elif vis:                                         # live text-mode scope: mode 3 + buffer
-        a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10
+    elif vis:                                         # live scope: set mode + back buffer
+        video_mode = 0x13 if vis == "vga" else 0x03  # VGA 320x200x256 or 80x25 text
+        a.db(0xB8, video_mode, 0x00).db(0xCD, 0x10)  # mov ax,000N; int 0x10
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)        # mov ax,cs; add ax,0x1000
         a.db(0xA3).abs16("bufseg")                   # [bufseg] = back-buffer segment
     # ---- start: hook INT 8, set up the speaker, program the sample timer -------
@@ -2324,9 +2371,9 @@ def _vis_for(scope: bool, text_scope) -> str:
     "text1".."text5"."""
     if text_scope:
         ts = int(text_scope)
-        return ("static" if ts == 7 else "vu" if ts == 6 else "text5" if ts == 5
-                else "text4" if ts == 4 else "text3" if ts == 3
-                else "text2" if ts == 2 else "text1")
+        return ("vga" if ts == 8 else "static" if ts == 7 else "vu" if ts == 6
+                else "text5" if ts == 5 else "text4" if ts == 4
+                else "text3" if ts == 3 else "text2" if ts == 2 else "text1")
     return "graphics" if scope else ""
 
 

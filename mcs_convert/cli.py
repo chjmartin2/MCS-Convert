@@ -68,14 +68,14 @@ def _cmd_convert(args) -> int:
             return 1
 
         if target:                                   # standalone DOS .COM player
-            text_scope = (7 if args.scope_static else 6 if args.scope_vu else
-                          5 if args.scope_text5 else 4 if args.scope_text4 else
-                          3 if args.scope_text3 else 2 if args.scope_text2 else
-                          1 if args.scope_text else 0)
+            text_scope = (8 if args.scope_vga else 7 if args.scope_static else
+                          6 if args.scope_vu else 5 if args.scope_text5 else
+                          4 if args.scope_text4 else 3 if args.scope_text3 else
+                          2 if args.scope_text2 else 1 if args.scope_text else 0)
             if args.scope and target != "tandy":
-                raise ValueError("--scope (graphics oscilloscope) needs --tandy")
+                raise ValueError("--scope (Tandy mode-9 oscilloscope) needs --tandy")
             if text_scope and target not in ("tandy", "4voice"):
-                raise ValueError("--scope-text.. / --scope-vu needs --tandy or --4voice")
+                raise ValueError("--scope-.. needs --tandy or --4voice")
             if args.mix_rate and target != "4voice":
                 raise ValueError("--mix-rate only applies to --4voice")
             if args.mcs and target != "4voice":
@@ -185,6 +185,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--scope-static", dest="scope_static", action="store_true",
                         help="4voice .COM: a static CGA 320x200 piano-roll poster of "
                              "the whole song (drawn once; zero runtime cost -- for a real XT)")
+    p_conv.add_argument("--scope-vga", dest="scope_vga", action="store_true",
+                        help="Tandy/4voice .COM: hardcore VGA 320x200x256 (mode 13h) "
+                             "2x2 oscilloscope grid + master -- universal, needs a fast CPU")
     p_conv.add_argument("--mix-rate", dest="mix_rate", type=int, default=None,
                         metavar="HZ",
                         help="4voice .COM only: software mixing sample rate in Hz, "

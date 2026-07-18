@@ -343,6 +343,23 @@ def test_static_poster_packs_cga_pixels():
     assert D._pack_cga4(px2)[0x2000] == 0x40          # 01_000000 at the odd-plane base
 
 
+def test_vga_scope_is_universal_mode_13h():
+    # text_scope=8 is the VGA 320x200x256 (mode 13h) scope grid -- a LINEAR
+    # framebuffer at A000, universal to any VGA (unlike the Tandy-only mode 9).
+    song = _song([(0, 4, 60), (4, 4, 67), (8, 4, 72)])
+    vga = D.build_com(song, "tandy", 0x80, text_scope=8)
+    assert b"\xB8\x13\x00\xCD\x10" in vga              # mov ax,0x0013; int 0x10 (VGA mode 13h)
+    assert b"\xB8\x00\xA0\x8E\xC0" in vga              # mov ax,0xA000; mov es,ax (VGA framebuffer)
+    assert b"\xB8\x09\x00\xCD\x10" not in vga          # NOT the Tandy mode 9
+    # the Tandy mode-9 graphics scope is unchanged and still Tandy-only
+    g9 = D.build_com(song, "tandy", 0x80, scope=True)
+    assert b"\xB8\x09\x00\xCD\x10" in g9
+    with pytest.raises(ValueError):
+        D.build_com(song, "1voice", 0x80, scope=True)  # graphics needs a viz source
+    # VGA works on the 4-voice player too (needs a fast CPU there)
+    assert len(D.build_com(song, "4voice", 0x80, text_scope=8)) > 0
+
+
 def test_no_scope_wait_loop_uses_hlt():
     # The no-scope foreground must HLT (sleep until the next interrupt) rather than
     # spin on int 0x16 -- a tight keyboard poll on a very fast CPU / DOSBox

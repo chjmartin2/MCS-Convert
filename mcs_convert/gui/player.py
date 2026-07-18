@@ -795,8 +795,8 @@ class ImportPreview(tk.Toplevel):
         tk.Label(btns, text="scope", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
         self.com_scope = tk.StringVar(value="text 5")
         ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
-                     values=("none", "graphics", "text 1", "text 2", "text 3",
-                             "text 4", "text 5", "VU meters", "static screen")
+                     values=("none", "graphics", "VGA 256", "text 1", "text 2",
+                             "text 3", "text 4", "text 5", "VU meters", "static screen")
                      ).pack(side="left", padx=(0, 6))
         # 4-voice-only: software mixing rate in Hz -- an editable box (type any
         # value for your target), defaulting to 4000 for a real XT. Higher = better
@@ -1077,7 +1077,8 @@ class ImportPreview(tk.Toplevel):
             data = build_com(self.selected_song(), mode, self._tempo_byte0(),
                              scope=(kind == "graphics"), mix_rate=mix_rate,
                              mcs=mcs, sb=sb,
-                             text_scope=(7 if kind == "static screen" else
+                             text_scope=(8 if kind == "VGA 256" else
+                                         7 if kind == "static screen" else
                                          6 if kind == "VU meters" else
                                          5 if kind == "text 5" else
                                          4 if kind == "text 4" else
