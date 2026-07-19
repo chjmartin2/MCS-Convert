@@ -12,7 +12,7 @@ program plays, note for note — tested against the 12 songs from the
 original retail disk plus dozens of user-made songs collected over the
 years (86 files in all, every one round-tripping byte-identically).
 
-## The Player + Importer (v0.3)
+## The Player + Importer (v0.4)
 
 Open a song, watch it scroll by in a tracker-style grid, and listen:
 
@@ -124,20 +124,51 @@ APU model captures the pulse/triangle/noise registers; the emulation detects
 the song loop, quantizes onto MCS's grid, and converts to Tandy or PC-speaker
 voicing. See [docs/architecture.md](docs/architecture.md).
 
-### Standalone player (`.COM`)
+### Standalone player (`.COM`) — greatly expanded in 0.4
 
 Convert to a self-contained DOS executable that plays the song with no runtime —
-just a `.COM` you run in DOSBox (or on a real PC):
+just a `.COM` you run in DOSBox (or on a real PC), hand-assembled with no
+toolchain dependency:
 
 ```powershell
-python -m mcs_convert convert SONG.nsf SONG.COM --tandy    # 3 square voices
-python -m mcs_convert convert SONG.pt3 SONG.COM --1voice   # PC-speaker melody
+python -m mcs_convert convert SONG.nsf SONG.COM --tandy            # 3 square voices + noise drums
+python -m mcs_convert convert SONG.pt3 SONG.COM --1voice           # PC-speaker melody
+python -m mcs_convert convert SONG.nsf SONG.COM --4voice --mix-rate 24000   # software-mixed speaker
+python -m mcs_convert convert SONG.nsf SONG.COM --4voice --sb      # SoundBlaster 8-bit DAC
 ```
 
-`--tandy` targets the Tandy 1000 / PCjr SN76489 (three real square channels — run
-DOSBox with `machine=tandy`); `--1voice` uses the PC speaker (monophonic, the top
-line). The `.COM` reprograms the timer, plays once, and quits on any keypress,
-restoring everything. (`--4voice`, a 1-bit PC-speaker multiplex, is coming.)
+**Four audio targets:**
+
+- `--tandy` — the Tandy 1000 / PCjr SN76489: three real square channels plus
+  two-tone noise-channel percussion (run DOSBox with `machine=tandy`).
+- `--1voice` — the PC speaker, monophonic top line.
+- `--4voice` — a software 1-bit mixer on the PC speaker: four phase-accumulator
+  voices (3 squares + LFSR noise) delta-sigma'd onto the cone at an **arbitrary
+  mixing rate** (`--mix-rate`, ~1–48 kHz: 4 kHz suits a real XT, 24 kHz+ puts the
+  carrier ultrasonic for the cleanest sound on a fast CPU). Add `--mcs` for the
+  speaker drive reverse-engineered from the original MCS.EXE (timer-2 one-shot
+  pulse-density DAC).
+- `--4voice --sb` — **SoundBlaster** output: the same four voices mixed at full
+  amplitude through the DSP's 8-bit DAC (`--sb-port` overridable) — much closer
+  to the original NES/PT3 sound than any 1-bit speaker.
+
+**On-screen visualizations** (pick one per build):
+
+- `--scope` — Tandy 320×200×16 graphics oscilloscopes (2×2 grid + master).
+- `--scope-vga` — the same scope grid on **universal VGA mode 13h** (320×200×256).
+- `--scope-text` / `--scope-text2` / `--scope-text3` — 80×25 text-mode scopes:
+  block bars, box-drawing line traces, and the 2×2 box-line grid + master.
+- `--scope-text4` — a faux spectrum analyzer (green/yellow/red bars, peak caps,
+  square-wave odd-harmonic model).
+- `--scope-text5` — the combined monitor: 2×2 scopes + spectrum + VU meters on
+  one screen.
+- `--scope-vu` — lightweight VU meters only.
+- `--scope-static` — a **static CGA piano-roll poster of the whole song**, drawn
+  once with zero runtime cost (the real-XT option; playback gets the entire CPU).
+- `--draw-skip N` throttles any live scope for slow machines.
+
+Every `.COM` auto-repeats until a keypress, then restores the timer, interrupt
+vector, video mode, and hardware before returning to DOS.
 
 ## Layout
 
@@ -148,12 +179,12 @@ mcs_convert/
   audio.py          synth (square/triangle/sine/PC-speaker) + waveOut transport
   mcs/reader.py     .MCS/.MCD -> Song   (the decoded format lives here)
   mcs/writer.py     Song -> .MCS        (round-trips all samples byte-identically)
-  dosplayer.py      Song -> standalone DOS .COM (Tandy SN76489 / PC speaker)
+  dosplayer.py      Song -> standalone DOS .COM (Tandy / PC speaker / SoundBlaster + scopes)
   model.py          Song / Track / NoteEvent  (the neutral middle)
   nsf/              NSF header/APU/6502 emulation (NES converter input)
 docs/               the format spec + architecture notes
 tools/              disk-image and test-song utilities
-tests/              115 tests, including engine ground-truth checks
+tests/              139 tests, including engine ground-truth checks
 ```
 
 ## Development
