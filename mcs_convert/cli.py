@@ -86,7 +86,8 @@ def _cmd_convert(args) -> int:
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope, mix_rate=args.mix_rate,
                              draw_skip=args.draw_skip, mcs=args.mcs,
-                             sb=args.sb, sb_port=args.sb_port)
+                             sb=args.sb, sb_port=args.sb_port,
+                             sb_wave=args.sb_wave, spk_wave=args.spk_wave)
         else:                                        # the default .MCS song file
             # The universal Song may carry noise tracks / waveforms / effects MCS
             # can't voice — retrack() reduces to 4 square voices + drum clicks.
@@ -207,6 +208,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--sb-port", dest="sb_port", type=lambda s: int(s, 0),
                         default=0x220, metavar="PORT",
                         help="SoundBlaster base I/O port (default 0x220)")
+    p_conv.add_argument("--sb-wave", dest="sb_wave", default=None,
+                        choices=("native", "square", "triangle", "sine", "nestri",
+                                 "pulse12", "pulse25", "pulse50", "pulse75"),
+                        help="SoundBlaster wavetable: 'native' keeps the song's "
+                             "own waveforms (NES duties etc.), or force one")
+    p_conv.add_argument("--spk-wave", dest="spk_wave", default=None,
+                        choices=("triangle", "sine", "nestri"),
+                        help="4voice speaker only: model a non-square waveform "
+                             "via multi-level PWM (needs --mix-rate >= 12000)")
     p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
                         metavar="N",
                         help="redraw the scope every Nth frame (default 1; higher "

@@ -47,6 +47,56 @@ def _measure_ticks(time_signature: str) -> int:
         return 32                                    # sensible 4/4 default (in 32nd-ticks)
 
 
+def track_columns(song: Song) -> List[str]:
+    """Column headers for the universal per-track view: the tracks' names, with
+    kind markers (noise: ⌁, drum: ◆) so the non-tone voices self-identify."""
+    marks = {"noise": " ⌁", "drum": " ◆"}
+    return [t.name + marks.get(getattr(t, "kind", "tone"), "")
+            for t in song.tracks]
+
+
+def tracker_rows_universal(song: Song, subdiv: int = 1):
+    """The UNIVERSAL tracker grid: one column PER TRACK (however many the song
+    carries — noise and drum tracks included), each cell that track's own note.
+    A cell is `PITCH:DUR` at onset with a trailing `*` when the note carries
+    effects (ornaments, slides, envelopes... hover the export dialog for the
+    full nomenclature); rows are (label, is_measure_start, evt, [cells...])."""
+    ntracks = len(song.tracks)
+    events = []                                      # (row, endrow, col, label)
+    for col, tr in enumerate(song.tracks):
+        for n in tr.notes:
+            s = n.start_tick * subdiv
+            e = (n.start_tick + n.duration_ticks) * subdiv
+            if e <= s:
+                continue
+            label = _note_label(n)
+            if n.effects:
+                label += "*"
+            events.append((s, e, col, label))
+    if not events:
+        return []
+    end = max(e for _, e, _, _ in events)
+    rows_per_measure = _measure_ticks(song.time_signature) * subdiv
+    evt_by_row: dict = {}
+    for tick, _staff, label in getattr(song, "events", []):
+        evt_by_row.setdefault(tick * subdiv, [])
+        if label not in evt_by_row[tick * subdiv]:
+            evt_by_row[tick * subdiv].append(label)
+    onset_by_row: dict = {}
+    for s, e, col, label in events:
+        onset_by_row.setdefault(s, []).append((col, label))
+    rows = []
+    for r in range(end):
+        cols = [""] * ntracks
+        for col, label in onset_by_row.get(r, ()):
+            cols[col] = label
+        measure, step = divmod(r, rows_per_measure) if rows_per_measure else (0, r)
+        is_bar = step == 0
+        label = f"{measure + 1:>3}" if is_bar else ("" if step % subdiv else f".{step}")
+        rows.append((label, is_bar, " ".join(evt_by_row.get(r, [])), cols))
+    return rows
+
+
 def tracker_rows(song: Song, subdiv: int = 1) -> List[Tuple[str, bool, str, List[str]]]:
     """Grid rows for `song`. subdiv = rows per 32nd-tick (1 → one row per 32nd).
 

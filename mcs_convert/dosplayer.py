@@ -2130,6 +2130,35 @@ _SPK4_MCS_PULSE = 24             # timer-2 one-shot pulse width in PIT ticks (MC
 _SB_PORT = 0x220                 # default SoundBlaster base I/O port (BLASTER A220)
 _SB_AMP = 30                     # per-voice amplitude in the 8-bit (0..255) mix
 
+# Waveform tables: 256 entries spanning one oscillator cycle, indexed by the
+# phase accumulator's HIGH BYTE (no shifting needed on the 8088 — the natural
+# 256-entry table makes the lookup a single mov). The SB engine uses SIGNED
+# entries (+/-_SB_AMP); the speaker's high-rate PWM path uses UNSIGNED levels
+# 0.._SPK4_WAVE_FULL per voice, delta-sigma'd as a multi-level sum.
+_SPK4_WAVE_FULL = 20             # per-voice full level in the PWM wavetable path
+_SPK4_WAVE_MIN_RATE = 12000      # PWM waveform modeling needs an inaudible carrier
+_WAVE_DUTIES = {"pulse12": 0.125, "pulse25": 0.25, "pulse50": 0.5,
+                "pulse75": 0.75, "square": 0.5}
+
+
+def _wave_table(waveform: str, amp: int, signed: bool) -> bytes:
+    """One 256-entry cycle of `waveform` at +/-amp (signed) or 0..2*amp levels."""
+    import math
+    out = bytearray(256)
+    for i in range(256):
+        ph = i / 256.0
+        if waveform in _WAVE_DUTIES:
+            v = 1.0 if ph < _WAVE_DUTIES[waveform] else -1.0
+        elif waveform == "triangle":
+            v = 4.0 * ph - 1.0 if ph < 0.5 else 3.0 - 4.0 * ph
+        elif waveform == "nestri":                    # 4-bit stepped triangle
+            t = 4.0 * ph - 1.0 if ph < 0.5 else 3.0 - 4.0 * ph
+            v = round((t + 1.0) * 7.5) / 7.5 - 1.0
+        else:                                         # sine
+            v = math.sin(2 * math.pi * ph)
+        out[i] = (round(v * amp) & 0xFF) if signed else round((v + 1.0) * amp)
+    return bytes(out)
+
 
 def _emit_sb_write(a: "_Asm", value: int) -> None:
     """Poll the DSP write-status port (base+0xC bit7) then write command `value`.
@@ -2152,20 +2181,28 @@ def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
     _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
 
 
-def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
-    """One 8-bit sample: sum the 4 voices as signed levels (+/-AMP each) and write it
-    to the DSP DAC. bh accumulates the signed mix; the tone bit and the noise LFSR
-    bit each add +AMP (high) or -AMP (low)."""
+def _emit_sb_synth_out(a: "_Asm", sb_port: int, use_table: bool = False) -> None:
+    """One 8-bit sample: sum the 4 voices as signed levels and write it to the
+    DSP DAC. bh accumulates the signed mix. Default: each tone contributes
+    +/-AMP by its square's high bit. With `use_table`, each tone's level comes
+    from the 256-entry `wavetbl` (sine/triangle/NES-duty...) indexed by the
+    accumulator's high byte — a real wavetable synth on the SB DAC."""
     a.db(0x30, 0xFF)                                 # xor bh,bh (signed sum)
     for i in range(_SPK4_TONES):
         a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
         a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
         a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
-        a.db(0x01, 0xC0)                             # add ax,ax (CF = bit15 = square level)
-        a.db(0x18, 0xD2)                             # sbb dl,dl (0x00 or 0xFF)
-        a.db(0x80, 0xE2, 2 * _SB_AMP)                # and dl, 2*AMP
-        a.db(0x80, 0xEA, _SB_AMP)                    # sub dl, AMP  -> -AMP or +AMP
-        a.db(0x00, 0xD7)                             # add bh, dl
+        if use_table:
+            a.db(0x88, 0xE2).db(0x30, 0xF6)          # mov dl,ah; xor dh,dh
+            a.db(0x89, 0xD6)                         # mov si,dx (phase high byte)
+            a.db(0x8A, 0x94).abs16("wavetbl")        # mov dl,[si+wavetbl]
+            a.db(0x00, 0xD7)                         # add bh,dl
+        else:
+            a.db(0x01, 0xC0)                         # add ax,ax (CF = bit15 = square level)
+            a.db(0x18, 0xD2)                         # sbb dl,dl (0x00 or 0xFF)
+            a.db(0x80, 0xE2, 2 * _SB_AMP)            # and dl, 2*AMP
+            a.db(0x80, 0xEA, _SB_AMP)                # sub dl, AMP  -> -AMP or +AMP
+            a.db(0x00, 0xD7)                         # add bh, dl
     nz = _SPK4_TONES * 2                             # noise voice
     a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
     a.db(0x74).rel8("sb_nmute")                      # jz muted (contributes 0)
@@ -2190,10 +2227,55 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
     a.db(0x88, 0xE0).db(0xEE)                        # al=ah (the sample); out dx,al
 
 
+def _emit_spk_wave_synth(a: "_Asm", mcs: bool) -> None:
+    """The high-carrier PWM waveform path: each tone's LEVEL (0..2*FULL) comes
+    from the unsigned `wavetbl`, the noise voice adds FULL when its LFSR bit is
+    set, and the multi-level sum (0..80) is first-order delta-sigma'd onto the
+    1-bit speaker. At an ultrasonic mix rate the carrier vanishes and the
+    speaker genuinely plays sines/triangles — the PWM waveform modeling."""
+    full = 4 * _SPK4_WAVE_FULL                       # the sum's full scale (80)
+    a.db(0x31, 0xDB)                                 # xor bx,bx (bl = level sum)
+    for i in range(_SPK4_TONES):
+        a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
+        a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
+        a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
+        a.db(0x88, 0xE2).db(0x30, 0xF6)              # mov dl,ah; xor dh,dh
+        a.db(0x89, 0xD6)                             # mov si,dx (phase high byte)
+        a.db(0x8A, 0x84).abs16("wavetbl")            # mov al,[si+wavetbl] (0..2*FULL)
+        a.db(0x00, 0xC3)                             # add bl,al
+    nz = _SPK4_TONES * 2                             # noise voice (LFSR level)
+    a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
+    a.db(0x74).rel8("wv_nmute")                      # jz muted
+    a.db(0xA1).abs16("acc", nz).db(0x03, 0x06).abs16("inc", nz).db(0xA3).abs16("acc", nz)
+    a.db(0x73).rel8("wv_nobit")                      # jnc: don't clock
+    a.db(0xA1).abs16("nlfsr").db(0xD1, 0xE8)         # ax=[nlfsr]; shr ax,1
+    a.db(0x73).rel8("wv_nf").db(0x35).bytes(_w(_SPK4_LFSR))
+    a.label("wv_nf")
+    a.db(0xA3).abs16("nlfsr")
+    a.label("wv_nobit")
+    a.db(0xF6, 0x06).abs16("nlfsr").db(0x01)         # test byte[nlfsr],1
+    a.db(0x74).rel8("wv_nmute")                      # jz (low adds 0)
+    a.db(0x80, 0xC3, _SPK4_WAVE_FULL)                # add bl, FULL
+    a.label("wv_nmute")
+    # multi-level delta-sigma: err += sum; err >= FULLSCALE -> high, err -= it
+    highbit = 0x01 if mcs else 0x02
+    a.db(0xA0).abs16("sderr").db(0x00, 0xD8)         # al=[sderr]; add al,bl
+    a.db(0x30, 0xD2)                                 # xor dl,dl
+    a.db(0x3C, full).db(0x72).rel8("wv_lo")          # cmp al,80; jb lo
+    a.db(0x2C, full).db(0xB2, highbit)               # sub al,80; dl=highbit
+    a.label("wv_lo")
+    a.db(0xA2).abs16("sderr")                        # [sderr]=al
+    if mcs:
+        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # gate edge
+        a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)                  # gate low
+    else:
+        a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # data bit
+
+
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
                    poster: bytes = b"", mcs: bool = False, sb: bool = False,
-                   sb_port: int = _SB_PORT) -> bytes:
+                   sb_port: int = _SB_PORT, wave_table: bytes = b"") -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -2280,7 +2362,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
     if sb:
-        _emit_sb_synth_out(a, sb_port)               # 8-bit amplitude mix -> SB DAC
+        _emit_sb_synth_out(a, sb_port, bool(wave_table))   # 8-bit mix -> SB DAC
+    elif wave_table:
+        _emit_spk_wave_synth(a, mcs)                 # PWM waveform modeling
     else:
         # synth: bl = sum of the voices' bits (3 tone squares + 1 noise)
         a.db(0x31, 0xDB)                             # xor bx,bx
@@ -2369,6 +2453,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
     a.label("kbctr"); a.db(0x01, 0x00)               # countdown to the next keyboard poll
+    if wave_table:
+        a.label("wavetbl"); a.bytes(wave_table)      # 256-entry oscillator cycle
     if static:
         a.label("poster"); a.bytes(poster)               # the baked 320x200x4 song picture
     else:
@@ -2388,18 +2474,33 @@ def _vis_for(scope: bool, text_scope) -> str:
     return "graphics" if scope else ""
 
 
+def _native_waveform(song: Song) -> str:
+    """The majority tone-track waveform — what "native" resolves to for the
+    wavetable engines (NES imports carry their duties; MCS songs are square)."""
+    counts: dict = {}
+    for t in song.tracks:
+        if getattr(t, "kind", "tone") == "tone" and t.waveform:
+            counts[t.waveform] = counts.get(t.waveform, 0) + len(t.notes)
+    return max(counts, key=counts.get) if counts else "square"
+
+
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False, mix_rate=None, draw_skip: int = 1,
-              mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT) -> bytes:
+              mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT,
+              sb_wave: str = None, spk_wave: str = None) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
     box-line 2x2 grid + master, 4 = faux spectrum analyzer, 5 = combined monitor,
-    6/"vu" = lightweight VU meters, 7 = static full-song poster. `mix_rate` (Hz,
-    4-voice only, ~1000-48000) sets the software mixing sample rate -- 4000 for a
-    real XT, ~24000 (ultrasonic) for best quality on a fast CPU. `mcs` (4-voice
-    only) drives the speaker the original MCS way (timer-2 one-shot pulses).
-    `draw_skip` redraws the scope every Nth frame (>=2 lightens a heavy scope)."""
+    6/"vu" = lightweight VU meters, 7 = static full-song poster, 8 = VGA mode 13h.
+    `mix_rate` (Hz, 4-voice only, ~1000-48000) sets the software mixing sample
+    rate -- 4000 for a real XT, ~24000 (ultrasonic) for best quality on a fast
+    CPU. `mcs` (4-voice only) drives the speaker the original MCS way (timer-2
+    one-shot pulses). `sb_wave` picks the SoundBlaster wavetable (sine/triangle/
+    nestri/pulseNN/"native" = the song's own); `spk_wave` models a non-square
+    waveform on the PC speaker via multi-level PWM -- it needs a >= 12 kHz mix
+    rate so the carrier is inaudible. `draw_skip` redraws the scope every Nth
+    frame (>=2 lightens a heavy scope)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if mcs and mode != "4voice":
@@ -2408,6 +2509,8 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError("SoundBlaster output is only available with --4voice")
     if sb and mcs:
         raise ValueError("--sb and --mcs are different speaker drives; pick one")
+    if spk_wave and (sb or mode != "4voice"):
+        raise ValueError("spk_wave (PWM waveform modeling) is 4-voice speaker only")
     draw_skip = max(1, min(255, int(draw_skip)))
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
@@ -2416,6 +2519,21 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         vis = _vis_for(False, text_scope)            # text scopes only
         div = _spk4_div_for(mix_rate)
         fs = _PIT_HZ / div
+        # -- waveform table selection (the universal waveforms reach DOS here) --
+        wave_table = b""
+        if sb:
+            wf = sb_wave or "square"
+            if wf == "native":
+                wf = _native_waveform(song)
+            if wf != "square":                       # square = the fast bit path
+                wave_table = _wave_table(wf, _SB_AMP, signed=True)
+        elif spk_wave and spk_wave not in ("square", "native"):
+            if fs < _SPK4_WAVE_MIN_RATE:
+                raise ValueError(
+                    f"PWM waveform modeling needs --mix-rate >= "
+                    f"{_SPK4_WAVE_MIN_RATE} (the carrier must be inaudible); "
+                    f"got {fs:.0f} Hz")
+            wave_table = _wave_table(spk_wave, _SPK4_WAVE_FULL, signed=False)
         stream, total = _build_spk4_stream(song, fs)
         if total <= 1:
             raise ValueError("nothing to play (no notes)")
@@ -2426,7 +2544,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         samps = max(1, min(65535, round(fs * subtick_s)))
         poster = _render_static_poster(song) if vis == "static" else b""
         com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster,
-                             mcs, sb, sb_port)
+                             mcs, sb, sb_port, wave_table)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com

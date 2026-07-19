@@ -101,6 +101,10 @@ class PlayerApp:
         self._scope_win = None      # oscilloscope Toplevel (None until opened)
         self._scope_panels = []     # (canvas, trace_item) — v1..v4 then master
         self._scope_data = None     # (master, voices, sr) buffers from the last render
+        self._vu_win = None         # VU meters window (gui.viz.VUWindow)
+        self._spec_win = None       # spectrum analyzer window (gui.viz.SpectrumWindow)
+        self.universal = False      # True when the tracker holds a universal Song
+        self.path = None            # file path when loaded from disk (None = imported)
         root.title("MCS-Convert — Player")
         root.configure(bg=_BG)
         root.geometry("560x680")
@@ -128,22 +132,29 @@ class PlayerApp:
         self.pause_btn.pack(side="left", padx=(4, 0))
         self.stop_btn = tk.Button(row1, text="■ Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
-        self.export_btn = tk.Button(row1, text="⬇ WAV…", command=self.export_wav,
+        self.exportdlg_btn = tk.Button(row1, text="⬇ Export…",
+                                       command=self.export_dialog, state="disabled")
+        self.exportdlg_btn.pack(side="left", padx=(12, 0))
+        self.export_btn = tk.Button(row1, text="WAV…", command=self.export_wav,
                                     state="disabled")
-        self.export_btn.pack(side="left", padx=(12, 0))
-        self.track_btn = tk.Button(row1, text="⬇ Tracker…", command=self.export_tracker,
+        self.export_btn.pack(side="left", padx=(4, 0))
+        self.track_btn = tk.Button(row1, text="Tracker…", command=self.export_tracker,
                                    state="disabled")
         self.track_btn.pack(side="left", padx=(4, 0))
         tk.Button(row1, text="〰 Scope", command=self.open_scope).pack(side="left",
                                                                       padx=(12, 0))
+        tk.Button(row1, text="▮ VU", command=self.open_vu).pack(side="left",
+                                                                padx=(4, 0))
+        tk.Button(row1, text="▁▃ Spectrum", command=self.open_spectrum).pack(
+            side="left", padx=(4, 0))
 
         row2 = tk.Frame(self.root, bg=_BG)
         row2.pack(fill="x", padx=8, pady=(0, 4))
         # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
         # rendering (see audio._render_pcspeaker), for comparing against real hardware.
         tk.Label(row2, text="Voice", bg=_BG, fg=_ACCENT).pack(side="left")
-        self._voices = {"PC Speaker": "pcspeaker", "Square": "square",
-                        "Triangle": "triangle", "Sine": "sine"}
+        self._voices = {"Universal": "auto", "PC Speaker": "pcspeaker",
+                        "Square": "square", "Triangle": "triangle", "Sine": "sine"}
         self.voice = tk.StringVar(value="PC Speaker")
         ttk.Combobox(row2, textvariable=self.voice, width=11, state="readonly",
                      values=list(self._voices)).pack(side="left", padx=(6, 0))
@@ -304,10 +315,41 @@ class PlayerApp:
             messagebox.showerror("Cannot open file", f"{os.path.basename(path)}:\n{exc}")
             return
         self.path = path
+        self.universal = False
         self._populate(path)
+        self._enable_transport()
+
+    def load_song(self, song, label: str = "import") -> None:
+        """Load a UNIVERSAL Song straight into the tracker (no .MCS round-trip):
+        the grid shows one column per track — noise and drum tracks included —
+        and playback uses the universal per-track synth. This is how imports
+        arrive now; exporting to files happens later via the Export dialog."""
+        self.song = song
+        self.path = None
+        self.universal = True
+        self.voice.set("Universal")              # per-track waveforms + noise voice
+        self._populate(label)
+        self._enable_transport()
+
+    def _enable_transport(self) -> None:
         self.play_btn.configure(state="normal")
+        self.exportdlg_btn.configure(state="normal")
         self.export_btn.configure(state="normal")
         self.track_btn.configure(state="normal")
+
+    def _config_columns(self, headers) -> None:
+        """Reconfigure the tracker grid's note columns (universal songs bring
+        their own track list; .MCS files use the classic v1..v4)."""
+        cols = ("bar", "evt") + tuple(f"c{i}" for i in range(len(headers)))
+        self.tree.configure(columns=cols)
+        self.tree.heading("bar", text="Bar")
+        self.tree.column("bar", width=44, anchor="center")
+        self.tree.heading("evt", text="Evt")
+        self.tree.column("evt", width=40, anchor="center")
+        width = max(72, min(120, 460 // max(1, len(headers))))
+        for i, name in enumerate(headers):
+            self.tree.heading(f"c{i}", text=name)
+            self.tree.column(f"c{i}", width=width, anchor="center")
 
     def _populate(self, path: str) -> None:
         self.player.stop()                   # a new song silences the old one
@@ -315,11 +357,24 @@ class PlayerApp:
         self._last_row = None
         self._scope_data = None              # ...and drops its scope buffers
         self._draw_scope(None)
+        self._draw_viz(None)
+        if self._vu_win is not None and self._vu_win.alive():
+            names = self._track_names()
+            self._vu_win.names = names           # follow the new song's tracks
+            self._vu_win.levels = [0.0] * len(names)
+            self._vu_win.peaks = [0.0] * len(names)
         self.pause_btn.configure(state="disabled", text="⏸ Pause")
         self.stop_btn.configure(state="disabled")
         self.tree.delete(*self.tree.get_children())
-        # 4-voice tracker: one row per 32nd-tick, sounding notes ranked highest -> lowest.
-        rows = tracker_rows(self.song)
+        if self.universal:
+            # UNIVERSAL tracker: one column per track (noise/drum included).
+            from ..tracker import track_columns, tracker_rows_universal
+            self._config_columns(track_columns(self.song))
+            rows = tracker_rows_universal(self.song)
+        else:
+            # classic 4-voice MCS view: sounding notes ranked highest -> lowest.
+            self._config_columns(["V1", "V2", "V3", "V4"])
+            rows = tracker_rows(self.song)
         self._rows = rows
         for idx, (lbl, is_bar, evt, cols) in enumerate(rows):
             tag = "bar" if is_bar else ("stripe" if idx % 2 else "")
@@ -417,7 +472,9 @@ class PlayerApp:
             return
         if row != self._last_row:
             self._move_playhead(row)
-        self._draw_scope(self._start_row * self._step + pos)
+        elapsed = self._start_row * self._step + pos
+        self._draw_scope(elapsed)
+        self._draw_viz(elapsed)
         self._follow_id = self.root.after(30, self._follow_playhead)
 
     def _finish_playback(self) -> None:
@@ -429,6 +486,7 @@ class PlayerApp:
         self.stop_btn.configure(state="disabled")
         self.pause_btn.configure(state="disabled", text="⏸ Pause")
         self._draw_scope(None)
+        self._draw_viz(None)
 
     def _move_playhead(self, row: int) -> None:
         self._clear_playhead()                             # restore the row we're leaving
@@ -517,6 +575,58 @@ class PlayerApp:
         self._scope_win = None
         self._scope_panels = []
 
+    # ---- VU meters / spectrum analyzer / DOS-viz windows ---------------------
+    def _track_names(self):
+        if self.song and self.song.tracks:
+            return [t.name for t in self.song.tracks]
+        return ["v1", "v2", "v3", "v4"]
+
+    def open_vu(self) -> None:
+        """Open (or raise) the per-track VU meter window."""
+        from . import viz
+        if self._vu_win is not None and self._vu_win.alive():
+            self._vu_win.win.lift()
+            return
+        self._vu_win = viz.VUWindow(self.root, self._track_names())
+        self._vu_win.draw(None)
+
+    def open_spectrum(self) -> None:
+        """Open (or raise) the spectrum analyzer window."""
+        from . import viz
+        if self._spec_win is not None and self._spec_win.alive():
+            self._spec_win.win.lift()
+            return
+        self._spec_win = viz.SpectrumWindow(self.root)
+        self._spec_win.draw(None)
+
+    def _draw_viz(self, elapsed) -> None:
+        """Feed the VU + spectrum windows from the rendered buffers (None = flat)."""
+        vu_open = self._vu_win is not None and self._vu_win.alive()
+        sp_open = self._spec_win is not None and self._spec_win.alive()
+        if not (vu_open or sp_open):
+            return
+        from . import viz
+        if elapsed is None or self._scope_data is None:
+            if vu_open:
+                self._vu_win.draw(None)
+            if sp_open:
+                self._spec_win.draw(None)
+            return
+        master, voices, sr = self._scope_data
+        idx = max(0, int(elapsed * sr))
+        if vu_open:
+            self._vu_win.draw(viz._rms_levels(voices, idx, int(0.03 * sr)))
+        if sp_open:
+            self._spec_win.draw(viz._spectrum(master, idx, sr))
+
+    def export_dialog(self) -> None:
+        """Open the Export dialog: target choice, constrained preview, retrack,
+        and the file export itself. Export lives here now, after play."""
+        if not self.song:
+            return
+        from .export import ExportDialog
+        ExportDialog(self)
+
     def _draw_scope(self, elapsed: float | None) -> None:
         """Draw a ~30 ms window of each voice (and the master) at the playback position;
         None flatlines all five traces."""
@@ -589,6 +699,7 @@ class PlayerApp:
         self.stop_btn.configure(state="disabled")
         self.pause_btn.configure(state="disabled", text="⏸ Pause")
         self._draw_scope(None)       # flatline the scopes
+        self._draw_viz(None)
 
 
 class ImportPreview(tk.Toplevel):
@@ -732,22 +843,8 @@ class ImportPreview(tk.Toplevel):
                                  state="readonly", values=labels)
         tempo_box.pack(side="left", padx=(6, 16))
         tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
-        # Output target: how many voices the destination sound chip can sound at
-        # once. All modes balance the two staves for capacity (register-matched
-        # clefs, notes dealt evenly); they differ in the voice cap — Tandy/PCjr
-        # sounds 3 tones, the PC speaker one note (multiplexed to 4 in MCS's
-        # 4-voice mode). 1-note collapses to a single melodic line.
-        tk.Label(bar, text="For", bg=_BG, fg=_ACCENT).pack(side="left", padx=(12, 4))
-        self._out_modes = {"Tandy (3 voices)": 3,      # value = voice count for the
-                           "PC Speaker 1 Note": 1,     # .MCS encoder; the 4-voice
-                           "PC Speaker 4 Note": 4,     # options all allocate 4 voices
-                           "PC Speaker 4 (MCS)": 4,
-                           "SoundBlaster (4 voice)": 4}
-        self.out_mode = tk.StringVar(value="Tandy (3 voices)")
-        out_box = ttk.Combobox(bar, textvariable=self.out_mode, width=17,
-                               state="readonly", values=list(self._out_modes))
-        out_box.pack(side="left")
-        out_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
+        # (Output targets moved to the main window's Export dialog — import now
+        # loads the UNIVERSAL song; the size readout below estimates the .MCS.)
         # Meter: Auto picks the longest meter that fits (2/4 if a dense song needs
         # it); or force one. Shorter measures = more per-measure buffer = fewer
         # drops, at the cost of more barlines.
@@ -788,27 +885,11 @@ class ImportPreview(tk.Toplevel):
         self.drop_label.pack(side="left", padx=(0, 14))
         self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
         self.size_label.pack(side="left", padx=(0, 14))
-        # Standalone .COM export: a self-contained DOS player of the SELECTION,
-        # incl. percussion (which the .MCS/tracker output can't carry on the
-        # Tandy noise channel). The scope dropdown picks the on-screen display:
-        # none, 320x200 graphics, or lighter 80x25 text (60 fps on real Tandy).
-        tk.Label(btns, text="scope", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
-        self.com_scope = tk.StringVar(value="text 5")
-        ttk.Combobox(btns, textvariable=self.com_scope, width=9, state="readonly",
-                     values=("none", "graphics", "VGA 256", "text 1", "text 2",
-                             "text 3", "text 4", "text 5", "VU meters", "static screen")
-                     ).pack(side="left", padx=(0, 6))
-        # 4-voice-only: software mixing rate in Hz -- an editable box (type any
-        # value for your target), defaulting to 4000 for a real XT. Higher = better
-        # quality but needs a faster CPU (~24000 is ultrasonic, for DOSBox max).
-        tk.Label(btns, text="mix Hz", bg=_BG, fg=_ACCENT).pack(side="left", padx=(0, 4))
-        self.com_mix = tk.StringVar(value="4000")
-        ttk.Combobox(btns, textvariable=self.com_mix, width=7, state="normal",
-                     values=("4000", "6000", "9000", "12000", "16000", "24000")
-                     ).pack(side="left", padx=(0, 6))
-        tk.Button(btns, text="Export .COM", command=self._export_com).pack(
-            side="left", padx=(0, 6))
-        tk.Button(btns, text="Import…", command=self._do_import).pack(side="left")
+        # Import brings the UNIVERSAL song into the tracker; every output —
+        # .MCS, the .COM family, WAV — now lives in the main window's Export
+        # dialog, where the target is previewed and retracked before writing.
+        tk.Button(btns, text="⬆ Load into Tracker", command=self._do_import,
+                  font=("TkDefaultFont", 9, "bold")).pack(side="left")
         tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
         self._update_size()
 
@@ -963,17 +1044,25 @@ class ImportPreview(tk.Toplevel):
         for i in indices:
             tr = self.song.tracks[i]
             shift = 12 * int(self.octave[i].get())
-            nt = Track(name=tr.name, meta=dict(tr.meta))
+            nt = Track(name=tr.name, meta=dict(tr.meta), kind=tr.kind,
+                       waveform=tr.waveform, chip=tr.chip)
             for n in tr.notes:
                 # percussion clicks stay pinned to the floor: the octave knob
                 # exists to move a channel's MUSIC away from the drums
-                s = 0 if (n.is_rest or n.percussive) else shift
+                s = 0 if (n.is_rest or n.percussive or tr.kind != "tone") else shift
                 nt.add(NoteEvent(start_tick=n.start_tick,
                                  duration_ticks=n.duration_ticks,
                                  midi_note=n.midi_note + s,
+                                 velocity=n.velocity,
                                  is_rest=n.is_rest, tied=n.tied,
-                                 percussive=n.percussive))
+                                 percussive=n.percussive,
+                                 waveform=n.waveform,
+                                 effects=dict(n.effects)))
             out.add_track(nt)
+        # keep the raw-source handles so Export/optimize still work downstream
+        for attr in ("nsf_preview", "nsf_frames", "pt3_source", "percussion_pref"):
+            if hasattr(self.song, attr):
+                setattr(out, attr, getattr(self.song, attr))
         return out
 
     def encode_selection(self) -> bytes:
@@ -981,42 +1070,25 @@ class ImportPreview(tk.Toplevel):
         # cap: hold each measure to real MCS's 32-entry buffer so a busy import
         # never overflows. Meter: an explicit choice forces bar length, else
         # fit_meter picks the longest meter that fits. balance rescues density.
+        from ..retrack import retrack
         bar_ticks = self._meters[self.meter.get()]
-        return encode_song(self.selected_song(), tempo_byte0=self._tempo_byte0(),
+        return encode_song(retrack(self.selected_song(), "mcs"),
+                           tempo_byte0=self._tempo_byte0(),
                            cap=True, fit_meter=bar_ticks is None,
-                           bar_ticks=bar_ticks or 32, balance=True,
-                           voices=self._out_modes[self.out_mode.get()])
+                           bar_ticks=bar_ticks or 32, balance=True, voices=4)
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:
-        """Play the first seconds of the given channels through the synth.
-
-        Auditions the ACTUAL encoded output (round-tripped through the MCS
-        writer, cap and all), not the idealized source — so what you hear is
-        what the exported file / tracker plays. Previewing the raw extraction
-        instead let the preview sustain and sound notes the capped export drops,
-        which read as 'notes cut short' once loaded in MCS."""
+        """Play the first seconds of the given channels through the UNIVERSAL
+        synth: every track speaks its own waveform (NES duties, the stepped
+        triangle, the LFSR noise voice), at its notes' velocities. Target-shaped
+        previews — MCS-capped, speaker-multiplexed... — live in the Export
+        dialog, which reduces per target."""
         if not indices:
             return
-        from ..mcs.encode import encode_song
-        from ..mcs.reader import parse_bytes
-        mode = self.out_mode.get()
-        bar_ticks = self._meters[self.meter.get()]
         sel = self.selected_song(indices)
-        try:
-            data = encode_song(sel, tempo_byte0=self._tempo_byte0(), cap=True,
-                               fit_meter=bar_ticks is None, bar_ticks=bar_ticks or 32,
-                               balance=True, voices=self._out_modes[mode])
-            sel = parse_bytes(data)
-        except Exception:
-            pass                        # fall back to the raw selection on any
-            #                             encode hiccup rather than kill preview
         step = tick_seconds_for(self._tempo_byte0())
-        # Match the TARGET chip's timbre so the preview A/Bs what you'll hear:
-        # Tandy/PCjr = three independent square voices (clean polyphony); the PC
-        # speaker = one 1-bit channel (voices summed into the gritty multiplex).
-        waveform = "square" if "Tandy" in mode else "pcspeaker"
-        master, _, sr = render_song(sel, step_seconds=step, waveform=waveform)
+        master, _, sr = render_song(sel, step_seconds=step, waveform="auto")
         pcm = pcm16(master[:self._PREVIEW_SECONDS * sr])
         if pcm:
             self.app.player.play(pcm, sr,
@@ -1037,71 +1109,24 @@ class ImportPreview(tk.Toplevel):
                                  volume=self.app.volume.get() / 100.0)
 
     def _do_import(self) -> None:
+        """Load the SELECTION into the tracker as a universal Song — everything
+        the source expressed (waveforms, noise track, effects, velocities)
+        survives. Files are written later from the Export dialog, which reduces
+        per target with a preview."""
         self.app.player.stop()
         if not any(v.get() for v in self.include):
             messagebox.showwarning("Nothing selected",
                                    "Every channel is unchecked — nothing to import.",
                                    parent=self)
             return
-        data = self.encode_selection()
+        song = self.selected_song()
+        song.tempo_tick_seconds = tick_seconds_for(self._tempo_byte0())
+        song.title = song.title or os.path.basename(self.src)
         self.destroy()
-        self.app.save_and_load(data, self.src)
-
-    def _export_com(self) -> None:
-        """Save a standalone DOS .COM that plays the current selection — INCLUDING
-        percussion, which the .MCS/tracker output can't carry (the .COM plays it
-        on the Tandy noise channel). Target follows the "For" dropdown: Tandy (3
-        voices) or PC Speaker 1 Note; "scope" adds the oscilloscope (Tandy only)."""
-        self.app.player.stop()
-        if not any(v.get() for v in self.include):
-            messagebox.showwarning("Nothing selected",
-                                   "Every channel is unchecked — nothing to export.",
-                                   parent=self)
-            return
-        mcs = self.out_mode.get() == "PC Speaker 4 (MCS)"   # the MCS one-shot drive
-        sb = self.out_mode.get() == "SoundBlaster (4 voice)"  # real 8-bit DAC output
-        mode = {3: "tandy", 1: "1voice",
-                4: "4voice"}[self._out_modes[self.out_mode.get()]]
-        # Scopes: Tandy allows graphics + text; 4-voice allows text scopes (the
-        # graphics mode is Tandy-only); 1-voice has no per-channel data to show.
-        kind = self.com_scope.get()
-        if mode == "1voice" or (mode == "4voice" and kind == "graphics") \
-                or (mode != "4voice" and kind == "static screen"):
-            kind = "none"
-        mix_rate = None                              # 4-voice: parse the mix-Hz box
-        if mode == "4voice":
-            digits = "".join(c for c in self.com_mix.get() if c.isdigit())
-            mix_rate = int(digits) if digits else 4000
-        try:
-            from ..dosplayer import build_com
-            data = build_com(self.selected_song(), mode, self._tempo_byte0(),
-                             scope=(kind == "graphics"), mix_rate=mix_rate,
-                             mcs=mcs, sb=sb,
-                             text_scope=(8 if kind == "VGA 256" else
-                                         7 if kind == "static screen" else
-                                         6 if kind == "VU meters" else
-                                         5 if kind == "text 5" else
-                                         4 if kind == "text 4" else
-                                         3 if kind == "text 3" else
-                                         2 if kind == "text 2" else
-                                         1 if kind == "text 1" else 0))
-        except Exception as exc:                     # noqa: BLE001 - size/build errors
-            messagebox.showerror("Cannot build .COM", str(exc), parent=self)
-            return
-        default = _dos_name(os.path.splitext(os.path.basename(self.src))[0]) + ".COM"
-        out = filedialog.asksaveasfilename(
-            title="Export standalone .COM", defaultextension=".com",
-            initialdir=os.path.dirname(self.src), initialfile=default,
-            filetypes=[("DOS programs", "*.com *.COM")], parent=self)
-        if not out:
-            return
-        with open(out, "wb") as fh:
-            fh.write(data)
-        tip = " (run in DOSBox with machine=tandy)" if mode == "tandy" else ""
-        messagebox.showinfo(
-            "Exported .COM",
-            f"Wrote {os.path.basename(out)} — {len(data):,} bytes{tip}.",
-            parent=self)
+        self.app.load_song(song, label=os.path.basename(self.src))
+        self.app.status.configure(
+            text=f"Imported {os.path.basename(self.src)} — universal tracker "
+                 f"({len(song.tracks)} tracks). Use ⬇ Export… for .MCS/.COM/WAV.")
 
     def _close(self) -> None:
         self.app.player.stop()
