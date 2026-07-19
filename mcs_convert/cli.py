@@ -88,7 +88,10 @@ def _cmd_convert(args) -> int:
                              draw_skip=args.draw_skip, mcs=args.mcs,
                              sb=args.sb, sb_port=args.sb_port)
         else:                                        # the default .MCS song file
-            data = encode_song(song, tempo_byte0=byte0, cap=True)
+            # The universal Song may carry noise tracks / waveforms / effects MCS
+            # can't voice — retrack() reduces to 4 square voices + drum clicks.
+            from .retrack import retrack
+            data = encode_song(retrack(song, "mcs"), tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
         print(f"not yet implemented: {exc}", file=sys.stderr)
         return 2

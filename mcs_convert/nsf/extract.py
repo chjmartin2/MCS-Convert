@@ -56,6 +56,7 @@ class FrameLog:
     def __init__(self) -> None:
         self.pitched: List[List[Optional[int]]] = [[], [], []]   # p1, p2, tri (midi)
         self.freqs: List[List[float]] = [[], [], []]             # continuous Hz/frame
+        self.timbres: List[Tuple] = []       # per frame (p1duty, p1vol, p2duty, p2vol, trivol)
         self.noise_hits: List[Tuple[int, int]] = []
         self.dpcm_hits: List[int] = []
         self.frames = 0
@@ -117,6 +118,7 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
         for k in range(3):
             log.pitched[k].append(midis[k])
             log.freqs[k].append(freqs[k])
+        log.timbres.append(apu.pitched_timbres())
         log.frames = frame + 1
 
         if not detect_end:
@@ -160,6 +162,7 @@ def run_nsf(data: bytes, subsong: Optional[int] = None,
     for k in range(3):
         log.pitched[k] = log.pitched[k][:log.frames]
         log.freqs[k] = log.freqs[k][:log.frames]
+    log.timbres = log.timbres[:log.frames]
     return header, log
 
 
@@ -172,6 +175,11 @@ _CHANNEL_NAMES = ("Pulse 1", "Pulse 2", "Triangle")
 # (kick "boom") become the low bass. That two-tone mapping is what gives SMB's
 # converted drums the same kick/snare shuffle the hardware plays.
 _DRUM_BRIGHT_MAX = 7
+
+# Noise-track pitch mapping: midi = base - 3*period, so period 0 (brightest) is
+# midi 93 and period 15 (darkest) is 48; the bright/dark threshold (period 7)
+# lands exactly on the exporters' _DRUM_BRIGHT_MIDI = 72.
+_NOISE_MIDI_BASE = 93
 
 
 def _drum_pitches(drum_sound: str, period: int) -> Tuple[int, ...]:
@@ -368,11 +376,30 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
 
     title = header.song_name or "NSF"
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
-    for name, events in zip(_CHANNEL_NAMES, runs):
-        track = Track(name=name)
+    timbres = log.timbres
+    chip_info = (("nes-pulse", None), ("nes-pulse", None), ("nes-triangle", "nestri"))
+    for k, (name, events) in enumerate(zip(_CHANNEL_NAMES, runs)):
+        chip, fixed_wf = chip_info[k]
+        track = Track(name=name, chip=chip, waveform=fixed_wf or "pulse50")
+        duty_counts = [0, 0, 0, 0]
         for start, end, midi in _quantize_channel(events, fpt):
+            # Universal-tracker nuances: the duty + volume the APU held at the
+            # note's onset frame -> per-note waveform (pulse12/25/50/75) and
+            # velocity. The triangle has neither; it's always the 4-bit staircase.
+            frame = min(len(timbres) - 1, int(start * fpt)) if timbres else -1
+            wf, vel, effects = "", 100, {}
+            if frame >= 0 and k < 2:
+                duty, vol = timbres[frame][2 * k], timbres[frame][2 * k + 1]
+                wf = ("pulse12", "pulse25", "pulse50", "pulse75")[duty & 3]
+                vel = max(10, round((vol or 15) * 100 / 15))
+                effects["duty"] = duty & 3
+                duty_counts[duty & 3] += 1
             track.add(NoteEvent(start_tick=start, duration_ticks=end - start,
-                                midi_note=midi))
+                                midi_note=midi, velocity=vel, waveform=wf,
+                                effects=effects))
+        if k < 2 and any(duty_counts):              # the track default = majority duty
+            track.waveform = ("pulse12", "pulse25", "pulse50", "pulse75")[
+                max(range(4), key=duty_counts.__getitem__)]
         song.add_track(track)                       # kept even when empty: the
         #                                             import dialog shows 5 rows
     song.dropped_short = 0
@@ -383,25 +410,41 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
     # keep the frame log so changing the tempo can REQUANTIZE (frames_to_song
     # again) instead of re-running the whole emulation
     song.nsf_frames = (header, log, subsong, percussion, drum_sound)
+    # retrack() reads these when reducing for MCS/Tandy targets
+    song.percussion_pref = (percussion, drum_sound)
 
-    # Noise carries a per-hit period index -> in "auto" it splits into two drum
-    # tones (kick/hat); DPCM has no period, so it uses low bass under "auto".
-    noise_pairs = [(f, p) for f, p in log.noise_hits]
-    dpcm_pairs = [(f, 15) for f in log.dpcm_hits]   # 15 => dark (low bass) in auto
-    for name, hits in (("Noise", noise_pairs), ("DPCM", dpcm_pairs)):
-        track = Track(name=name)
-        if percussion != "drop":
-            last = -1
-            for f, period in hits:
-                tick = round(f / fpt)
-                if tick == last:                    # one hit per tick is plenty
-                    continue
-                last = tick
-                for midi in _drum_pitches(drum_sound, period):
-                    track.add(NoteEvent(start_tick=tick, duration_ticks=1,
-                                        midi_note=midi, percussive=True))
-        track.meta["drum_notes"] = len(track.notes)
-        song.add_track(track)
+    # The NOISE channel is now a first-class kind="noise" track (the universal
+    # tracker keeps the real thing); midi encodes the period's brightness
+    # (93 - 3*period: p=0 brightest hiss, p=15 darkest rumble) so the synth's
+    # LFSR voice and the exporters' bright/dark split both read it directly.
+    # Converting to MCS drum CLICKS happens at retrack/export time, not here.
+    noise = Track(name="Noise", kind="noise", chip="nes-noise", waveform="noise")
+    if percussion != "drop":
+        last = -1
+        for f, period in log.noise_hits:
+            tick = round(f / fpt)
+            if tick == last:                        # one hit per tick is plenty
+                continue
+            last = tick
+            noise.add(NoteEvent(start_tick=tick, duration_ticks=1,
+                                midi_note=_NOISE_MIDI_BASE - 3 * (period & 15),
+                                effects={"nesperiod": period & 15}))
+    noise.meta["drum_notes"] = len(noise.notes)
+    song.add_track(noise)
+    # DPCM sample hits have no pitch/period: keep them as dark drum hits.
+    dpcm = Track(name="DPCM", kind="drum", chip="nes-dpcm", waveform="noise")
+    if percussion != "drop":
+        last = -1
+        for f in log.dpcm_hits:
+            tick = round(f / fpt)
+            if tick == last:
+                continue
+            last = tick
+            dpcm.add(NoteEvent(start_tick=tick, duration_ticks=1,
+                               midi_note=_NOISE_MIDI_BASE - 3 * 15,
+                               percussive=True))
+    dpcm.meta["drum_notes"] = len(dpcm.notes)
+    song.add_track(dpcm)
     return song, byte0
 
 

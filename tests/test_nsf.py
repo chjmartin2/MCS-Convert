@@ -55,21 +55,42 @@ def test_extracts_pitch_length_and_drums(nsf_path):
     p1 = by["Pulse 1"].notes
     assert len(p1) == 1
     assert p1[0].midi_note == 69                 # period $FD -> ~440.4 Hz -> A4
+    # universal-tracker nuances: duty index 1 ($4000=$1F -> bits 6-7 = 0) ...
+    assert by["Pulse 1"].chip == "nes-pulse"
+    assert p1[0].waveform in ("pulse12", "pulse25", "pulse50", "pulse75")
+    assert "duty" in p1[0].effects
+    assert by["Triangle"].waveform == "nestri"
     # length index 1 -> 254 half-frame clocks -> ~127 frames of sound
     ticks_per_frame = p1[0].duration_ticks / 127
     assert 0.15 <= ticks_per_frame <= 0.55       # fpt between 2 and 6
-    noise = by["Noise"].notes
-    assert noise and all(n.percussive for n in noise)
+    # the noise channel is a first-class noise TRACK now (not clicks): period 5
+    # (bright) -> midi 93 - 3*5 = 78, kind "noise", not percussive
+    noise_t = by["Noise"]
+    assert noise_t.kind == "noise" and noise_t.chip == "nes-noise"
+    assert noise_t.notes and noise_t.notes[0].midi_note == 78
+    assert noise_t.notes[0].effects.get("nesperiod") == 5
     assert not by["Pulse 2"].notes and not by["Triangle"].notes
     assert 0x77 <= byte0 <= 0x92
 
 
-def test_percussion_drop_and_block(nsf_path):
+def test_percussion_drop_and_retrack_clicks(nsf_path):
     song, _ = extract_song(nsf_path, percussion="drop")
     assert not {t.name: t for t in song.tracks}["Noise"].notes
-    song, _ = extract_song(nsf_path, drum_sound="block")
-    hits = {t.name: t for t in song.tracks}["Noise"].notes
-    assert [n.midi_note for n in hits] == [62]   # single wood-block tick
+    # drum clicks are now an EXPORT-side reduction: retrack(song, "mcs") turns
+    # the noise track into register-extreme click notes (the classic converter).
+    from mcs_convert.retrack import retrack
+    song, _ = extract_song(nsf_path)
+    mcs = retrack(song, "mcs", drum_sound="block")
+    drums_t = {t.name: t for t in mcs.tracks}["Drums"]
+    assert [n.midi_note for n in drums_t.notes] == [62]   # single wood-block tick
+    assert all(n.percussive for n in drums_t.notes)
+    # "auto" splits bright/dark: period 5 is bright -> hi-hat E7 (100)
+    auto = retrack(song, "mcs", drum_sound="auto")
+    assert [n.midi_note for n in {t.name: t for t in auto.tracks}["Drums"].notes] == [100]
+    # tandy keeps a native noise voice instead of clicks
+    tandy = retrack(song, "tandy")
+    nz = [t for t in tandy.tracks if t.kind == "noise"][0]
+    assert nz.notes and nz.notes[0].midi_note == 100      # bright hit
 
 
 def test_explicit_length_disables_detection(nsf_path):

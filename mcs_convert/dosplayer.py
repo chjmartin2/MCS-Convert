@@ -102,12 +102,14 @@ def _render_static_poster(song: Song) -> bytes:
     W, H = 320, 200
     px = [[0] * W for _ in range(H)]
     tone = [[], [], []]                             # (start, end, midi) per tone voice
-    for vi in range(min(3, len(song.tracks))):
-        for n in song.tracks[vi].notes:
-            if not n.is_rest and n.midi_note:
+    tone_tracks = [t for t in song.tracks
+                   if getattr(t, "kind", "tone") == "tone"]
+    for vi, t in enumerate(tone_tracks[:3]):
+        for n in t.notes:
+            if not n.is_rest and n.midi_note and not n.percussive:
                 tone[vi].append((n.start_tick, n.end_tick, n.midi_note))
-    perc = [n.start_tick for t in song.tracks[3:] for n in t.notes
-            if n.percussive and not n.is_rest]
+    perc = [n.start_tick for t in song.tracks for n in t.notes if not n.is_rest
+            and (n.percussive or getattr(t, "kind", "tone") in ("noise", "drum"))]
     allnotes = [x for v in tone for x in v]
     if not allnotes:
         return bytes(0x4000)
@@ -286,9 +288,18 @@ def _spk_note_off() -> List[Tuple[int, int]]:
 # --- event stream (all in SUB-ticks) -----------------------------------------
 
 def _split_notes(song: Song):
-    """(per-track pitched events, percussion hits [(start_tick, midi)])."""
+    """(per-track pitched events, percussion hits [(start_tick, midi)]).
+
+    Universal-tracker aware: kind="noise"/"drum" tracks are percussion sources
+    wholesale (their notes' pitch carries the bright/dark split), and percussive
+    notes on tone tracks join them; everything else is pitched material."""
     per_track, perc = [], []
     for t in song.tracks:
+        if getattr(t, "kind", "tone") in ("noise", "drum"):
+            for n in t.notes:
+                if not n.is_rest:
+                    perc.append((n.start_tick, n.midi_note))
+            continue
         per_track.append(_note_events([n for n in t.notes if not n.percussive]))
         for n in t.notes:
             if n.percussive and not n.is_rest:

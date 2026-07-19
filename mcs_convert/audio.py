@@ -73,32 +73,92 @@ def tempo_bpm(tick_seconds: float) -> float:
     return 60.0 / (8.0 * tick_seconds)
 
 
+#: NES pulse duty fractions by universal waveform name (square == pulse50).
+_DUTIES = {"pulse12": 0.125, "pulse25": 0.25, "pulse50": 0.5, "pulse75": 0.75}
+
+
 def _wave(phase: np.ndarray, waveform: str) -> np.ndarray:
+    """One cycle-normalized oscillator for every universal waveform name."""
+    if waveform in _DUTIES:                          # NES pulse duty cycles
+        return np.where(np.mod(phase, 1.0) < _DUTIES[waveform], 1.0, -1.0
+                        ).astype(np.float32)
     if waveform == "square":
         return np.sign(np.sin(2 * np.pi * phase)).astype(np.float32)
     if waveform == "triangle":
         return (2.0 * np.abs(2.0 * (phase - np.floor(phase + 0.5))) - 1.0).astype(np.float32)
+    if waveform == "nestri":                         # NES triangle: 4-bit staircase
+        tri = 2.0 * np.abs(2.0 * (phase - np.floor(phase + 0.5))) - 1.0
+        return (np.round((tri + 1.0) * 7.5) / 7.5 - 1.0).astype(np.float32)
     return np.sin(2 * np.pi * phase).astype(np.float32)  # sine
 
 
-def _render_track(events: List[Tuple[int, int, int]], sr: int, step: float,
-                  amp: float, waveform: str) -> np.ndarray:
-    """Render (start_tick, duration_ticks, midi) events at their absolute positions.
+# A maximal 15-bit LFSR bit sequence (the NES noise generator), precomputed once:
+# 32767 pseudo-random bits we resample at the note's clock rate.
+_LFSR_BITS = None
+
+
+def _lfsr_bits() -> np.ndarray:
+    global _LFSR_BITS
+    if _LFSR_BITS is None:
+        reg, out = 1, np.empty(32767, dtype=np.float32)
+        for i in range(32767):
+            bit = (reg ^ (reg >> 1)) & 1
+            reg = (reg >> 1) | (bit << 14)
+            out[i] = 1.0 if (reg & 1) else -1.0
+        _LFSR_BITS = out
+    return _LFSR_BITS
+
+
+def _render_noise_track(events, sr: int, step: float, amp: float) -> np.ndarray:
+    """A kind="noise" track: LFSR noise whose shift clock follows the note's pitch
+    (midi -> freq x 64), so high notes hiss and low notes rumble — the universal
+    noise voice (NES noise channel, AY noise)."""
+    if not events:
+        return np.zeros(1, dtype=np.float32)
+    total = int(max(s + d for s, d, *_ in events) * step * sr)
+    out = np.zeros(max(total, 1), dtype=np.float32)
+    bits = _lfsr_bits()
+    fade = max(1, int(0.004 * sr))
+    for ev in events:
+        start, dur, midi = ev[0], ev[1], ev[2]
+        vel = ev[3] if len(ev) > 3 else 100
+        pos = int(start * step * sr)
+        ns = int(dur * step * sr)
+        if ns <= 0:
+            continue
+        clock = midi_to_freq(midi) * 64.0            # LFSR shifts per second
+        idx = (np.arange(ns, dtype=np.float64) * clock / sr).astype(np.int64) % len(bits)
+        seg = bits[idx] * (amp * vel / 100.0)
+        f = min(fade, ns // 2)
+        if f > 0:
+            seg[:f] *= np.linspace(0.0, 1.0, f, dtype=np.float32)
+            seg[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
+        out[pos:pos + ns] += seg
+    return out
+
+
+def _render_track(events, sr: int, step: float, amp: float, waveform: str) -> np.ndarray:
+    """Render note events at their absolute positions. Events are (start, dur, midi)
+    or the richer (start, dur, midi, velocity, waveform) — the per-note waveform
+    (when non-empty) overrides the track default, velocity scales the amplitude.
 
     Placement is by start_tick (not cumulative), so chords overlap and a staff that
     sits out a measure stays silent for it. Rests need no events — silence is the
     default between placed notes.
     """
-    total_samples = int(max(s + d for s, d, _ in events) * step * sr)
+    total_samples = int(max(e[0] + e[1] for e in events) * step * sr)
     out = np.zeros(max(total_samples, 1), dtype=np.float32)
     fade = max(1, int(0.006 * sr))
-    for start, dur, midi in events:
+    for ev in events:
+        start, dur, midi = ev[0], ev[1], ev[2]
+        vel = ev[3] if len(ev) > 3 else 100
+        wf = (ev[4] if len(ev) > 4 and ev[4] else waveform)
         pos = int(start * step * sr)
         ns = int(dur * step * sr)
         if ns <= 0:
             continue
         t = np.arange(ns, dtype=np.float32) / sr
-        seg = amp * _wave(midi_to_freq(midi) * t, waveform)
+        seg = (amp * vel / 100.0) * _wave(midi_to_freq(midi) * t, wf)
         # short linear fades to kill clicks between notes
         f = min(fade, ns // 2)
         if f > 0:
@@ -106,6 +166,15 @@ def _render_track(events: List[Tuple[int, int, int]], sr: int, step: float,
             seg[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
         out[pos:pos + ns] += seg
     return out
+
+
+def _full_events(notes: List[NoteEvent]):
+    """Like _note_events but keeping velocity + per-note waveform:
+    (start, dur, midi, velocity, waveform). Tied same-pitch chains merge."""
+    merged = _note_events(notes)
+    detail = {(n.start_tick, n.midi_note): (n.velocity, n.waveform)
+              for n in notes if not n.is_rest}
+    return [(s, d, m, *detail.get((s, m), (100, ""))) for s, d, m in merged]
 
 
 def _render_pcspeaker(events: List[Tuple[int, int, int]], sr: int, step: float) -> np.ndarray:
@@ -280,6 +349,29 @@ def render_song(song: Song, sample_rate: int = 22050, step_seconds: float = 0.06
         voices = [_render_voice_bits(c, sample_rate, step_seconds, len(master))
                   for c in chans]
         return master, voices, sample_rate
+    if waveform == "auto":
+        # UNIVERSAL render: each track speaks its own waveform (NES duties, the
+        # stepped triangle, LFSR noise...) at its notes' velocities — the voices
+        # returned are PER TRACK, however many there are.
+        bufs = []
+        for tr in song.tracks:
+            evs = _full_events(tr.notes)
+            if not evs:
+                bufs.append(silent)
+            elif tr.kind == "noise":
+                bufs.append(_render_noise_track(evs, sample_rate, step_seconds,
+                                                amplitude * 0.8))
+            else:
+                bufs.append(_render_track(evs, sample_rate, step_seconds,
+                                          amplitude, tr.waveform or waveform))
+        length = max(len(b) for b in bufs)
+        mix = np.zeros(length, dtype=np.float32)
+        for b in bufs:
+            mix[:len(b)] += b
+        peak = float(np.max(np.abs(mix))) or 1.0
+        gain = 0.9 / peak
+        voices = [np.pad(b, (0, length - len(b))) * gain for b in bufs]
+        return mix * gain, voices, sample_rate
     bufs = [_render_track(c, sample_rate, step_seconds, amplitude, waveform) if c else silent
             for c in chans]
     length = max(len(b) for b in bufs)

@@ -199,3 +199,11 @@ class APUState:
         """(pulse1, pulse2, triangle) continuous Hz (0 = silent) — keeps the
         per-frame vibrato/slide that rounding to a MIDI note would erase."""
         return (self.pulse[0].freq(), self.pulse[1].freq(), self.triangle.freq())
+
+    def pitched_timbres(self):
+        """(p1_duty, p1_vol, p2_duty, p2_vol, tri_vol) this frame — the universal-
+        tracker nuances: pulse duty index 0-3 ($4000/$4004 bits 6-7) and current
+        envelope/constant volume 0-15 (triangle has no volume; 15 while sounding)."""
+        p1, p2 = self.pulse
+        return (p1.duty_reg >> 6, p1.volume(), p2.duty_reg >> 6, p2.volume(),
+                15 if self.triangle.sounding() else 0)

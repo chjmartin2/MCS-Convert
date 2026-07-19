@@ -65,12 +65,24 @@ class _Channel:
         self.ornament = 0
         self.sample = 1              # current PT3 sample (instrument table)
         self.last_noise = None       # last noise period set on this channel
-        self.notes: List[Tuple] = []             # (row, note_index, sample, noise)
+        self.envelope = None         # active hardware-envelope shape (None = off)
+        self.volume = 15             # channel volume 0-15 ($C1-$CF)
+        self.notes: List[Tuple] = []             # (row, note_index, sample, noise, fx)
         self.offs: List[int] = []                # rows where the channel went silent
         self.noise_cmds = 0          # $20-$3F noise sets seen (percussion signal)
 
-    def note_on(self, row: int, index: int, orn_base: int) -> None:
-        self.notes.append((row, index + orn_base, self.sample, self.last_noise))
+    def note_on(self, row: int, index: int, orn_base: int,
+                fx: Optional[dict] = None) -> None:
+        # Capture the universal-tracker nuances alongside the note: ornament,
+        # hardware envelope, channel volume, and any line effects (see model.py
+        # for the nomenclature).
+        eff = dict(fx or {})
+        if self.ornament:
+            eff["orn"] = self.ornament
+        if self.envelope is not None:
+            eff["env"] = self.envelope
+        self.notes.append((row, index + orn_base, self.sample, self.last_noise,
+                           self.volume, eff))
 
     def note_off(self, row: int) -> None:
         self.offs.append(row)
@@ -130,7 +142,8 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
             ch.sample = data[pos] // 2
             pos += 1
             continue
-        if 0x11 <= b <= 0x1F:                        # env period(2)+delay? +sample
+        if 0x11 <= b <= 0x1F:                        # envelope shape + period + sample
+            ch.envelope = b & 0x0F                   # the hardware-envelope shape
             ch.sample = data[pos + 3] // 2
             pos += 4
             continue
@@ -142,15 +155,18 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
             ch.ornament = b & 0x0F
             continue
         if 0xB0 == b:                                # env off, orn reset
+            ch.envelope = None
             continue
         if b == 0xB1:
             ch.skip = data[pos]
             pos += 1
             continue
-        if 0xB2 <= b <= 0xBF:
-            pos += 2                                # envelope period
+        if 0xB2 <= b <= 0xBF:                        # envelope shape + period
+            ch.envelope = (b - 0xB1) & 0x0F
+            pos += 2
             continue
-        if 0xC1 <= b <= 0xCF:                        # volume
+        if 0xC1 <= b <= 0xCF:                        # channel volume 1-15
+            ch.volume = b & 0x0F
             continue
         if 0xD1 <= b <= 0xEF:                        # set sample
             ch.sample = b - 0xD0
@@ -161,18 +177,39 @@ def _decode_pattern(data: bytes, addr: int, ch: _Channel, orn_base,
             pos += 1
             continue
         # --- line enders: a note, note-off, or empty line ---------------------
+        note_row = None
         if 0x50 <= b <= 0xAF:
-            ch.note_on(ch.row, b - 0x50, orn_base(ch.ornament))
+            note_row = (ch.row, b - 0x50)
         elif b == 0xC0:
             ch.note_off(ch.row)
         elif b != 0xD0:                              # $D0 = empty line (sustain)
             raise PT3Error(f"unknown pattern byte 0x{b:02x} at 0x{pos - 1:x}")
+        # Effect parameter bytes follow the line ender; name them with the
+        # universal nomenclature (model.py) so nothing the module expressed is
+        # lost: 1=tone slide, 2=portamento, 3=sample offset, 4=ornament offset,
+        # 5=vibrato, 8=envelope slide, 9=set speed.
+        fx_named: dict = {}
         for fx in pending_fx:
             n = _FX_PARAMS.get(fx, 0)
             if fx == _FX_SET_SPEED:
                 speed_changes.append((ch.row, data[pos]))
+            elif fx == 0x01 and n >= 3:              # delay + signed 16-bit step
+                step = int.from_bytes(data[pos + 1:pos + 3], "little", signed=True)
+                fx_named["slide"] = step
+            elif fx == 0x02:
+                fx_named["porta"] = data[pos] if n else 0
+            elif fx == 0x03:
+                fx_named["sampfx"] = data[pos]
+            elif fx == 0x04:
+                fx_named["ornfx"] = data[pos]
+            elif fx == 0x05 and n >= 2:
+                fx_named["vib"] = (data[pos], data[pos + 1])
+            elif fx == 0x08:
+                fx_named["envslide"] = 1
             pos += n
         pending_fx = []
+        if note_row is not None:
+            ch.note_on(note_row[0], note_row[1], orn_base(ch.ornament), fx_named)
         ch.row += ch.skip
     return ch.row - start_row
 
@@ -325,7 +362,7 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
     # samples are drums unconditionally.
     usage: Dict[int, set] = {}
     for ch in chans:
-        for _, idx, sample, _ in ch.notes:
+        for row_, idx, sample, *_rest in ch.notes:
             usage.setdefault(sample, set()).add(idx)
 
     def is_drum(sample: int) -> bool:
@@ -354,11 +391,14 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
 
     drum_sample = [is_drum(s) for s in range(32)]
     for name, ch in zip("ABC", chans):
-        track = Track(name=f"AY {name}")
+        track = Track(name=f"AY {name}", chip="ay-tone", waveform="square")
         drum_count = 0
         events = sorted(ch.notes)
         offs = sorted(ch.offs)
-        for i, (row, idx, sample, noise) in enumerate(events):
+        for i, ev in enumerate(events):
+            row, idx, sample, noise = ev[0], ev[1], ev[2], ev[3]
+            volume = ev[4] if len(ev) > 4 else 15
+            effects = dict(ev[5]) if len(ev) > 5 and ev[5] else {}
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
             if 0 <= sample < 32 and drum_sample[sample]:
@@ -382,8 +422,14 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
                 audible = _sample_audible_ticks(data, sample, ticks_per_row, delay)
                 if audible is not None:
                     dur = min(dur, audible)
+            if noise is not None:
+                effects.setdefault("aynoise", noise)   # explicit AY noise period
+            if sample and sample != 1:
+                effects.setdefault("sampfx", sample)   # non-default instrument
             track.add(NoteEvent(start_tick=row * ticks_per_row,
-                                duration_ticks=dur, midi_note=midi))
+                                duration_ticks=dur, midi_note=midi,
+                                velocity=max(10, round(volume * 100 / 15)),
+                                effects=effects))
         track.meta["noise_cmds"] = ch.noise_cmds
         track.meta["drum_notes"] = drum_count
         if track.notes:

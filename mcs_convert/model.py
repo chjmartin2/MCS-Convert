@@ -1,18 +1,53 @@
-"""The intermediate representation both ends talk through.
+"""The intermediate representation both ends talk through — the UNIVERSAL TRACKER.
 
-The NSF side *produces* a `Song`; the MCS side *consumes* one. Keeping a neutral model
-in the middle means adding a new input (e.g. VGM, MIDI) or a new output later doesn't
-require touching the other end.
+Importers (*NSF, PT3, MCS, future formats*) *produce* a `Song` capturing every
+nuance the source expresses — waveforms, duty cycles, volumes, effects, noise
+voices, any number of tracks. Exporters *consume* one, enforcing their own
+constraints at export time (MCS: 4 square voices on a notation grid; Tandy: 3
+squares + noise; SoundBlaster: any waveform...). The model itself never limits.
 
-Timing is expressed in absolute *ticks*. One tick = one player call (one video frame for
-a standard NSF: ~1/60 s NTSC). `Song.tick_hz` records the real-world rate so the MCS
-writer can quantize durations to notation values.
+Timing is expressed in absolute *ticks*. One tick = one player call (one video frame
+for a standard NSF: ~1/60 s NTSC). `Song.tick_hz` records the real-world rate so the
+MCS writer can quantize durations to notation values.
+
+Waveform names (Track.waveform, NoteEvent.waveform override):
+    "square"    50% pulse (== pulse50)          "sine"      pure sine
+    "triangle"  ideal triangle                  "nestri"    NES 4-bit stepped triangle
+    "pulse12"   NES 12.5% duty pulse            "pulse25"   NES 25% duty pulse
+    "pulse50"   NES 50% duty pulse              "pulse75"   NES 75% duty (25% inverted)
+    "noise"     LFSR white noise (pitch sets the shift-clock rate)
+    "pcspeaker" the 1-bit delta-sigma ensemble render (render-level, not per-voice)
+
+Effects nomenclature (NoteEvent.effects keys — the universal vocabulary):
+    PT3 / AY-3-8910:
+        "orn": N       ornament number (arpeggio table cycling relative semitones)
+        "env": shape   hardware envelope shape 0-15 driving the note's timbre
+        "envper": P    hardware envelope period
+        "slide": +/-N  tone slide, semitones per row (PT3 effect 1/2)
+        "porta": N     portamento toward the note over N rows (PT3 effect 3)
+        "sampfx": N    sample number when it shapes timbre beyond volume
+    NES / 2A03:
+        "duty": 0-3    pulse duty index (12.5/25/50/75%) — also mirrored in
+                       NoteEvent.waveform as pulse12/25/50/75
+        "sweep": reg   $4001/$4005 sweep-unit register when active
+        "decay": 1     envelope (non-constant volume) was driving this note
+    Generic:
+        "vib": (speed, depth)   vibrato
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+#: Track.kind values
+KIND_TONE = "tone"          # a pitched melodic voice
+KIND_NOISE = "noise"        # an LFSR noise voice (NES noise channel, AY noise)
+KIND_DRUM = "drum"          # synthesized percussion clicks (legacy percussive path)
+
+#: All waveform names the synth understands (see module docstring).
+WAVEFORMS = ("square", "triangle", "sine", "nestri",
+             "pulse12", "pulse25", "pulse50", "pulse75", "noise")
 
 
 @dataclass
@@ -28,6 +63,8 @@ class NoteEvent:
     octave: int = 0          # 1 if under an 8va (MCS 0x12; the engine only shifts up)
     percussive: bool = False  # a synthesized drum click: pinned to the floor, exempt
     #                           from octave shifts (importers set this, e.g. AY noise)
+    waveform: str = ""       # per-note waveform override ("" = the track's default)
+    effects: dict = field(default_factory=dict)   # universal effects (module docstring)
 
     @property
     def end_tick(self) -> int:
@@ -36,11 +73,18 @@ class NoteEvent:
 
 @dataclass
 class Track:
-    """One monophonic voice (e.g. NES pulse 1). Notes are time-ordered, non-overlapping."""
+    """One monophonic voice (e.g. NES pulse 1). Notes are time-ordered, non-overlapping.
+
+    A Song may carry ANY number of tracks; exporters that support fewer voices
+    reduce at export time (that's the "retrack" step), never at import."""
 
     name: str
     notes: List[NoteEvent] = field(default_factory=list)
     meta: dict = field(default_factory=dict)   # importer hints (e.g. noise usage)
+    kind: str = KIND_TONE                      # tone / noise / drum
+    waveform: str = "square"                   # default synth waveform for this track
+    chip: str = ""                             # provenance: "nes-pulse", "nes-triangle",
+    #                                            "nes-noise", "ay-tone", "mcs", ...
 
     def add(self, note: NoteEvent) -> None:
         self.notes.append(note)
