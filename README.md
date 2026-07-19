@@ -1,8 +1,39 @@
 # MCS-Convert
 
-A player, viewer, and fully reverse-engineered format spec for **Will Harvey's
-Music Construction Set** (IBM-PC, 1984) — the first pieces of a fully
-functional tracker editor and converter for various music formats.
+A **universal chiptune tracker and converter**, built around a byte-exact
+reverse-engineering of **Will Harvey's Music Construction Set** (IBM-PC, 1984).
+Import NES (`.nsf`), Vortex Tracker (`.pt3`), or MCS songs into one neutral
+tracker that preserves *every* nuance — waveforms, duty cycles, per-note
+volumes, effects, a real noise voice — then **export** to any of a dozen
+targets (the original `.MCS` format, standalone DOS `.COM` players for Tandy /
+PC-speaker / SoundBlaster, or WAV), each reduced to what that hardware can
+actually play.
+
+## New in v1.0 — the universal tracker
+
+- **One model, every nuance.** Imports no longer flatten to four square voices.
+  A song can carry any number of tracks (including dedicated **noise** voices),
+  each with its own waveform — NES pulse duties (12.5/25/50/75%), the 4-bit
+  stepped NES triangle, LFSR noise — plus per-note velocities and a universal
+  **effects vocabulary** (PT3 ornaments / envelopes / slides / vibrato, NES
+  duty / sweep).
+- **Export lives after play.** Load a song, audition it, then open the **Export
+  dialog**: pick a target, *preview it through that target's constraints*,
+  **Retrack** it back into the tracker to see exactly what you'll get, and write
+  the file.
+- **Retrack.** Every exporter reduces the universal song to its own limits at
+  export time (`retrack.py`) — MCS gets 4 square voices + register-extreme drum
+  clicks; Tandy/PC-speaker get 3 tones + a native noise voice; SoundBlaster
+  *keeps* the real waveforms.
+- **Waveforms reach DOS.** SoundBlaster `.COM`s play sine / triangle / NES
+  waveforms through a wavetable on the 8-bit DAC; the PC speaker models
+  non-square waveforms via high-rate multi-level PWM.
+- **Live visualization windows.** Oscilloscope, **VU meters**, **spectrum
+  analyzer**, and a **DOS-replica preview** that mirrors the `.COM` scope you're
+  about to build — all open alongside playback.
+
+The MCS format itself remains fully documented and byte-exact (see below); it's
+now one target among many rather than the whole program.
 
 MCS was one of the first music notation programs for home computers. Its
 `.MCS`/`.MCD` song format was never documented — until now. This project
@@ -180,11 +211,14 @@ mcs_convert/
   mcs/reader.py     .MCS/.MCD -> Song   (the decoded format lives here)
   mcs/writer.py     Song -> .MCS        (round-trips all samples byte-identically)
   dosplayer.py      Song -> standalone DOS .COM (Tandy / PC speaker / SoundBlaster + scopes)
-  model.py          Song / Track / NoteEvent  (the neutral middle)
+  retrack.py        reduce a universal Song to a target's capabilities (export-time)
+  model.py          Song / Track / NoteEvent — the UNIVERSAL tracker (waveforms, effects, N tracks)
+  gui/export.py     the Export dialog (target choice, constrained preview, retrack)
+  gui/viz.py        VU / spectrum / DOS-replica visualization windows
   nsf/              NSF header/APU/6502 emulation (NES converter input)
 docs/               the format spec + architecture notes
 tools/              disk-image and test-song utilities
-tests/              139 tests, including engine ground-truth checks
+tests/              157 tests, including engine ground-truth checks
 ```
 
 ## Development
