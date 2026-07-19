@@ -743,7 +743,7 @@ class ImportPreview(tk.Toplevel):
             row = 2 + i
             tk.Checkbutton(self, variable=keep, bg=_BG, activebackground=_BG,
                            selectcolor="#2a2e3a",
-                           command=self._update_size).grid(row=row, column=0)
+                           command=self._update_stats).grid(row=row, column=0)
             tk.Label(self, text=tr.name, bg=_BG, fg=_FG).grid(row=row, column=1)
             labels = {}
             for col, key in ((2, "count"), (3, "range"), (4, "noise"),
@@ -758,7 +758,7 @@ class ImportPreview(tk.Toplevel):
             oct_box = ttk.Combobox(self, textvariable=var, width=3, state="readonly",
                                    values=("+2", "+1", "0", "-1", "-2"))
             oct_box.grid(row=row, column=8, padx=(2, 10))
-            oct_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
+            oct_box.bind("<<ComboboxSelected>>", lambda _e: self._update_stats())
         tk.Label(self, text="8va", bg=_BG, fg=_ACCENT,
                  font=("TkDefaultFont", 8)).grid(row=1, column=8)
         self._update_stats()
@@ -821,40 +821,13 @@ class ImportPreview(tk.Toplevel):
                            activebackground=_BG, activeforeground=_FG,
                            selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
 
-        # Tempo/Speed — for NSF this is a PURE PLAYBACK-SPEED dial: the import
-        # already quantizes onto a beat-aligned grid (base note = a 16th), and
-        # this just re-stamps the tempo byte the file plays at. To re-fit the grid
-        # for the tightest beat alignment, use "Exhaustive Optimize".
+        # Universal import: the song stays at the auto-fitted grid and its real
+        # source speed. BPM/grid quantization is a TARGET concern now — the
+        # tempo picker, meter, optimizers, and .MCS size estimate all live in
+        # the Export dialog, where they apply at retrack/export time.
         bar = tk.Frame(self, bg=_BG)
         bar.grid(row=base + 1, column=0, columnspan=9, sticky="w",
                  padx=10, pady=(8, 2))
-        tk.Label(bar, text="Tempo" if not self.is_nsf else "Speed",
-                 bg=_BG, fg=_ACCENT).pack(side="left")
-        self._tempos = [0x77 + 3 * s for s in range(10)]
-        # MCS's ten tempos, labelled by their actual BPM. For NSF the auto-
-        # detected one is flagged as the real NES speed; picking another just
-        # changes the playback speed (see _on_tempo).
-        labels = [f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
-                  + (" (real NES)" if self.is_nsf and b == byte0 else "")
-                  for b in self._tempos]
-        self._tempo_labels = labels
-        self.tempo = tk.StringVar(value=labels[self._tempos.index(byte0)])
-        tempo_box = ttk.Combobox(bar, textvariable=self.tempo, width=20,
-                                 state="readonly", values=labels)
-        tempo_box.pack(side="left", padx=(6, 16))
-        tempo_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tempo())
-        # (Output targets moved to the main window's Export dialog — import now
-        # loads the UNIVERSAL song; the size readout below estimates the .MCS.)
-        # Meter: Auto picks the longest meter that fits (2/4 if a dense song needs
-        # it); or force one. Shorter measures = more per-measure buffer = fewer
-        # drops, at the cost of more barlines.
-        tk.Label(bar, text="Meter", bg=_BG, fg=_ACCENT).pack(side="left", padx=(12, 4))
-        self._meters = {"Auto": None, "2/4": 16, "3/4": 24, "4/4": 32, "6/8": 48}
-        self.meter = tk.StringVar(value="Auto")
-        meter_box = ttk.Combobox(bar, textvariable=self.meter, width=5,
-                                 state="readonly", values=list(self._meters))
-        meter_box.pack(side="left")
-        meter_box.bind("<<ComboboxSelected>>", lambda _e: self._update_size())
         tk.Button(bar, text="▶ Preview selection", command=lambda: self._audition(
             [i for i, v in enumerate(self.include) if v.get()])).pack(side="left")
         if self.is_nsf:
@@ -863,35 +836,15 @@ class ImportPreview(tk.Toplevel):
         tk.Button(bar, text="■ Stop", command=self.app.player.stop).pack(
             side="left", padx=(4, 0))
 
-        # Two re-fit buttons. Exhaustive Optimize searches every tempo × ticks-
-        # per-unit for the globally tightest alignment. Optimize with Current
-        # Settings re-sequences to the BPM you picked — a faster BPM gives the
-        # base note more ticks (finer grid, tighter syncopation) and nudges the
-        # speed the minimal amount to stay near the real NES rate.
-        optbar = tk.Frame(self, bg=_BG)
-        optbar.grid(row=base + 2, column=0, columnspan=9, sticky="w",
-                    padx=10, pady=(2, 2))
-        self.opt_label = tk.Label(optbar, bg=_BG, fg=_FG, font=("TkDefaultFont", 8))
-        tk.Button(optbar, text="⌖ Exhaustive Optimize",
-                  command=self._optimize).pack(side="left")
-        tk.Button(optbar, text="⌖ Optimize with Current Settings",
-                  command=self._optimize_current).pack(side="left", padx=(4, 0))
-        self.opt_label.pack(side="left", padx=(10, 0))
-
         btns = tk.Frame(self, bg=_BG)
         btns.grid(row=base + 3, column=0, columnspan=9, sticky="e",
                   padx=10, pady=(6, 10))
-        self.drop_label = tk.Label(btns, bg=_BG, fg=_FG)
-        self.drop_label.pack(side="left", padx=(0, 14))
-        self.size_label = tk.Label(btns, bg=_BG, fg=_FG)
-        self.size_label.pack(side="left", padx=(0, 14))
         # Import brings the UNIVERSAL song into the tracker; every output —
         # .MCS, the .COM family, WAV — now lives in the main window's Export
         # dialog, where the target is previewed and retracked before writing.
         tk.Button(btns, text="⬆ Load into Tracker", command=self._do_import,
                   font=("TkDefaultFont", 9, "bold")).pack(side="left")
         tk.Button(btns, text="Cancel", command=self._close).pack(side="left", padx=(6, 0))
-        self._update_size()
 
     def _update_stats(self) -> None:
         """Refresh the header line and per-channel stat labels."""
@@ -946,9 +899,7 @@ class ImportPreview(tk.Toplevel):
             return
         finally:
             self.configure(cursor="")
-        self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
         self._update_stats()
-        self._update_size()
 
     def _on_track(self) -> None:
         """A different subsong is a different piece of music: reload, then
@@ -956,85 +907,12 @@ class ImportPreview(tk.Toplevel):
         self._on_percussion()
         for tr, keep in zip(self.song.tracks, self.include):
             keep.set(channel_stats(tr)["verdict"] != "empty")
-        self._update_size()
-
-    def _on_tempo(self) -> None:
-        """The BPM dial is PURE PLAYBACK SPEED — it re-stamps the tempo byte the
-        file plays at, without re-quantizing (so the beat-alignment is never
-        disturbed). Only Exhaustive Optimize re-fits the grid."""
-        self.app.player.stop()
-        self._update_stats()
-        self._update_size()
-
-    def _optimize(self) -> None:
-        """Exhaustive Optimize: re-quantize onto the best-aligning grid, searching
-        every MCS tempo × subdivision for the tightest fit, then nudging the
-        playback tempo by the minimal amount. Updates the BPM dial to the chosen
-        tempo and reports the alignment. (NSF searches note onsets; PT3 fits the
-        row rate onto the tick grid.)"""
-        self.app.player.stop()
-        if self.is_nsf:
-            from ..nsf.extract import optimize_song
-            self.song, self._byte0, off, speed = optimize_song(self.song)
-        else:
-            from ..pt3 import optimize_pt3
-            self.song, self._byte0, off, speed = optimize_pt3(self.song)
-        self._show_optimized(off, speed)
-
-    def _optimize_current(self) -> None:
-        """Re-sequence to the BPM currently picked in the dial: the base note
-        takes as many ticks as fit that tempo (faster = finer grid), and the
-        speed is nudged the minimal amount. The meter you've chosen still applies
-        at encode time."""
-        self.app.player.stop()
-        if self.is_nsf:
-            from ..nsf.extract import optimize_song_at
-            self.song, self._byte0, off, speed = optimize_song_at(
-                self.song, self._tempo_byte0())
-        else:
-            from ..pt3 import optimize_pt3_at
-            self.song, self._byte0, off, speed = optimize_pt3_at(
-                self.song, self._tempo_byte0())
-        self._show_optimized(off, speed)
-
-    def _show_optimized(self, off: float, speed: float) -> None:
-        if self._byte0 in self._tempos:
-            self.tempo.set(self._tempo_labels[self._tempos.index(self._byte0)])
-        ref = "from NES speed" if self.is_nsf else "grid error"
-        self.opt_label.configure(
-            text=f"{off:.2f} avg off-beat · {speed * 100:.0f}% {ref}",
-            fg=("#e0a030" if off > 0.1 else _ACCENT))
-        self._update_stats()
-        self._update_size()
-
-    def _update_size(self) -> None:
-        """Live readouts for the current selection: byte size, dropped onsets, and
-        the DENSEST staff-measure (note/rest events) against the corpus ceiling of
-        32 — the reference for how close this import runs to what MCS handles."""
-        from ..mcs.encode import encode_song
-        from ..mcs.reader import parse_records, split_staves, symbol, _note_value
-        try:
-            data = self.encode_selection()
-            dropped = encode_song.last_dropped
-            staves = split_staves(parse_records(data))
-            busiest = max((sum(1 for b0, b1 in r.entries if _note_value(symbol(b0))[0])
-                           for st in staves for r in st[1:]), default=0)
-        except Exception:  # noqa: BLE001 - e.g. nothing selected
-            data, dropped, busiest = b"", 0, 0
-        self.size_label.configure(
-            text=f"{len(data):,} bytes · busiest staff {busiest}/32 events",
-            fg=("#e0a030" if busiest >= 32 else _ACCENT))
-        if dropped:
-            self.drop_label.configure(text=f"⚠ {dropped} slot(s) dropped",
-                                      fg="#e0a030")
-        else:
-            self.drop_label.configure(text="✓ all notes fit", fg=_ACCENT)
 
     # -- selection -> Song ------------------------------------------------------
     def _tempo_byte0(self) -> int:
-        if getattr(self, "tempo", None) is None:     # called before widget built
-            return self._byte0
-        return self._tempos[self._tempo_labels.index(self.tempo.get())]
+        """The AUTO-fitted tempo — the import keeps the source's real speed.
+        Choosing an MCS tempo / re-quantizing happens in the Export dialog."""
+        return self._byte0
 
     def selected_song(self, indices=None) -> Song:
         """The checked (or given) channels, octave shifts applied."""
@@ -1063,19 +941,11 @@ class ImportPreview(tk.Toplevel):
         for attr in ("nsf_preview", "nsf_frames", "pt3_source", "percussion_pref"):
             if hasattr(self.song, attr):
                 setattr(out, attr, getattr(self.song, attr))
+        # ...and the selection itself, so an Export-dialog re-quantize (which
+        # rebuilds all channels from the source) can re-apply it
+        out.import_adjust = (list(indices),
+                             [12 * int(v.get()) for v in self.octave])
         return out
-
-    def encode_selection(self) -> bytes:
-        from ..mcs.encode import encode_song
-        # cap: hold each measure to real MCS's 32-entry buffer so a busy import
-        # never overflows. Meter: an explicit choice forces bar length, else
-        # fit_meter picks the longest meter that fits. balance rescues density.
-        from ..retrack import retrack
-        bar_ticks = self._meters[self.meter.get()]
-        return encode_song(retrack(self.selected_song(), "mcs"),
-                           tempo_byte0=self._tempo_byte0(),
-                           cap=True, fit_meter=bar_ticks is None,
-                           bar_ticks=bar_ticks or 32, balance=True, voices=4)
 
     # -- actions ----------------------------------------------------------------
     def _audition(self, indices) -> None:

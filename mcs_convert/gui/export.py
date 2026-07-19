@@ -19,7 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 
-from ..audio import pcm16, render_song, wav_bytes
+from ..audio import pcm16, render_song, tempo_bpm, wav_bytes
+from ..mcs.reader import tick_seconds_for
 from ..model import Song
 from ..retrack import TARGET_WAVEFORMS, retrack
 from . import viz
@@ -119,6 +120,47 @@ class ExportDialog(tk.Toplevel):
             row=row, column=2, sticky="w", **pad)
         row += 1
 
+        # -- BPM quantization: a TARGET concern, so it lives here (moved out of
+        # the import dialog). The tempo picker re-stamps playback speed; the
+        # Optimize buttons RE-QUANTIZE from the kept source emulation/module.
+        # The meter + size readout apply to the .MCS target's notation grid.
+        tk.Label(self, text="Tempo", bg=_BG, fg=_ACCENT).grid(
+            row=row, column=0, sticky="w", **pad)
+        auto = nearest_tempo_byte0(self.song.tempo_tick_seconds)
+        self._tempos = list(_MCS_TEMPOS)
+        self._tempo_labels = [
+            f"≈{round(tempo_bpm(tick_seconds_for(b)))} BPM"
+            + (" (imported)" if b == auto else "") for b in self._tempos]
+        self.tempo = tk.StringVar(
+            value=self._tempo_labels[self._tempos.index(auto)])
+        tempo_box = ttk.Combobox(self, textvariable=self.tempo, width=18,
+                                 state="readonly", values=self._tempo_labels)
+        tempo_box.grid(row=row, column=1, sticky="w", **pad)
+        tempo_box.bind("<<ComboboxSelected>>", lambda e: self._update_size())
+        tk.Label(self, text="Meter", bg=_BG, fg=_ACCENT).grid(
+            row=row, column=2, sticky="w", **pad)
+        self._meters = {"Auto": None, "2/4": 16, "3/4": 24, "4/4": 32, "6/8": 48}
+        self.meter = tk.StringVar(value="Auto")
+        meter_box = ttk.Combobox(self, textvariable=self.meter, width=5,
+                                 state="readonly", values=list(self._meters))
+        meter_box.grid(row=row, column=2, sticky="e", **pad)
+        meter_box.bind("<<ComboboxSelected>>", lambda e: self._update_size())
+        row += 1
+
+        can_requant = (hasattr(self.song, "nsf_frames")
+                       or hasattr(self.song, "pt3_source"))
+        optbar = tk.Frame(self, bg=_BG)
+        optbar.grid(row=row, column=0, columnspan=3, sticky="w", padx=8, pady=2)
+        state = "normal" if can_requant else "disabled"
+        tk.Button(optbar, text="⌖ Exhaustive Optimize", state=state,
+                  command=self._optimize).pack(side="left")
+        tk.Button(optbar, text="⌖ Optimize at this Tempo", state=state,
+                  command=self._optimize_current).pack(side="left", padx=(4, 0))
+        self.size_label = tk.Label(optbar, bg=_BG, fg=_FG,
+                                   font=("TkDefaultFont", 8))
+        self.size_label.pack(side="left", padx=(12, 0))
+        row += 1
+
         btns = tk.Frame(self, bg=_BG)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", padx=8, pady=8)
         tk.Button(btns, text="▶ Preview", command=self.preview).pack(side="left")
@@ -136,6 +178,7 @@ class ExportDialog(tk.Toplevel):
         self.status.grid(row=row + 1, column=0, columnspan=3, sticky="we")
         self.protocol("WM_DELETE_WINDOW", self._close)
         self._on_target()
+        self._update_size()
 
     # -- selections ---------------------------------------------------------
     def _spec(self):
@@ -156,7 +199,95 @@ class ExportDialog(tk.Toplevel):
             self.wave.set("native")
 
     def _byte0(self) -> int:
-        return nearest_tempo_byte0(self.song.tempo_tick_seconds)
+        """The MCS tempo byte from the Tempo picker (pure playback speed —
+        re-quantizing the grid is the Optimize buttons' job)."""
+        try:
+            return self._tempos[self._tempo_labels.index(self.tempo.get())]
+        except (AttributeError, ValueError):
+            return nearest_tempo_byte0(self.song.tempo_tick_seconds)
+
+    def _step_seconds(self) -> float:
+        return tick_seconds_for(self._byte0())
+
+    # -- BPM quantization (moved here from the import dialog) ----------------
+    def _update_size(self) -> None:
+        """The .MCS estimate at the chosen tempo/meter: byte size, dropped
+        onsets, densest staff-measure vs the 32-event engine ceiling."""
+        from ..mcs.encode import encode_song
+        from ..mcs.reader import parse_records, split_staves, symbol, _note_value
+        try:
+            data = self._build_mcs()
+            dropped = encode_song.last_dropped
+            staves = split_staves(parse_records(data))
+            busiest = max((sum(1 for b0, b1 in r.entries
+                               if _note_value(symbol(b0))[0])
+                           for st in staves for r in st[1:]), default=0)
+            drops = f" · ⚠ {dropped} dropped" if dropped else " · all notes fit"
+            self.size_label.configure(
+                text=f".MCS {len(data):,} B · busiest {busiest}/32{drops}",
+                fg=("#e0a030" if busiest >= 32 or dropped else _ACCENT))
+        except Exception:  # noqa: BLE001 — e.g. empty song
+            self.size_label.configure(text="", fg=_FG)
+
+    def _requantized(self, exhaustive: bool):
+        """Re-quantize the kept source (NSF frame log / PT3 module) onto a new
+        grid; returns (song, byte0, off, speed) or None if there's no source."""
+        if hasattr(self.song, "nsf_frames"):
+            from ..nsf.extract import optimize_song, optimize_song_at
+            return (optimize_song(self.song) if exhaustive
+                    else optimize_song_at(self.song, self._byte0()))
+        if hasattr(self.song, "pt3_source"):
+            from ..pt3 import optimize_pt3, optimize_pt3_at
+            return (optimize_pt3(self.song) if exhaustive
+                    else optimize_pt3_at(self.song, self._byte0()))
+        return None
+
+    def _apply_requantized(self, new: Song, byte0: int, off: float,
+                           speed: float) -> None:
+        """Adopt a re-quantized song: re-apply the import-dialog selection and
+        octave shifts (the rebuild resurrects every channel), stamp the tempo,
+        reload the tracker, and sync the dialog."""
+        adjust = getattr(self.song, "import_adjust", None)
+        if adjust and max(adjust[0], default=-1) < len(new.tracks):
+            indices, shifts = adjust
+            kept = []
+            for i in indices:
+                tr = new.tracks[i]
+                shift = shifts[i] if i < len(shifts) else 0
+                if shift and tr.kind == "tone":
+                    for n in tr.notes:
+                        if not (n.is_rest or n.percussive):
+                            n.midi_note += shift
+                kept.append(tr)
+            new.tracks = kept
+            new.import_adjust = (list(range(len(kept))), [0] * len(kept))
+        new.tempo_tick_seconds = tick_seconds_for(byte0)
+        self.song = new
+        self.app.load_song(new, label=self.app.root.title() or "requantized")
+        if byte0 in self._tempos:
+            auto_label = self._tempo_labels[self._tempos.index(byte0)]
+            self.tempo.set(auto_label)
+        ref = ("from source speed" if hasattr(new, "nsf_frames")
+               else "grid error")
+        self.status.configure(text=f"Re-quantized: {off:.2f} avg off-beat · "
+                                   f"{speed * 100:.0f}% {ref}.")
+        self._update_size()
+
+    def _optimize(self) -> None:
+        """Exhaustive Optimize: search every MCS tempo x subdivision for the
+        tightest beat alignment, then adopt that grid."""
+        self.stop_preview()
+        result = self._requantized(exhaustive=True)
+        if result:
+            self._apply_requantized(*result)
+
+    def _optimize_current(self) -> None:
+        """Re-quantize AT the picked tempo: the base note takes as many ticks
+        as fit it (faster = finer grid), with a minimal speed nudge."""
+        self.stop_preview()
+        result = self._requantized(exhaustive=False)
+        if result:
+            self._apply_requantized(*result)
 
     def _reduced(self) -> Song:
         """The song as the selected target will hear it."""
@@ -175,7 +306,7 @@ class ExportDialog(tk.Toplevel):
         self.stop_preview()
         song = self._reduced()
         master, voices, sr = render_song(
-            song, step_seconds=self.song.tempo_tick_seconds, waveform="auto")
+            song, step_seconds=self._step_seconds(), waveform="auto")
         if not np.any(master):
             self.status.configure(text="Nothing to preview (no notes survive "
                                        "this target).")
@@ -234,6 +365,7 @@ class ExportDialog(tk.Toplevel):
             self.status.configure(text="WAV has no constraints — nothing to retrack.")
             return
         reduced = self._reduced()
+        reduced.tempo_tick_seconds = self._step_seconds()
         self.app.load_song(reduced, label=f"retrack:{rt}")
         self.status.configure(text=f"Tracker reloaded with the {rt} reduction "
                                    f"({sum(len(t.notes) for t in reduced.tracks)} notes).")
@@ -259,15 +391,21 @@ class ExportDialog(tk.Toplevel):
         self.status.configure(text=f"Exported {len(data)} bytes → "
                                    f"{os.path.basename(out)}")
 
+    def _build_mcs(self) -> bytes:
+        from ..mcs.encode import encode_song
+        bar_ticks = self._meters[self.meter.get()]
+        return encode_song(retrack(self.song, "mcs"),
+                           tempo_byte0=self._byte0(), cap=True,
+                           fit_meter=bar_ticks is None,
+                           bar_ticks=bar_ticks or 32, balance=True, voices=4)
+
     def _build(self, label: str, rt, com_mode) -> bytes:
         byte0 = self._byte0()
         if label.startswith(".MCS"):
-            from ..mcs.encode import encode_song
-            return encode_song(retrack(self.song, "mcs"), tempo_byte0=byte0,
-                               cap=True)
+            return self._build_mcs()
         if label.startswith("WAV"):
             master, _, sr = render_song(self.song,
-                                        step_seconds=self.song.tempo_tick_seconds,
+                                        step_seconds=self._step_seconds(),
                                         waveform="auto")
             return wav_bytes(pcm16(master), sr)
         from ..dosplayer import build_com
