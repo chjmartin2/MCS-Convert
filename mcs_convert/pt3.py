@@ -293,7 +293,10 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
     `percussion` decides what happens to drum-classified notes (see is_drum below):
       "clicks"  — synthesize them as 1-tick percussion hits (default);
       "pitched" — ignore the noise modifier and play their written pitches;
-      "drop"    — silence them, keeping the channel's melodic notes.
+      "drop"    — silence them, keeping the channel's melodic notes;
+      "mark"    — the UNIVERSAL capture: keep the written note, set percussive
+                  and effects["drumbright"] (the two-tone verdict), and let the
+                  export-side retrack decide clicks/pitched/drop + the palette.
     `drum_sound` picks the click pitch when percussion == "clicks":
       "auto"     — two-tone: bright drums (pure-noise samples / low AY noise
                    period) -> hi-hat E7, dark drums (tonal body) -> low bass B2;
@@ -307,8 +310,9 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
     `grid` = (ticks_per_row, tempo_byte0) forces a specific tempo mapping
     (used by optimize_pt3 / optimize_pt3_at); None auto-fits from the row rate.
     """
-    if percussion not in ("clicks", "pitched", "drop"):
-        raise ValueError(f"percussion must be clicks/pitched/drop, not {percussion!r}")
+    if percussion not in ("clicks", "pitched", "drop", "mark"):
+        raise ValueError(
+            f"percussion must be clicks/pitched/drop/mark, not {percussion!r}")
     if drum_sound not in drums.CLICKS and drum_sound != "auto":
         raise ValueError(f"unknown drum_sound {drum_sound!r}")
     if not any(data.startswith(m) for m in _MAGICS):
@@ -380,14 +384,18 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
         Fixed sounds ignore all that."""
         if drum_sound != "auto":
             return drums.CLICKS.get(drum_sound, drums.CLICKS["block"])
+        return drums.two_tone(auto_bright(sample, noise))
+
+    def auto_bright(sample: int, noise) -> bool:
+        """The two-tone verdict for one drum hit: a tone+noise sample has a
+        pitched body -> DARK kick/tom; pure noise -> bright hat, unless a HIGH
+        AY noise period (a low rumble) pulls it dark."""
         _, tone_duty = _sample_noise(data, sample)
         if tone_duty >= 0.5:
-            bright = False                       # pitched body = kick/tom
-        elif noise is not None:
-            bright = noise <= _AY_NOISE_BRIGHT    # noise pitch sets hat vs rumble
-        else:
-            bright = True                        # pure noise, no period = hat
-        return drums.two_tone(bright)
+            return False                         # pitched body = kick/tom
+        if noise is not None:
+            return noise <= _AY_NOISE_BRIGHT      # noise pitch sets hat vs rumble
+        return True                              # pure noise, no period = hat
 
     drum_sample = [is_drum(s) for s in range(32)]
     for name, ch in zip("ABC", chans):
@@ -401,7 +409,8 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
             effects = dict(ev[5]) if len(ev) > 5 and ev[5] else {}
             nxt = events[i + 1][0] if i + 1 < len(events) else total_rows
             end = next((o for o in offs if row < o <= nxt), nxt)
-            if 0 <= sample < 32 and drum_sample[sample]:
+            is_drum_note = 0 <= sample < 32 and drum_sample[sample]
+            if is_drum_note:
                 drum_count += 1
                 if percussion == "drop":
                     continue
@@ -415,6 +424,12 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
                                             duration_ticks=1, midi_note=midi,
                                             percussive=True))
                     continue
+                if percussion == "mark":
+                    # UNIVERSAL capture: keep the note exactly as written but
+                    # MARK it as a drum, with the bright/dark verdict the click
+                    # palette would use — clicks/pitched/drop and the click
+                    # sound are decided at retrack/export time, not here.
+                    effects["drumbright"] = int(auto_bright(sample, noise))
                 # "pitched": fall through — the note plays as written
             midi = 24 + idx                       # PT3 note 0 = C-1 (~MIDI 24)
             dur = max(1, (end - row) * ticks_per_row)
@@ -429,6 +444,7 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
             track.add(NoteEvent(start_tick=row * ticks_per_row,
                                 duration_ticks=dur, midi_note=midi,
                                 velocity=max(10, round(volume * 100 / 15)),
+                                percussive=(is_drum_note and percussion == "mark"),
                                 effects=effects))
         track.meta["noise_cmds"] = ch.noise_cmds
         track.meta["drum_notes"] = drum_count

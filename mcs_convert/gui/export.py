@@ -47,6 +47,16 @@ _SCOPE_TS = {"none": 0, "text 1": 1, "text 2": 2, "text 3": 3, "text 4": 4,
 
 _MCS_TEMPOS = tuple(0x77 + 3 * s for s in range(10))
 
+#: Drums dropdown -> (retrack percussion mode, click palette)
+_DRUM_MODES = {
+    "auto two-tone": ("clicks", "auto"),
+    "wood block": ("clicks", "block"),
+    "low bass": ("clicks", "low bass"),
+    "hi-hat": ("clicks", "hi-hat"),
+    "pitched (as written)": ("pitched", "auto"),
+    "drop": ("drop", "auto"),
+}
+
 
 def nearest_tempo_byte0(tick_seconds: float) -> int:
     """The MCS tempo byte whose tick length is closest to `tick_seconds`."""
@@ -117,6 +127,23 @@ class ExportDialog(tk.Toplevel):
         tk.Checkbutton(self, text="DOS preview window during playback",
                        variable=self.dosviz, bg=_BG, fg=_FG, selectcolor="#22252e",
                        activebackground=_BG, activeforeground=_FG).grid(
+            row=row, column=2, sticky="w", **pad)
+        row += 1
+
+        # -- Drums: an OUTPUT decision (the universal import only captures and
+        # marks them). Clicks voice them on the target's percussion path with
+        # the chosen palette; "pitched" plays their written pitches as tones;
+        # "drop" silences them.
+        tk.Label(self, text="Drums", bg=_BG, fg=_ACCENT).grid(
+            row=row, column=0, sticky="w", **pad)
+        self.drum = tk.StringVar(value="auto two-tone")
+        drum_box = ttk.Combobox(self, textvariable=self.drum, width=18,
+                                state="readonly", values=list(_DRUM_MODES))
+        drum_box.grid(row=row, column=1, sticky="w", **pad)
+        drum_box.bind("<<ComboboxSelected>>", lambda e: self._update_size())
+        tk.Label(self, text="(clicks: kick=low bass B2, hat=E7 on MCS; the "
+                            "real noise voice on Tandy/speaker/SB)",
+                 bg=_BG, fg="#888888", font=("TkDefaultFont", 8)).grid(
             row=row, column=2, sticky="w", **pad)
         row += 1
 
@@ -289,12 +316,18 @@ class ExportDialog(tk.Toplevel):
         if result:
             self._apply_requantized(*result)
 
+    def _drum_opts(self):
+        """(percussion mode, drum_sound) from the Drums dropdown."""
+        return _DRUM_MODES.get(self.drum.get(), ("clicks", "auto"))
+
     def _reduced(self) -> Song:
-        """The song as the selected target will hear it."""
+        """The song as the selected target will hear it (drums included)."""
         _, rt, _, _ = self._spec()
         if rt is None:                        # WAV: the universal song itself
             return self.song
-        out = retrack(self.song, rt)
+        percussion, drum_sound = self._drum_opts()
+        out = retrack(self.song, rt, drum_sound=drum_sound,
+                      percussion=percussion)
         wave = self.wave.get()
         if wave != "native":                  # user forced a waveform
             for t in out.tracks:
@@ -394,7 +427,9 @@ class ExportDialog(tk.Toplevel):
     def _build_mcs(self) -> bytes:
         from ..mcs.encode import encode_song
         bar_ticks = self._meters[self.meter.get()]
-        return encode_song(retrack(self.song, "mcs"),
+        percussion, drum_sound = self._drum_opts()
+        return encode_song(retrack(self.song, "mcs", drum_sound=drum_sound,
+                                   percussion=percussion),
                            tempo_byte0=self._byte0(), cap=True,
                            fit_meter=bar_ticks is None,
                            bar_ticks=bar_ticks or 32, balance=True, voices=4)
@@ -429,7 +464,9 @@ class ExportDialog(tk.Toplevel):
                 wave = self.wave.get()
                 if wave not in ("native", "square"):
                     kwargs["spk_wave"] = wave
-        return build_com(self.song, com_mode, byte0, **kwargs)
+        # the .COM plays the RETRACKED song, so the Drums choice (clicks with
+        # its palette / pitched / drop) is honoured in the standalone player too
+        return build_com(self._reduced(), com_mode, byte0, **kwargs)
 
     def _close(self) -> None:
         self.stop_preview()

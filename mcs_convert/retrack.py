@@ -42,32 +42,43 @@ TARGET_WAVEFORMS = {
 }
 
 
-def _tone_events(song: Song) -> List[List[Tuple[int, int, int]]]:
+def _tone_events(song: Song, include_perc: bool = False):
     """Per-track (start, dur, midi) for the melodic content: tone tracks' non-
-    percussive notes. Noise/drum tracks and percussive clicks are excluded —
-    they go through the percussion path."""
+    percussive notes. Noise/drum tracks and percussive notes are excluded (they
+    go through the percussion path) — unless `include_perc` (the "pitched"
+    percussion mode), which plays marked drums at their written pitches too."""
     out = []
     for t in song.tracks:
         if t.kind != KIND_TONE:
+            if include_perc:                     # noise/drum notes as tones
+                out.append([(n.start_tick, n.duration_ticks, n.midi_note)
+                            for n in t.notes if not n.is_rest])
             continue
         out.append([(n.start_tick, n.duration_ticks, n.midi_note)
-                    for n in t.notes if not n.is_rest and not n.percussive])
+                    for n in t.notes
+                    if not n.is_rest and (include_perc or not n.percussive)])
     return out
 
 
+def _bright(n: NoteEvent) -> bool:
+    """A hit's two-tone verdict: the importer's own analysis when it marked one
+    (PT3 effects["drumbright"], from the sample's character), else pitch — the
+    NSF noise mapping puts bright periods at/above midi 72."""
+    if "drumbright" in n.effects:
+        return bool(n.effects["drumbright"])
+    return n.midi_note >= BRIGHT_MIDI
+
+
 def _perc_hits(song: Song) -> List[Tuple[int, bool]]:
-    """(start_tick, bright) for every percussion event: noise-track notes split
-    bright/dark by pitch, drum-track and percussive notes by the same rule."""
+    """(start_tick, bright) for every percussion event: noise/drum-track notes
+    and percussive-marked notes on tone tracks."""
     hits = []
     for t in song.tracks:
-        if t.kind == KIND_NOISE:
-            hits.extend((n.start_tick, n.midi_note >= BRIGHT_MIDI)
-                        for n in t.notes if not n.is_rest)
-        elif t.kind == KIND_DRUM:
-            hits.extend((n.start_tick, n.midi_note >= BRIGHT_MIDI)
+        if t.kind in (KIND_NOISE, KIND_DRUM):
+            hits.extend((n.start_tick, _bright(n))
                         for n in t.notes if not n.is_rest)
         else:
-            hits.extend((n.start_tick, n.midi_note >= BRIGHT_MIDI)
+            hits.extend((n.start_tick, _bright(n))
                         for n in t.notes if n.percussive and not n.is_rest)
     hits.sort()
     dedup, last = [], None
@@ -112,17 +123,27 @@ def _drum_click_notes(hits, drum_sound: str) -> List[NoteEvent]:
     return notes
 
 
-def retrack(song: Song, target: str, drum_sound: Optional[str] = None) -> Song:
+def retrack(song: Song, target: str, drum_sound: Optional[str] = None,
+            percussion: str = "clicks") -> Song:
     """Reduce `song` to what `target` can play; returns a NEW Song (the input is
-    never modified). See the module docstring for the per-target shapes."""
+    never modified). See the module docstring for the per-target shapes.
+
+    `percussion` is the OUTPUT-side drum decision (the universal import only
+    captures and marks drums): "clicks" voices them on the target's percussion
+    path (MCS register-extreme clicks / the noise channel), with `drum_sound`
+    picking the click palette; "pitched" plays them at their written pitches as
+    ordinary tones; "drop" silences them."""
     if target not in TARGET_WAVEFORMS:
         raise ValueError(f"unknown retrack target {target!r} "
                          f"(one of {tuple(TARGET_WAVEFORMS)})")
+    if percussion not in ("clicks", "pitched", "drop"):
+        raise ValueError(f"percussion must be clicks/pitched/drop, "
+                         f"not {percussion!r}")
     if drum_sound is None:
         drum_sound = getattr(song, "percussion_pref", (None, "auto"))[1] or "auto"
     allowed = TARGET_WAVEFORMS[target]
-    tones = _tone_events(song)
-    hits = _perc_hits(song)
+    tones = _tone_events(song, include_perc=(percussion == "pitched"))
+    hits = _perc_hits(song) if percussion == "clicks" else []
 
     out = Song(title=song.title, tick_hz=song.tick_hz,
                source=f"{song.source} [retrack:{target}]" if song.source

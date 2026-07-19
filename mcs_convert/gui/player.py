@@ -33,7 +33,6 @@ from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
-from .. import drums
 from ..audio import (
     WaveOutPlayer, pcm16, render_nes, render_song, tempo_bpm, wav_bytes,
 )
@@ -731,7 +730,6 @@ class ImportPreview(tk.Toplevel):
 
         self.include = []                       # BooleanVar per channel
         self.octave = []                        # StringVar per channel: +2..-2
-        self.perc = tk.StringVar(value="clicks")   # percussion mode
         self._stat_labels = []                  # updatable per-channel labels
         for i, tr in enumerate(song.tracks):
             st = channel_stats(tr)
@@ -792,34 +790,22 @@ class ImportPreview(tk.Toplevel):
             ln_box.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
             base += 1
 
-        # Percussion handling — live for audition. (NSF noise has no written
-        # pitches, so the "as written notes" mode is PT3-only.)
-        perc = tk.Frame(self, bg=_BG)
-        perc.grid(row=base, column=0, columnspan=9, sticky="w", padx=10, pady=(8, 0))
-        tk.Label(perc, text="Percussion", bg=_BG, fg=_ACCENT).pack(side="left")
-        radio = [("clicks", "as clicks"), ("pitched", "as written notes"),
-                 ("drop", "dropped")]
-        if self.is_nsf:
-            radio = [("clicks", "as clicks"), ("drop", "dropped")]
-        for value, label in radio:
-            tk.Radiobutton(perc, text=label, value=value, variable=self.perc,
-                           command=self._on_percussion, bg=_BG, fg=_FG,
-                           activebackground=_BG, activeforeground=_FG,
-                           selectcolor="#2a2e3a").pack(side="left", padx=(10, 0))
-        tk.Label(perc, text="sound", bg=_BG, fg=_ACCENT).pack(side="left",
-                                                              padx=(18, 4))
-        self.drum = tk.StringVar(value="auto (two-tone)")
-        snd = ttk.Combobox(perc, textvariable=self.drum, width=13, state="readonly",
-                           values=drums.PICKER_SOUNDS)
-        snd.pack(side="left")
-        snd.bind("<<ComboboxSelected>>", lambda _e: self._on_percussion())
-        # MCS has no volume: a decaying sample can only be expressed as TIME.
+        # Percussion handling moved to the Export dialog — the universal import
+        # just CAPTURES drums (as written, marked with their bright/dark
+        # verdict); clicks vs pitched vs dropped and the click palette are
+        # output decisions. Uncheck a channel above to exclude it entirely.
         self.shape = tk.BooleanVar(value=False)
         if not self.is_nsf:                      # PT3 sample tables only
-            tk.Checkbutton(perc, text="decay shaping", variable=self.shape,
+            perc = tk.Frame(self, bg=_BG)
+            perc.grid(row=base, column=0, columnspan=9, sticky="w",
+                      padx=10, pady=(8, 0))
+            # MCS has no volume: a decaying sample can only be expressed as TIME.
+            tk.Checkbutton(perc, text="decay shaping (recover plucks from the "
+                                      "volume tables)",
+                           variable=self.shape,
                            command=self._on_percussion, bg=_BG, fg=_FG,
                            activebackground=_BG, activeforeground=_FG,
-                           selectcolor="#2a2e3a").pack(side="left", padx=(18, 0))
+                           selectcolor="#2a2e3a").pack(side="left")
 
         # Universal import: the song stays at the auto-fitted grid and its real
         # source speed. BPM/grid quantization is a TARGET concern now — the
@@ -858,8 +844,6 @@ class ImportPreview(tk.Toplevel):
         for tr, labels in zip(self.song.tracks, self._stat_labels):
             st = channel_stats(tr)
             verdict = st["verdict"]
-            if st["verdict"] == "percussion" and self.perc.get() == "clicks":
-                verdict = "percussion→clicks"
             labels["count"].configure(text=st["count"])
             labels["range"].configure(text=st["range"])
             labels["noise"].configure(text=f"{st['noise']:.0%}")
@@ -868,12 +852,10 @@ class ImportPreview(tk.Toplevel):
                 text=verdict,
                 fg="#e0b060" if st["verdict"] == "percussion" else _ACCENT)
 
-    _DRUM_KEYS = {"auto (two-tone)": "auto", "cluster": "cluster",
-                  "wood block": "block", "low bass": "low bass", "hi-hat": "hi-hat"}
-
     def _load_kwargs(self) -> dict:
-        kw = dict(percussion=self.perc.get(),
-                  drum_sound=self._DRUM_KEYS.get(self.drum.get(), "block"),
+        # "mark" = the universal capture: drums stay as written, flagged with
+        # their bright/dark verdict; output handling is the Export dialog's job.
+        kw = dict(percussion="mark" if not self.is_nsf else "clicks",
                   shape_durations=self.shape.get())
         if self.is_nsf:
             kw["subsong"] = int(self.track.get())

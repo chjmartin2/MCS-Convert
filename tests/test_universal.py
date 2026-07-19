@@ -74,6 +74,41 @@ def test_retrack_sb_keeps_waveforms_but_speaker_targets_do_not():
         retrack(_universal_song(), "gameboy")
 
 
+def test_retrack_percussion_is_an_output_decision():
+    s = _universal_song()
+    # clicks (default): drums voiced on the percussion path
+    clicks = retrack(s, "mcs", percussion="clicks")
+    assert any(t.kind == "drum" for t in clicks.tracks)
+    # drop: no percussion anywhere
+    dropped = retrack(s, "mcs", percussion="drop")
+    assert not any(t.kind == "drum" for t in dropped.tracks)
+    tandy_dropped = retrack(s, "tandy", percussion="drop")
+    assert not any(t.notes for t in tandy_dropped.tracks if t.kind == "noise")
+    # pitched: the noise/drum notes play at their written pitches as tones
+    pitched = retrack(s, "mcs", percussion="pitched")
+    assert not any(t.kind == "drum" for t in pitched.tracks)
+    tone_midis = {n.midi_note for t in pitched.tracks for n in t.notes}
+    assert 84 in tone_midis                          # the bright noise note's pitch
+    with pytest.raises(ValueError):
+        retrack(s, "mcs", percussion="bogus")
+
+
+def test_pt3_mark_mode_and_drumbright_wins_over_pitch():
+    # a marked drum carries the importer's own bright/dark verdict, which beats
+    # the pitch heuristic: a LOW-pitched hit marked bright still maps to hi-hat
+    s = Song(title="t", source="t")
+    tr = Track(name="AY A", chip="ay-tone")
+    tr.add(NoteEvent(0, 4, 60))                      # a melody note
+    tr.add(NoteEvent(4, 1, 50, percussive=True,      # low pitch, but marked BRIGHT
+                     effects={"drumbright": 1}))
+    s.add_track(tr)
+    out = retrack(s, "mcs", drum_sound="auto")
+    drums_t = [t for t in out.tracks if t.kind == "drum"][0]
+    assert [n.midi_note for n in drums_t.notes] == [100]   # hi-hat, not low bass
+    # and the melody note stayed melodic
+    assert any(n.midi_note == 60 for t in out.tracks for n in t.notes)
+
+
 def test_target_waveform_matrix():
     assert TARGET_WAVEFORMS["mcs"] == ("square",)
     assert "sine" in TARGET_WAVEFORMS["sb"] and "nestri" in TARGET_WAVEFORMS["sb"]
