@@ -119,8 +119,9 @@ class ExportDialog(tk.Toplevel):
         tk.Label(self, text="Visualization", bg=_BG, fg=_ACCENT).grid(
             row=row, column=0, sticky="w", **pad)
         self.scope = tk.StringVar(value="text 5")
-        ttk.Combobox(self, textvariable=self.scope, width=14, state="readonly",
-                     values=_SCOPES).grid(row=row, column=1, sticky="w", **pad)
+        self.scope_box = ttk.Combobox(self, textvariable=self.scope, width=14,
+                                      state="readonly", values=_SCOPES)
+        self.scope_box.grid(row=row, column=1, sticky="w", **pad)
         self.dosviz = tk.BooleanVar(value=True)
         tk.Checkbutton(self, text="DOS preview window during playback",
                        variable=self.dosviz, bg=_BG, fg=_FG, selectcolor="#22252e",
@@ -236,7 +237,7 @@ class ExportDialog(tk.Toplevel):
         return TARGETS[0]
 
     def _on_target(self) -> None:
-        _, rt, _, _ = self._spec()
+        label, rt, _, _ = self._spec()
         allowed = TARGET_WAVEFORMS.get(rt, ("square",)) if rt else \
             ("square", "triangle", "sine")
         vals = ["native"] + [w for w in ("square", "triangle", "sine")
@@ -246,6 +247,10 @@ class ExportDialog(tk.Toplevel):
             self.wave.set("native")
         self.mcs_voices_box.configure(
             state="readonly" if rt == "mcs" else "disabled")
+        # the Visualization picker builds a .COM's on-screen display: a WAV has
+        # no screen, and the .MCS target always previews as music notation
+        com_display = not (label.startswith("WAV") or rt == "mcs")
+        self.scope_box.configure(state="readonly" if com_display else "disabled")
 
     def _byte0(self) -> int:
         """The MCS tempo byte from the Tempo picker (pure playback speed —
@@ -412,10 +417,14 @@ class ExportDialog(tk.Toplevel):
         self.status.configure(text=f"Previewing through {label}…")
 
     def _dos_style(self):
-        """The DOS replica for the current selections: the .MCS target always
-        shows its music notation; 'none' shows nothing; every .COM viz maps to
-        its own distinct replica."""
-        if self.target.get().startswith(".MCS"):
+        """The visual for the current selections, or None for no window at all:
+        WAV has no display of any kind; the .MCS target always shows its music
+        notation; 'none' shows nothing; every .COM visualization maps to its own
+        distinct replica."""
+        label, rt, _com, _ext = self._spec()
+        if label.startswith("WAV"):
+            return None                      # an audio file has nothing to draw
+        if rt == "mcs":
             return "MCS notation"
         return {"none": None,
                 "graphics (Tandy)": "Tandy graphics",
