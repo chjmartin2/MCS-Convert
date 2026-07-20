@@ -178,3 +178,28 @@ def test_nes_waveform_oscillators():
         w = A._wave(ph, wf)
         assert abs(float((w > 0).mean()) - frac) < 0.01
     assert len(np.unique(np.round(A._wave(ph, "nestri"), 4))) == 16
+
+
+def test_noise_track_renders_as_percussive_hits_not_a_wash():
+    # A drum hit is an ATTACK. Rendering each note for its full WRITTEN length
+    # with a flat envelope turned a dense hi-hat line into continuous static
+    # (SMB: sounding 32% of the song against the NES reference's 8%), which is
+    # why the drums were right in the true-hardware render but wrong everywhere
+    # downstream. Hits are now decay-shaped and capped to a hit's length.
+    step = 0.0735                                    # a 32nd at ~102 BPM: 73 ms
+    hits = [(i * 4, 1, 84) for i in range(40)]       # bright hits, 1 tick each
+    buf = A._render_noise_track(hits, 22050, step, 0.3)
+    duty = float((np.abs(buf) > 0.02).mean())
+    assert duty < 0.20, f"noise is a wash ({duty:.0%} sounding)"
+    # the burst is far shorter than the note's written length...
+    one = A._render_noise_track([(0, 1, 84)], 22050, step, 0.3)
+    sounding = int((np.abs(one) > 0.02).sum())
+    assert sounding < int(0.5 * step * 22050)
+    # ...and decays rather than sitting flat
+    head = float(np.abs(one[:len(one) // 4]).mean())
+    tail = float(np.abs(one[-len(one) // 4:]).mean())
+    assert head > tail * 2, "hit does not decay"
+    # dark hits ring longer than bright ones (kick body vs hat tick)
+    dark = A._render_noise_track([(0, 8, 40)], 22050, step, 0.3)
+    bright = A._render_noise_track([(0, 8, 90)], 22050, step, 0.3)
+    assert (np.abs(dark) > 0.02).sum() > (np.abs(bright) > 0.02).sum()

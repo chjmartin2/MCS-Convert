@@ -109,31 +109,46 @@ def _lfsr_bits() -> np.ndarray:
     return _LFSR_BITS
 
 
+#: A drum hit is an ATTACK, not a sustained tone. Bright hits (hi-hat/snare)
+#: ring ~30 ms, dark ones (kick/tom) ~60 ms with a low body — the same shaping
+#: the true-hardware NES render uses (_render_noise), so the universal voice and
+#: the reference agree. Rendering a hit for its full WRITTEN length instead
+#: turned SMB's 346-hit hi-hat line into a continuous wash (32% of the song
+#: sounding, against the reference's 8%).
+_HIT_BRIGHT_MIDI = 72       # at/above = bright (matches retrack.BRIGHT_MIDI)
+_HIT_SECS = (0.06, 0.03)    # (dark, bright) decay length
+_HIT_BODY_HZ = 70.0         # the pitched "boom" under a dark hit
+
+
 def _render_noise_track(events, sr: int, step: float, amp: float) -> np.ndarray:
-    """A kind="noise" track: LFSR noise whose shift clock follows the note's pitch
-    (midi -> freq x 64), so high notes hiss and low notes rumble — the universal
-    noise voice (NES noise channel, AY noise)."""
+    """A kind="noise" track (NES noise channel, AY noise): each note is a
+    percussive LFSR burst whose shift clock follows the pitch — high notes hiss,
+    low notes rumble — shaped by a fast decay and capped to a hit's length, so
+    the line reads as distinct drums rather than continuous static."""
     if not events:
         return np.zeros(1, dtype=np.float32)
     total = int(max(s + d for s, d, *_ in events) * step * sr)
     out = np.zeros(max(total, 1), dtype=np.float32)
     bits = _lfsr_bits()
-    fade = max(1, int(0.004 * sr))
     for ev in events:
         start, dur, midi = ev[0], ev[1], ev[2]
         vel = ev[3] if len(ev) > 3 else 100
         pos = int(start * step * sr)
-        ns = int(dur * step * sr)
+        bright = midi >= _HIT_BRIGHT_MIDI
+        # the burst is the SHORTER of the written length and the hit's decay
+        ns = min(int(dur * step * sr), int(_HIT_SECS[bright] * sr), total - pos)
         if ns <= 0:
             continue
         clock = midi_to_freq(midi) * 64.0            # LFSR shifts per second
         idx = (np.arange(ns, dtype=np.float64) * clock / sr).astype(np.int64) % len(bits)
-        seg = bits[idx] * (amp * vel / 100.0)
-        f = min(fade, ns // 2)
-        if f > 0:
-            seg[:f] *= np.linspace(0.0, 1.0, f, dtype=np.float32)
-            seg[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
-        out[pos:pos + ns] += seg
+        env = np.linspace(1.0, 0.0, ns, dtype=np.float32) ** 2
+        seg = bits[idx] * env
+        if not bright:                               # kick/tom: add a pitched body
+            t = np.arange(ns, dtype=np.float32) / sr
+            seg = seg * 0.6 + 0.9 * env * np.sin(
+                2 * np.pi * _HIT_BODY_HZ * t).astype(np.float32)
+        peak = float(np.max(np.abs(seg))) or 1.0
+        out[pos:pos + ns] += seg * (amp * vel / 100.0 / peak)
     return out
 
 

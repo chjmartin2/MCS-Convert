@@ -46,6 +46,7 @@ _FG = "#d7dae0"
 _ACCENT = "#7fd1b9"
 _SCOPE_LINE = "#00ff41"      # phosphor green
 _SCOPE_DIM = "#0c3d1e"       # midline / frame green
+_NATIVE_VOICE = "Native (as imported)"   # the untargeted "Play as" entry
 
 
 def channel_stats(track: Track) -> dict:
@@ -157,14 +158,14 @@ class PlayerApp:
         # (except SoundBlaster, whose "native" render keeps them).
         tk.Label(row2, text="Play as", bg=_BG, fg=_ACCENT).pack(side="left")
         self._voices = {                      # label -> (retrack target, waveform)
-            "Native (as imported)": (None, "auto"),
+            _NATIVE_VOICE: (None, "auto"),
             "MCS (4-voice speaker)": ("mcs", "pcspeaker"),
             "Tandy 1000 / PCjr": ("tandy", "square"),
             "PC Speaker 1-voice": ("1voice", "pcspeaker"),
             "PC Speaker 4-voice": ("4voice", "pcspeaker"),
             "SoundBlaster": ("sb", "auto"),
         }
-        self.voice = tk.StringVar(value="Native (as imported)")
+        self.voice = tk.StringVar(value=_NATIVE_VOICE)
         ttk.Combobox(row2, textvariable=self.voice, width=21, state="readonly",
                      values=list(self._voices)).pack(side="left", padx=(6, 0))
 
@@ -336,7 +337,7 @@ class PlayerApp:
         self.song = song
         self.path = None
         self.universal = True
-        self.voice.set("Universal")              # per-track waveforms + noise voice
+        self.voice.set(_NATIVE_VOICE)            # per-track waveforms + noise voice
         self._populate(label)
         self._enable_transport()
 
