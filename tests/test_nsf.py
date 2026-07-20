@@ -93,17 +93,18 @@ def test_percussion_drop_and_retrack_clicks(nsf_path):
     assert nz.notes and nz.notes[0].midi_note == 100      # bright hit
 
 
-def test_noise_default_is_two_tone_not_cluster(nsf_path):
-    # regression: extract_song used to stamp percussion_pref=("clicks","cluster"),
-    # so retrack(song,"mcs") inherited the legacy dissonant-cluster palette and
-    # every drum came out as the (55,56) two-note beat instead of the kick/hat
-    # split. The default must be "auto".
+def test_noise_default_is_the_two_tone_split(nsf_path):
+    # regression: extract_song used to stamp a legacy two-note "cluster" palette
+    # into percussion_pref, so retrack(song,"mcs") beat every drum as a
+    # dissonant semitone pair instead of the kick/hat split. The default is
+    # "auto", and every click is now a SINGLE register-extreme note.
+    from mcs_convert import drums
     from mcs_convert.retrack import retrack
     song, _ = extract_song(nsf_path)
     assert song.percussion_pref[1] == "auto"
+    assert all(len(v) == 1 for v in drums.CLICKS.values())   # no multi-note clicks
     drums_t = {t.name: t for t in retrack(song, "mcs").tracks}.get("Drums")
     pitches = {n.midi_note for n in drums_t.notes}
-    assert 55 not in pitches and 56 not in pitches   # NOT the cluster
     assert pitches <= {47, 100}                       # low bass / hi-hat only
 
 

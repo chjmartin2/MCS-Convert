@@ -434,7 +434,7 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
     if voices <= 1:
         events = _monophonic(events)
     # The 4-voice (PC-speaker) target spends its 4th voice on percussion: ONE drum
-    # click per hit tick (never the 2-note cluster — a single channel). A click on
+    # click per hit tick — a single channel. A click on
     # a tick a melody note already occupies joins that slot for free; a new-tick
     # hit spends one of the 24 positions. Tandy (3) has no spare tone, and the
     # lossless default (6) leaves percussion out.

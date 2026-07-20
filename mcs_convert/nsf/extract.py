@@ -10,7 +10,7 @@ Pipeline (per selected subsong):
     4. Fit the 60 Hz frame stream onto MCS's 32nd-tick grid (frames-per-tick and
        tempo byte chosen to minimize onset quantization error), segment pitched
        channels into notes, and render noise/DPCM key-ons through the percussion
-       pipeline (cluster or wood-block clicks, or dropped).
+       pipeline (register-extreme or wood-block clicks, or dropped).
 """
 
 from __future__ import annotations

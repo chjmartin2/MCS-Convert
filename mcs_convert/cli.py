@@ -227,10 +227,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="drum-note handling: synthesize clicks (default), "
                              "play written pitches, or drop them")
     p_conv.add_argument("--drum-sound",
-                        choices=("auto", "low bass", "hi-hat", "block", "cluster"),
+                        choices=("auto", "low bass", "hi-hat", "block"),
                         default="auto",
                         help="click pitch: two-tone auto (default), low bass (B2), "
-                             "hi-hat (E7), wood block (D4), or legacy cluster")
+                             "hi-hat (E7), or wood block (D4)")
     p_conv.add_argument("--shape-durations", action="store_true",
                         help="truncate notes to their sample's audible decay "
                              "(recovers plucks/staccato; MCS has no volume)")

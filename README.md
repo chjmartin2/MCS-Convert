@@ -72,9 +72,9 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
     beat alignment.
   - **Vortex Tracker `.pt3` modules** (the ZX Spectrum AY-3-8910 scene format)
     — percussion detection with three handling modes (synthesized clicks — a
-    dissonant-cluster or wood-block timbre — played as written pitches, or
-    dropped), and optional decay shaping that recovers plucks and staccato
-    from the modules' volume tables.
+    register-extreme kick/hi-hat or wood-block timbre — played as written
+    pitches, or dropped), and optional decay shaping that recovers plucks and
+    staccato from the modules' volume tables.
 
 ### Just want to listen? (Windows, no Python)
 

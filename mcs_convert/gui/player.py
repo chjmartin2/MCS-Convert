@@ -270,7 +270,7 @@ class PlayerApp:
 
     @staticmethod
     def _load_module(src: str, percussion: str = "clicks",
-                     drum_sound: str = "cluster", shape_durations: bool = False,
+                     drum_sound: str = "auto", shape_durations: bool = False,
                      subsong=None, max_seconds: float = 180.0,
                      detect_end: bool = True):
         """Module file -> (Song, mcs_tempo_byte0), dispatched on the extension.

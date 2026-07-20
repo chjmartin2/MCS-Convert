@@ -303,7 +303,6 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
       "low bass" — every hit is B2 (47), the lowest note: a kick thud;
       "hi-hat"   — every hit is E7 (100), the highest note: a bright tick;
       "block"    — a single mid-register D4 wood-block tick;
-      "cluster"  — legacy G3+Ab3 beating a minor second (roughness ≈ noise).
     `shape_durations` truncates each note to its sample's audible length (the
     frame where its volume table decays to permanent silence) — MCS's only way
     to express a pluck, since it has no volume control.
