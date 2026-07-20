@@ -52,9 +52,11 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
   markers, plus an event column for 8va spans and mid-staff clef changes.
 - **Real transport** — play, pause/resume, stop; click any row to start there
   (or to seek live during playback); a playhead follows the music.
-- **Live volume slider** and four synth voices, including **"PC Speaker"** — a
-  faithful model of the original 4-voice 1-bit delta-sigma output, gritty
-  texture included.
+- **"Play as" an output target** — playback reduces through the chosen target's
+  constraints and renders in its own voice: Native (as imported), MCS's 4-voice
+  1-bit PC speaker (a faithful delta-sigma model, gritty texture included),
+  Tandy/PCjr squares, the 1- and 4-voice speaker engines, or SoundBlaster
+  (where the real waveforms survive). Plus a live volume slider.
 - **Oscilloscope window** — the four voices on scopes plus a master mix,
   phosphor green on black, resizable.
 - **Export** — decoded playback as WAV, or the full tracker grid as text.

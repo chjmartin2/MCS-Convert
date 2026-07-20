@@ -100,6 +100,7 @@ class PlayerApp:
         self._scope_win = None      # oscilloscope Toplevel (None until opened)
         self._scope_panels = []     # (canvas, trace_item) — v1..v4 then master
         self._scope_data = None     # (master, voices, sr) buffers from the last render
+        self._render_names = None   # labels for those buffers (target reductions rename)
         self._vu_win = None         # VU meters window (gui.viz.VUWindow)
         self._spec_win = None       # spectrum analyzer window (gui.viz.SpectrumWindow)
         self.universal = False      # True when the tracker holds a universal Song
@@ -149,13 +150,22 @@ class PlayerApp:
 
         row2 = tk.Frame(self.root, bg=_BG)
         row2.pack(fill="x", padx=8, pady=(0, 4))
-        # Voice: the clean synth waveforms, plus "PC Speaker" — MCS's own 4-voice 1-bit
-        # rendering (see audio._render_pcspeaker), for comparing against real hardware.
-        tk.Label(row2, text="Voice", bg=_BG, fg=_ACCENT).pack(side="left")
-        self._voices = {"Universal": "auto", "PC Speaker": "pcspeaker",
-                        "Square": "square", "Triangle": "triangle", "Sine": "sine"}
-        self.voice = tk.StringVar(value="PC Speaker")
-        ttk.Combobox(row2, textvariable=self.voice, width=11, state="readonly",
+        # Play as: the real OUTPUT TARGETS, matching the Export dialog — playback
+        # reduces through the target's constraints (retrack) and renders in its
+        # own voice, so Play answers "what will this sound like on X". Abstract
+        # sine/triangle voices are gone: no target can actually sound them
+        # (except SoundBlaster, whose "native" render keeps them).
+        tk.Label(row2, text="Play as", bg=_BG, fg=_ACCENT).pack(side="left")
+        self._voices = {                      # label -> (retrack target, waveform)
+            "Native (as imported)": (None, "auto"),
+            "MCS (4-voice speaker)": ("mcs", "pcspeaker"),
+            "Tandy 1000 / PCjr": ("tandy", "square"),
+            "PC Speaker 1-voice": ("1voice", "pcspeaker"),
+            "PC Speaker 4-voice": ("4voice", "pcspeaker"),
+            "SoundBlaster": ("sb", "auto"),
+        }
+        self.voice = tk.StringVar(value="Native (as imported)")
+        ttk.Combobox(row2, textvariable=self.voice, width=21, state="readonly",
                      values=list(self._voices)).pack(side="left", padx=(6, 0))
 
         # Volume is LIVE (waveOutSetVolume) — dragging it changes the playing audio.
@@ -355,6 +365,7 @@ class PlayerApp:
         self._stop_follow()
         self._last_row = None
         self._scope_data = None              # ...and drops its scope buffers
+        self._render_names = None            # ...and their (target-specific) labels
         self._draw_scope(None)
         self._draw_viz(None)
         if self._vu_win is not None and self._vu_win.alive():
@@ -401,12 +412,33 @@ class PlayerApp:
 
     def _render(self) -> bool:
         """Synthesize the loaded song at its own tempo, stashing (master, voices, sr)
-        for playback, WAV export, and the oscilloscope. True if anything is audible."""
-        # Timing comes from the file's own tempo (header byte 0); voice from the dropdown.
-        master, voices, sr = render_song(self.song,
+        for playback, WAV export, and the oscilloscope. True if anything is audible.
+
+        "Play as" picks an OUTPUT TARGET: the song is first reduced through that
+        target's constraints (the same retrack the exporters run), then rendered
+        in its voice — so Play previews the real thing, not an idealized synth."""
+        # Timing comes from the file's own tempo (header byte 0).
+        target, waveform = self._voices[self.voice.get()]
+        song = self.song
+        if target is not None:
+            from ..retrack import retrack
+            try:
+                song = retrack(song, target)
+            except ValueError:
+                song = self.song              # nothing to reduce: play as-is
+        master, voices, sr = render_song(song,
                                          step_seconds=self.song.tempo_tick_seconds,
-                                         waveform=self._voices[self.voice.get()])
+                                         waveform=waveform)
+        # scope/VU labels follow what was actually rendered: "auto" renders one
+        # buffer per track, every other voice renders the 4 allocated channels
+        self._render_names = ([t.name for t in song.tracks] if waveform == "auto"
+                              else [f"v{i + 1}" for i in range(len(voices))])
         self._scope_data = (master, voices, sr)
+        if self._vu_win is not None and self._vu_win.alive():
+            names = self._track_names()
+            self._vu_win.names = names
+            self._vu_win.levels = [0.0] * len(names)
+            self._vu_win.peaks = [0.0] * len(names)
         return bool(np.any(master))
 
     def play(self) -> None:
@@ -576,6 +608,12 @@ class PlayerApp:
 
     # ---- VU meters / spectrum analyzer / DOS-viz windows ---------------------
     def _track_names(self):
+        """Labels for the rendered voice buffers — after a render these follow
+        what was actually synthesized (a target reduction renames/reduces the
+        voices), not the tracker's own track list."""
+        names = getattr(self, "_render_names", None)
+        if names:
+            return list(names)
         if self.song and self.song.tracks:
             return [t.name for t in self.song.tracks]
         return ["v1", "v2", "v3", "v4"]
