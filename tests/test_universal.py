@@ -245,3 +245,24 @@ def test_scope_traces_follow_the_sounded_waveform():
     # the graphics scope gets the same contour at scanline amplitude
     gfx = D.build_com(s, "tandy", 0x80, scope=True)
     assert bytes(D._wave_shape("square", D._GAMP)) in gfx
+
+
+def test_text_scope_resolves_sub_row_heights_with_caps():
+    # 80x25 text gives a 5-row band, so a two-level square wasted it. The block
+    # scope now measures the wave in QUARTER rows and caps the column with a
+    # partial glyph, resolving ~17 heights in the same 5 rows.
+    q = [b - 256 if b > 127 else b for b in D._wave_shape("sine", D._TAMP * 4)]
+    assert max(q) == D._TAMP * 4 and min(q) == -D._TAMP * 4
+    heights = {(abs(v) >> 2, abs(v) & 3) for v in q}       # (full rows, leftover)
+    assert len(heights) > 2                                # more than hi/lo
+    assert any(rem for _rows, rem in heights)              # partial cells occur
+    # a SQUARE is always a whole number of rows, so it draws no caps at all --
+    # square builds look exactly as they always did
+    sq = [b - 256 if b > 127 else b for b in D._wave_shape("square", D._TAMP * 4)]
+    assert {abs(v) & 3 for v in sq} == {0}
+    # the cap glyphs are the half blocks (oriented by travel) + shading
+    s = _universal_song()
+    com = D.build_com(s, "4voice", 0x80, sb=True, sb_wave="sine",
+                      mix_rate=22000, text_scope=1)
+    for glyph in (D._CAP_QUARTER, D._CAP_THREE, D._CAP_HALF_UP, D._CAP_HALF_DOWN):
+        assert bytes([0xB0, glyph]) in com                 # mov al,<glyph>

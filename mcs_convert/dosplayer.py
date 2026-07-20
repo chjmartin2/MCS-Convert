@@ -729,7 +729,8 @@ def _emit_wave_setup(a: "_Asm", ch: int, pfx: str) -> None:
 
 
 def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
-                    shape: str = "wshape", msum: bool = True) -> None:
+                    shape: str = "wshape", msum: bool = True,
+                    quarters: bool = False) -> None:
     """Per column: CX = the row/scanline this channel's wave sits on. Advances
     the phase, reads the baked shape, and feeds the master sum the wave's
     direction. A silent channel flatlines on its centre."""
@@ -746,7 +747,25 @@ def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
     a.db(0x30, 0xE4).db(0x89, 0xC6)                     # xor ah,ah; mov si,ax
     a.db(0x8A, 0x84).abs16(shape)                       # mov al,[si+shape]
     a.db(0x98)                                          # cbw (signed offset)
+    if quarters:
+        # ax = signed QUARTER rows -> whole rows in ax, leftover in [wrem],
+        # travel direction in [wdir] (1 = up the screen)
+        a.db(0xC6, 0x06).abs16("wdir").db(0x00)         # mov byte[wdir],0
+        a.db(0x09, 0xC0).db(0x79).rel8(f"{pfx}_qp")     # or ax,ax; jns positive
+        a.db(0xF7, 0xD8)                                # neg ax (|quarters|)
+        a.db(0xC6, 0x06).abs16("wdir").db(0x01)         # mov byte[wdir],1 (upward)
+        a.label(f"{pfx}_qp")
+        a.db(0x50)                                      # push ax (|quarters|)
+        a.db(0x24, 0x03).db(0xA2).abs16("wrem")         # and al,3; [wrem]=leftover
+        a.db(0x58)                                      # pop ax
+        a.db(0xD1, 0xE8).db(0xD1, 0xE8)                 # shr ax,1 x2 (whole rows)
+        a.db(0x80, 0x3E).abs16("wdir").db(0x00)         # cmp byte[wdir],0
+        a.db(0x74).rel8(f"{pfx}_qd")                    # je downward
+        a.db(0xF7, 0xD8)                                # neg ax (back above centre)
+        a.label(f"{pfx}_qd")
     a.db(0xB9).bytes(_w(rc)).db(0x01, 0xC1)             # mov cx,centre; add cx,ax
+    if quarters:
+        a.db(0x89, 0x0E).abs16("wrow")                  # [wrow]=cx (last full row)
     if msum:                                            # feed the master trace
         a.db(0x09, 0xC0).db(0x74).rel8(f"{pfx}_d")      # or ax,ax; jz done
         a.db(0x78).rel8(f"{pfx}_u")                     # js up (above centre)
@@ -783,15 +802,55 @@ def _emit_tfill(a: "_Asm") -> None:
 
 
 def _emit_text_channel(a: "_Asm", ch: int) -> None:
-    """One tone channel column (BP): pick HI/LO/CENTRE row from its scroll
-    counter, add ±1 to the master sum, fill from centre to that row."""
+    """One tone channel column (BP): fill from the centre row to the wave's
+    height, then CAP the column with a partial glyph for the leftover QUARTER
+    rows — so an 80x25 text screen resolves ~17 heights in a 5-row band instead
+    of 5. The cap reads as a real sub-cell step: a half block (▀/▄) for the
+    half, and the shading glyphs (░ / ▓) for the quarter and three-quarter."""
     rc = _TCEN[ch]
-    _emit_wave_pick(a, ch, rc, f"tc{ch}")
+    _emit_wave_pick(a, ch, rc, f"tc{ch}", shape="wshapeq", quarters=True)
+    # CX = the last FULL row, [wrem] = leftover quarters, [wdir] = 1 when the
+    # wave runs UP the screen (the cap then sits one row further that way).
     a.db(0xB8).bytes(_w(rc))                            # mov ax,centre
     a.db(0x39, 0xC8).db(0x76).rel8(f"tc{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg
     a.label(f"tc{ch}_o")
     a.db(0xA3).abs16("ftop").db(0x89, 0x0E).abs16("fbot")   # ftop=top; fbot=bottom
     a.db(0x89, 0xEB).db(0xB8).bytes(_w(_tcolor(ch))).db(0xE8).rel16("tfill")  # bx=col;ax=cc;call tfill
+    _emit_wave_cap(a, ch, f"tc{ch}")
+
+
+#: Sub-cell cap glyphs: a quarter of a row reads as light shading, a half as a
+#: real half block (oriented by travel), three quarters as dark shading.
+_CAP_QUARTER, _CAP_THREE = 0xB0, 0xB2      # ░ ▓
+_CAP_HALF_UP, _CAP_HALF_DOWN = 0xDC, 0xDF  # ▄ (filled at the bottom) / ▀
+
+
+def _emit_wave_cap(a: "_Asm", ch: int, pfx: str) -> None:
+    """Draw the partial cell just past the filled column, when the wave's height
+    carries leftover quarter-rows. BP is the column; clobbers AX/BX/CX."""
+    a.db(0x80, 0x3E).abs16("wrem").db(0x00)             # cmp byte[wrem],0
+    a.db(0x74).rel8(f"{pfx}_nc")                        # je no-cap
+    a.db(0x8B, 0x0E).abs16("wrow")                      # mov cx,[wrow] (last full row)
+    a.db(0x80, 0x3E).abs16("wdir").db(0x00)             # cmp byte[wdir],0
+    a.db(0x74).rel8(f"{pfx}_cd")                        # je going-down
+    a.db(0x49)                                          # dec cx (the cap sits above)
+    a.db(0xB0, _CAP_HALF_UP).db(0xEB).rel8(f"{pfx}_ch")  # mov al,half-up; jmp have
+    a.label(f"{pfx}_cd")
+    a.db(0x41)                                          # inc cx (the cap sits below)
+    a.db(0xB0, _CAP_HALF_DOWN)                          # mov al,half-down
+    a.label(f"{pfx}_ch")
+    # a half-row uses the block; a quarter/three-quarter uses shading instead
+    a.db(0x80, 0x3E).abs16("wrem").db(0x02)             # cmp byte[wrem],2
+    a.db(0x74).rel8(f"{pfx}_cw")                        # je write (keep the half block)
+    a.db(0xB0, _CAP_QUARTER)                            # mov al,light shade
+    a.db(0x80, 0x3E).abs16("wrem").db(0x01)             # cmp byte[wrem],1
+    a.db(0x74).rel8(f"{pfx}_cw")                        # je write
+    a.db(0xB0, _CAP_THREE)                              # mov al,dark shade
+    a.label(f"{pfx}_cw")
+    a.db(0xB4, _TATTR[ch])                              # mov ah,attr (channel colour)
+    a.db(0x89, 0xEB)                                    # mov bx,bp (column)
+    a.db(0xE8).rel16("tcell")
+    a.label(f"{pfx}_nc")
 
 
 def _emit_text_noise(a: "_Asm") -> None:
@@ -1877,6 +1936,10 @@ def _emit_scope_vars(a: "_Asm", vis: str, wave: str = "square") -> None:
         a.label("wphase"); a.bytes(bytes(8))
         a.label("wstep"); a.bytes(bytes(8))
         a.label("wshape"); a.bytes(_wave_shape(wave, _TAMP))       # text rows
+        a.label("wshapeq"); a.bytes(_wave_shape(wave, _TAMP * 4))  # quarter rows
+        a.label("wrem"); a.db(0x00)                      # leftover quarters
+        a.label("wdir"); a.db(0x00)                      # 1 = wave runs up
+        a.label("wrow"); a.db(0x00, 0x00)                # last fully-filled row
         if vis in ("graphics", "vga"):
             a.label("wshapeg"); a.bytes(_wave_shape(wave, _GAMP))  # scanlines
     if vis in ("graphics", "vga"):                   # mode-9 / VGA vline/frame state

@@ -402,6 +402,7 @@ class ExportDialog(tk.Toplevel):
                                                  on_close=self.stop_preview)
             else:
                 self._dos_win.set_style(style)        # live restyle + retitle
+            self._dos_win.set_wave(self._preview_wave())
             if style == "static poster":
                 self._dos_win.set_song(song, self._step_seconds())
             elif style == "MCS notation" and staves is not None:
@@ -415,6 +416,21 @@ class ExportDialog(tk.Toplevel):
             self._dos_win = None
         self._tick()
         self.status.configure(text=f"Previewing through {label}…")
+
+    def _preview_wave(self) -> str:
+        """The waveform the selected target will actually sound — what the
+        replica's traces should draw. Only a real DAC (or the speaker's
+        high-rate PWM modelling) sounds anything but squares."""
+        label, rt, com_mode, _ = self._spec()
+        wave = self.wave.get()
+        if rt == "sb":
+            if wave != "native":
+                return wave
+            from ..dosplayer import _native_waveform
+            return _native_waveform(self.song)
+        if rt == "4voice" and wave not in ("native", "square"):
+            return wave                              # PWM-modelled on the speaker
+        return "square"                              # MCS / Tandy / PIT hardware
 
     def _dos_style(self):
         """The visual for the current selections, or None for no window at all:

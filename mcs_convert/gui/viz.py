@@ -200,6 +200,7 @@ class DosVizWindow:
         self.vupk = [0.0] * 4
         self.spec = [0.0] * 18
         self.phase = 0.0
+        self.wave = "square"             # the waveform this build sounds
         self.song = None                 # for the static poster (set_song)
         self.staves = None               # for MCS notation (set_notation)
         self.bar_ticks = 32
@@ -212,6 +213,10 @@ class DosVizWindow:
             self.style = style
             if self.alive():
                 self.win.title(f"DOS preview — {style}")
+
+    def set_wave(self, wave: str) -> None:
+        """The waveform the chosen target sounds — the traces draw its contour."""
+        self.wave = wave or "square"
 
     def set_song(self, song, step_seconds: float) -> None:
         """Give the poster painter the whole song (it draws time x pitch)."""
@@ -237,26 +242,27 @@ class DosVizWindow:
 
     def _scope_trace(self, c, x0, y0, x1, y1, level: float, period: float,
                      color: str, line: bool) -> None:
-        """One channel's square-wave trace: sounding -> a scrolling square of
-        that period; silent -> the center line."""
+        """One channel's scrolling trace, drawn with the contour of the waveform
+        this build actually sounds (self.wave) — the same shape the .COM's
+        scopes bake in. A square still draws as the hard two-level trace; a
+        sine rolls, and a narrow pulse shows its true duty."""
+        from ..dosplayer import _wave_value
         mid = (y0 + y1) / 2
         amp = (y1 - y0) * 0.32
         if level <= 0.001:
             c.create_line(x0, mid, x1, mid, fill=color)
             return
+        cycle = max(12.0, period * 52.0)             # on-screen FULL cycle
+        step = max(1.0, cycle / 32.0)                # sample the contour finely
+        shift = (self.phase * 60.0) % cycle
         pts = []
-        px = max(6.0, period * 26.0)                 # on-screen half-period
         x = x0
-        state = int((self.phase * 60) / px) & 1
-        while x < x1:
-            nxt = min(x1, x + px)
-            y = mid - amp if state else mid + amp
-            if line and pts:
-                pts.extend([x, y])
-            pts.extend([x, y, nxt, y])
-            x = nxt
-            state ^= 1
-        c.create_line(*pts, fill=color, width=2)
+        while x <= x1:
+            ph = (((x - x0) + shift) % cycle) / cycle
+            pts.extend([x, mid - _wave_value(self.wave, ph) * amp])
+            x += step
+        if len(pts) >= 4:
+            c.create_line(*pts, fill=color, width=2)
 
     # -- draw ---------------------------------------------------------------
     def draw(self, levels, spectrum, periods, elapsed: float = 0.0) -> None:
