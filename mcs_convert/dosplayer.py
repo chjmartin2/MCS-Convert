@@ -464,6 +464,7 @@ _NOISE_SEED = 0xACE1
 _CHW = 70                       # channel scope width in byte columns; L = 0..69
 _TOP = (10, 50, 30)             # top-row band: hi_y, lo_y, cen_y (drawn y 10..50)
 _BOT = (70, 110, 90)            # bottom-row band
+_GAMP = 20                      # graphics-scope amplitude in scanlines (cen - hi)
 # (hi_y, lo_y, cen_y, packed colour, left column). left col 4, right col 86.
 _CH = [(*_TOP, 0xEE, 4),        # ch0 yellow      top-left
        (*_TOP, 0x44, 86),       # ch1 dark red    top-right
@@ -575,23 +576,7 @@ def _emit_channel_draw(a: "_Asm", ch: int, colors=_CH) -> None:
     this one with a vline -- so the square is solid and edges stay crisp."""
     hi, lo, cen, packed, _cs = colors[ch]
     a.db(0xB2, packed)                                  # mov dl, packed colour
-    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"c{ch}_s")                         # jne snd
-    a.db(0xB9).bytes(_w(cen))                           # mov cx,cen_y
-    a.db(0xEB).rel8(f"c{ch}_y")                         # jmp have_y
-    a.label(f"c{ch}_s")
-    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
-    a.db(0x74).rel8(f"c{ch}_lo")                        # je lo
-    a.db(0xB9).bytes(_w(hi)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi_y; inc byte[msum] (up)
-    a.db(0xEB).rel8(f"c{ch}_a")                         # jmp adv
-    a.label(f"c{ch}_lo")
-    a.db(0xB9).bytes(_w(lo)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo_y; dec byte[msum]
-    a.label(f"c{ch}_a")
-    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"c{ch}_y")                         # jnz have_y
-    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1 (flip)
-    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)   # mov al,[viz+ch];mov[cnt+ch],al
-    a.label(f"c{ch}_y")
+    _emit_wave_pick(a, ch, cen, f"c{ch}", shape="wshapeg")
     a.db(0xA1).abs16("prevy", ch * 2)                   # mov ax,[prevy+ch] (previous y)
     a.db(0x89, 0x0E).abs16("prevy", ch * 2)             # mov [prevy+ch],cx (save this y)
     a.db(0x39, 0xC8).db(0x76).rel8(f"c{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg ax,cx
@@ -665,13 +650,7 @@ def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
     a.db(0xB9).bytes(_w(clear_words)).db(0xF3, 0xAB)    # mov cx,N; rep stosw (clear buffer)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # add word[scroll], speed
     for ch in range(3):                                 # phase each tone channel by scroll
-        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)      # mov al,[viz+ch]; or al,al
-        a.db(0x75).rel8(f"rst{ch}").db(0xB0, 0x01)      # jnz rst; mov al,1 (avoid /0)
-        a.label(f"rst{ch}")
-        a.db(0x30, 0xE4).db(0x89, 0xC3)                 # xor ah,ah; mov bx,ax (bx = period P)
-        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)   # xor dx,dx;mov ax,[scroll];div bx
-        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)      # and al,1; mov [lev+ch],al (quotient&1)
-        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)  # mov ax,bx;sub ax,dx;mov[cnt+ch],al (P-rem)
+        _emit_wave_setup(a, ch, "rst")
         a.db(0xC7, 0x06).abs16("prevy", ch * 2).bytes(_w(colors[ch][2]))  # prevy[ch]=cen_y
     a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=158
     a.db(0x31, 0xED)                                    # xor bp,bp  (L = column 0..69)
@@ -700,6 +679,82 @@ _TBLK = 0xDB                    # full-block glyph
 _TCEN = (2, 7, 12, 17, 22)      # band centre rows (ch0-3 + master)
 _TATTR = (0x0E, 0x04, 0x01, 0x0A, 0x0F)   # yellow/dark-red/dark-blue/bright-green/white
 _TAMP = 2                       # wave amplitude in rows (± from centre)
+
+# ---- waveform-aware scope traces --------------------------------------------
+# The scopes used to draw a two-level square: each column picked HI or LO from a
+# flip-flop. That's a lie whenever the build isn't sounding squares (a
+# SoundBlaster wavetable, or the speaker's high-rate PWM modelling), where a
+# sine and a 12.5% pulse looked identical. Now each channel runs a PHASE
+# ACCUMULATOR (one full cycle per 2*period columns) and reads its height from a
+# baked shape table, so the trace has the real waveform's contour. A square's
+# table is still exactly +/-amp, so square builds look as they always did.
+_WSHAPE_N = 16                  # phase steps per cycle (top 4 bits of the phase)
+
+
+def _wave_value(waveform: str, ph: float) -> float:
+    """One cycle of `waveform` at phase `ph` (0..1), in -1..+1."""
+    import math
+    if waveform in _WAVE_DUTIES:
+        return 1.0 if ph < _WAVE_DUTIES[waveform] else -1.0
+    if waveform == "triangle":
+        return 4.0 * ph - 1.0 if ph < 0.5 else 3.0 - 4.0 * ph
+    if waveform == "nestri":                          # 4-bit stepped triangle
+        t = 4.0 * ph - 1.0 if ph < 0.5 else 3.0 - 4.0 * ph
+        return round((t + 1.0) * 7.5) / 7.5 - 1.0
+    if waveform == "sine":
+        return math.sin(2 * math.pi * ph)
+    return 1.0 if ph < 0.5 else -1.0                  # square
+
+
+def _wave_shape(waveform: str, amp: int, n: int = _WSHAPE_N) -> bytes:
+    """`n` signed offsets over one cycle, scaled to +/-amp. NEGATIVE is UP the
+    screen (a row/scanline above the centre), matching the drawing code."""
+    return bytes(round(-_wave_value(waveform, (i + 0.5) / n) * amp) & 0xFF
+                 for i in range(n))
+
+
+def _emit_wave_setup(a: "_Asm", ch: int, pfx: str) -> None:
+    """Once per frame: this channel's phase STEP (a full cycle every 2*period
+    columns) and its starting phase, carried from the scroll counter so the
+    trace keeps sliding smoothly from frame to frame."""
+    a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)          # mov al,[viz+ch]; or al,al
+    a.db(0x75).rel8(f"{pfx}{ch}").db(0xB0, 0x01)        # jnz ok; mov al,1 (avoid /0)
+    a.label(f"{pfx}{ch}")
+    a.db(0x30, 0xE4).db(0x89, 0xC3).db(0x01, 0xDB)      # xor ah,ah; bx=ax; bx+=bx (2P)
+    a.db(0xBA, 0x01, 0x00).db(0x31, 0xC0)               # dx=1; ax=0  (0x10000)
+    a.db(0xF7, 0xF3)                                    # div bx -> ax = 65536/(2P)
+    a.db(0xA3).abs16("wstep", ch * 2)                   # [wstep+ch] = step
+    a.db(0xF7, 0x26).abs16("scroll")                    # mul word[scroll] (dx:ax)
+    a.db(0xA3).abs16("wphase", ch * 2)                  # [wphase+ch] = scroll*step
+
+
+def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
+                    shape: str = "wshape", msum: bool = True) -> None:
+    """Per column: CX = the row/scanline this channel's wave sits on. Advances
+    the phase, reads the baked shape, and feeds the master sum the wave's
+    direction. A silent channel flatlines on its centre."""
+    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
+    a.db(0x75).rel8(f"{pfx}_s")                         # jne sounding
+    a.db(0xB9).bytes(_w(rc))                            # mov cx,centre
+    a.db(0xEB).rel8(f"{pfx}_d")                         # jmp done
+    a.label(f"{pfx}_s")
+    a.db(0xA1).abs16("wphase", ch * 2)                  # mov ax,[wphase+ch]
+    a.db(0x03, 0x06).abs16("wstep", ch * 2)             # add ax,[wstep+ch]
+    a.db(0xA3).abs16("wphase", ch * 2)                  # mov [wphase+ch],ax
+    a.db(0x88, 0xE0)                                    # mov al,ah (phase high byte)
+    a.db(0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8)   # shr al,1 x4 -> 0..15
+    a.db(0x30, 0xE4).db(0x89, 0xC6)                     # xor ah,ah; mov si,ax
+    a.db(0x8A, 0x84).abs16(shape)                       # mov al,[si+shape]
+    a.db(0x98)                                          # cbw (signed offset)
+    a.db(0xB9).bytes(_w(rc)).db(0x01, 0xC1)             # mov cx,centre; add cx,ax
+    if msum:                                            # feed the master trace
+        a.db(0x09, 0xC0).db(0x74).rel8(f"{pfx}_d")      # or ax,ax; jz done
+        a.db(0x78).rel8(f"{pfx}_u")                     # js up (above centre)
+        a.db(0xFE, 0x0E).abs16("msum")                  # dec byte[msum]
+        a.db(0xEB).rel8(f"{pfx}_d")                     # jmp done
+        a.label(f"{pfx}_u")
+        a.db(0xFE, 0x06).abs16("msum")                  # inc byte[msum]
+    a.label(f"{pfx}_d")
 _TEXTROW = [r * 160 for r in range(25)]   # byte offset of each text row
 
 
@@ -731,23 +786,7 @@ def _emit_text_channel(a: "_Asm", ch: int) -> None:
     """One tone channel column (BP): pick HI/LO/CENTRE row from its scroll
     counter, add ±1 to the master sum, fill from centre to that row."""
     rc = _TCEN[ch]
-    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"tc{ch}_s")                        # jne snd
-    a.db(0xB9).bytes(_w(rc))                            # mov cx,centre
-    a.db(0xEB).rel8(f"tc{ch}_f")                        # jmp fill
-    a.label(f"tc{ch}_s")
-    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
-    a.db(0x74).rel8(f"tc{ch}_lo")                       # je lo
-    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
-    a.db(0xEB).rel8(f"tc{ch}_a")                        # jmp adv
-    a.label(f"tc{ch}_lo")
-    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
-    a.label(f"tc{ch}_a")
-    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"tc{ch}_f")                        # jnz fill
-    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
-    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
-    a.label(f"tc{ch}_f")
+    _emit_wave_pick(a, ch, rc, f"tc{ch}")
     a.db(0xB8).bytes(_w(rc))                            # mov ax,centre
     a.db(0x39, 0xC8).db(0x76).rel8(f"tc{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg
     a.label(f"tc{ch}_o")
@@ -799,13 +838,7 @@ def _emit_text_drawframe(a: "_Asm") -> None:
     a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # mov cx,2000; rep stosw (clear 80x25)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
     for ch in range(3):                                 # phase each tone channel by scroll
-        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
-        a.db(0x75).rel8(f"tr{ch}").db(0xB0, 0x01)
-        a.label(f"tr{ch}")
-        a.db(0x30, 0xE4).db(0x89, 0xC3)
-        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
-        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
-        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+        _emit_wave_setup(a, ch, "tr")
     a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
     a.label("txloop")
     a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
@@ -886,22 +919,7 @@ def _emit_text2_channel(a: "_Asm", ch: int) -> None:
     """Tone channel: pick HI/LO/CENTRE row from its scroll counter, add ±1 to the
     master sum, draw the connected line segment."""
     rc = _TCEN[ch]
-    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"u{ch}_s")                         # jne snd
-    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8(f"u{ch}_r")  # mov cx,centre; jmp row
-    a.label(f"u{ch}_s")
-    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
-    a.db(0x74).rel8(f"u{ch}_lo")                        # je lo
-    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
-    a.db(0xEB).rel8(f"u{ch}_a")                         # jmp adv
-    a.label(f"u{ch}_lo")
-    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
-    a.label(f"u{ch}_a")
-    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"u{ch}_r")                         # jnz row
-    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
-    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
-    a.label(f"u{ch}_r")
+    _emit_wave_pick(a, ch, rc, f"u{ch}")
     _emit_t2row(a, ch)
 
 
@@ -939,13 +957,7 @@ def _emit_text2_drawframe(a: "_Asm") -> None:
     a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # mov cx,2000; rep stosw (clear)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
     for ch in range(3):                                 # phase each tone channel by scroll
-        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
-        a.db(0x75).rel8(f"ur{ch}").db(0xB0, 0x01)
-        a.label(f"ur{ch}")
-        a.db(0x30, 0xE4).db(0x89, 0xC3)
-        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
-        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
-        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+        _emit_wave_setup(a, ch, "ur")
     for i in range(5):                                  # reset each band's previous row to its centre
         a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_TCEN[i]))
     a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
@@ -1036,22 +1048,7 @@ def _emit_text3_channel(a: "_Asm", ch: int) -> None:
     """Tone channel in its quadrant: HI/LO/CENTRE row from the scroll counter,
     ±1 into the master sum, then the connected line segment at (BP + col0)."""
     rc = _T3_CEN[ch]
-    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"v{ch}_s")                         # jne snd
-    a.db(0xB9).bytes(_w(rc)).db(0xEB).rel8(f"v{ch}_r")  # mov cx,centre; jmp row
-    a.label(f"v{ch}_s")
-    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
-    a.db(0x74).rel8(f"v{ch}_lo")                        # je lo
-    a.db(0xB9).bytes(_w(rc - _TAMP)).db(0xFE, 0x06).abs16("msum")   # mov cx,hi; inc [msum]
-    a.db(0xEB).rel8(f"v{ch}_a")                         # jmp adv
-    a.label(f"v{ch}_lo")
-    a.db(0xB9).bytes(_w(rc + _TAMP)).db(0xFE, 0x0E).abs16("msum")   # mov cx,lo; dec [msum]
-    a.label(f"v{ch}_a")
-    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"v{ch}_r")                         # jnz row
-    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
-    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
-    a.label(f"v{ch}_r")
+    _emit_wave_pick(a, ch, rc, f"v{ch}")
     _t3_setcol(a, _T3_COL0[ch])
     _emit_t3row(a, ch)
 
@@ -1123,13 +1120,7 @@ def _emit_text3_drawframe(a: "_Asm") -> None:
     a.db(0xB9, 0xD0, 0x07).db(0xF3, 0xAB)               # cx=2000; rep stosw (clear)
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
     for ch in range(3):                                 # phase each tone channel by scroll
-        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
-        a.db(0x75).rel8(f"w3{ch}").db(0xB0, 0x01)
-        a.label(f"w3{ch}")
-        a.db(0x30, 0xE4).db(0x89, 0xC3)
-        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
-        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
-        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+        _emit_wave_setup(a, ch, "w3")
     for i in range(5):                                  # reset each band's previous row
         a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_T3_CEN[i]))
     # ---- quadrant loop: 38 columns; store each column's master sum to mbuf ----
@@ -1418,21 +1409,7 @@ def _t5_spec_harm() -> bytes:
 def _emit_t5_scope_channel(a: "_Asm", ch: int, cen: int, col0: int) -> None:
     """Top-grid tone scope: HI/LO/CENTRE row from the scroll counter (no master
     sum), then the box-line segment at (BP + col0)."""
-    a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
-    a.db(0x75).rel8(f"z{ch}_s")                         # jne snd
-    a.db(0xB9).bytes(_w(cen)).db(0xEB).rel8(f"z{ch}_r")  # mov cx,cen; jmp row
-    a.label(f"z{ch}_s")
-    a.db(0x80, 0x3E).abs16("lev", ch).db(0x00)          # cmp byte[lev+ch],0
-    a.db(0x74).rel8(f"z{ch}_lo")                        # je lo
-    a.db(0xB9).bytes(_w(cen - 2)).db(0xEB).rel8(f"z{ch}_a")  # mov cx,hi; jmp adv
-    a.label(f"z{ch}_lo")
-    a.db(0xB9).bytes(_w(cen + 2))                       # mov cx,lo
-    a.label(f"z{ch}_a")
-    a.db(0xFE, 0x0E).abs16("cnt", ch)                   # dec byte[cnt+ch]
-    a.db(0x75).rel8(f"z{ch}_r")                         # jnz row
-    a.db(0x80, 0x36).abs16("lev", ch).db(0x01)          # xor byte[lev+ch],1
-    a.db(0xA0).abs16("viz", ch).db(0xA2).abs16("cnt", ch)
-    a.label(f"z{ch}_r")
+    _emit_wave_pick(a, ch, cen, f"z{ch}", msum=False)
     a.db(0x89, 0xEB)                                    # mov bx,bp
     if col0 == 1:
         a.db(0x43)                                      # inc bx
@@ -1642,13 +1619,7 @@ def _emit_text5_drawframe(a: "_Asm") -> None:
     a.db(0x83, 0x06).abs16("scroll").db(_SCROLL_SPEED)  # scroll += speed
     # ---- top: 2x2 scope grid ---------------------------------------------------
     for ch in range(3):                                 # phase each tone by scroll
-        a.db(0xA0).abs16("viz", ch).db(0x08, 0xC0)
-        a.db(0x75).rel8(f"w5{ch}").db(0xB0, 0x01)
-        a.label(f"w5{ch}")
-        a.db(0x30, 0xE4).db(0x89, 0xC3)
-        a.db(0x31, 0xD2).db(0xA1).abs16("scroll").db(0xF7, 0xF3)
-        a.db(0x24, 0x01).db(0xA2).abs16("lev", ch)
-        a.db(0x89, 0xD8).db(0x29, 0xD0).db(0xA2).abs16("cnt", ch)
+        _emit_wave_setup(a, ch, "w5")
     for i in range(4):
         a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_T5_SCEN[i]))
     a.db(0x31, 0xED)                                    # xor bp,bp
@@ -1893,16 +1864,21 @@ def _emit_scope_code(a: "_Asm", vis: str) -> None:
         a.bytes(struct.pack(f"<{len(_TEXTROW)}H", *_TEXTROW))
 
 
-def _emit_scope_vars(a: "_Asm", vis: str) -> None:
+def _emit_scope_vars(a: "_Asm", vis: str, wave: str = "square") -> None:
     """Emit the shared draw state + the per-vis scope variables. (viz[]/strike[]
-    are emitted by the caller, right before this.)"""
+    are emitted by the caller, right before this.) `wave` is the waveform the
+    build actually sounds, baked into the trace shape tables."""
     if vis:                                          # shared draw state
         a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
-        a.label("cnt"); a.db(0x00, 0x00, 0x00, 0x00)     # draw-loop counters
-        a.label("lev"); a.db(0x01, 0x01, 0x01, 0x01)     # draw-loop levels
         a.label("msum"); a.db(0x00)                       # master-sum accumulator
         a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
         a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
+        # one wave cycle per channel: phase + per-column step, and the contour
+        a.label("wphase"); a.bytes(bytes(8))
+        a.label("wstep"); a.bytes(bytes(8))
+        a.label("wshape"); a.bytes(_wave_shape(wave, _TAMP))       # text rows
+        if vis in ("graphics", "vga"):
+            a.label("wshapeg"); a.bytes(_wave_shape(wave, _GAMP))  # scanlines
     if vis in ("graphics", "vga"):                   # mode-9 / VGA vline/frame state
         a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
         a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
@@ -1991,7 +1967,8 @@ def _emit_draw_wait(a: "_Asm", draw_skip: int) -> None:
 
 
 def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
-              stream: bytes, vis: str = "", draw_skip: int = 1) -> bytes:
+              stream: bytes, vis: str = "", draw_skip: int = 1,
+              wave: str = "square") -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
     ISR, run — waiting for a key or redrawing the scopes — then tear down.
     Followed by the silence record and per-sub-tick event stream. `vis` is "",
@@ -2096,7 +2073,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     a.label("subcount"); a.db(subdiv & 0xFF)
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-channel scope periods
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-channel note-on latch (VU)
-    _emit_scope_vars(a, vis)                          # shared + per-vis draw state
+    _emit_scope_vars(a, vis, wave)                    # shared + per-vis draw state
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
     a.label("stream"); a.bytes(stream)
@@ -2305,7 +2282,8 @@ def _emit_spk_wave_synth(a: "_Asm", mcs: bool) -> None:
 def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
                    poster: bytes = b"", mcs: bool = False, sb: bool = False,
-                   sb_port: int = _SB_PORT, wave_table: bytes = b"") -> bytes:
+                   sb_port: int = _SB_PORT, wave_table: bytes = b"",
+                   wave: str = "square") -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -2500,7 +2478,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     if static:
         a.label("poster"); a.bytes(poster)               # the baked 320x200x4 song picture
     else:
-        _emit_scope_vars(a, vis)                      # shared + per-vis draw state
+        _emit_scope_vars(a, vis, wave)                # shared + per-vis draw state
     a.label("stream"); a.bytes(stream)
     return a.resolve()
 
@@ -2587,8 +2565,12 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
         poster = _render_static_poster(song) if vis == "static" else b""
+        # the scopes draw the contour of what this build actually sounds: the
+        # SB wavetable, the speaker's PWM-modelled shape, or a plain square
+        scope_wave = (wf if sb else
+                      (spk_wave if spk_wave and spk_wave != "native" else "square"))
         com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster,
-                             mcs, sb, sb_port, wave_table)
+                             mcs, sb, sb_port, wave_table, scope_wave)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com
@@ -2615,7 +2597,8 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     # its end instead of hanging the final chord until a key is pressed
     stream += sil_bytes
     total += 1
-    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis, draw_skip)
+    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis, draw_skip,
+                    "square")                        # SN76489 / PIT: real squares
     if len(com) > 0xFF00:
         raise ValueError(f".COM is {len(com)} bytes — too big for one segment; "
                          "shorten the song or split it")

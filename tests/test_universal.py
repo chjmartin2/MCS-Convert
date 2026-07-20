@@ -211,3 +211,37 @@ def test_noise_track_renders_as_percussive_hits_not_a_wash():
     dark = A._render_noise_track([(0, 8, 40)], 22050, step, 0.3)
     bright = A._render_noise_track([(0, 8, 90)], 22050, step, 0.3)
     assert (np.abs(dark) > 0.02).sum() > (np.abs(bright) > 0.02).sum()
+
+
+def test_scope_traces_follow_the_sounded_waveform():
+    # The scopes drew a two-level square regardless of what the build sounded,
+    # so a sine and a 12.5% pulse looked identical. Each channel now runs a
+    # phase accumulator against a baked SHAPE table, so the trace has the real
+    # waveform's contour.
+    sq = D._wave_shape("square", D._TAMP)
+    assert [b - 256 if b > 127 else b for b in sq] == [-2] * 8 + [2] * 8
+    sine = [b - 256 if b > 127 else b for b in D._wave_shape("sine", D._TAMP)]
+    assert sine != [-2] * 8 + [2] * 8 and min(sine) == -2 and max(sine) == 2
+    assert 0 in sine                                 # ...and passes through centre
+    # duty cycles are visible: pulse12 sits high for 2 of 16 columns, pulse25 for 4
+    for wf, high in (("pulse12", 2), ("pulse25", 4), ("pulse50", 8)):
+        shape = [b - 256 if b > 127 else b for b in D._wave_shape(wf, D._TAMP)]
+        assert sum(1 for v in shape if v < 0) == high
+    # the shape a build bakes is the one it actually sounds
+    s = _universal_song()
+    kw = dict(mix_rate=22000, text_scope=5)
+    sb_sine = D.build_com(s, "4voice", 0x80, sb=True, sb_wave="sine", **kw)
+    sb_sq = D.build_com(s, "4voice", 0x80, sb=True, sb_wave="square", **kw)
+    assert bytes(D._wave_shape("sine", D._TAMP)) in sb_sine
+    assert bytes(D._wave_shape("sine", D._TAMP)) not in sb_sq
+    assert bytes(sq) in sb_sq
+    # the speaker's PWM-modelled waveform reaches its scope too...
+    pwm = D.build_com(s, "4voice", 0x80, spk_wave="sine", mix_rate=24000,
+                      text_scope=5)
+    assert bytes(D._wave_shape("sine", D._TAMP)) in pwm
+    # ...while Tandy/PIT hardware really does sound squares
+    tandy = D.build_com(s, "tandy", 0x80, text_scope=5)
+    assert bytes(sq) in tandy
+    # the graphics scope gets the same contour at scanline amplitude
+    gfx = D.build_com(s, "tandy", 0x80, scope=True)
+    assert bytes(D._wave_shape("square", D._GAMP)) in gfx
