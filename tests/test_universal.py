@@ -149,12 +149,20 @@ def test_wave_tables():
 
 def test_sb_wavetable_and_spk_pwm_builds():
     s = _universal_song()
+    # EVERY SoundBlaster build mixes through the volume-scaled wavetable bank --
+    # a voice contributes a real amplitude at its note's volume, not a sign bit
     plain = D.build_com(s, "4voice", 0x80, sb=True, mix_rate=22000)
+    assert len(plain) > 256 * D._SB_LEVELS           # the bank is baked in
     sine = D.build_com(s, "4voice", 0x80, sb=True, sb_wave="sine", mix_rate=22000)
-    assert len(sine) > len(plain) + 200              # the 256-byte table is baked in
     native = D.build_com(s, "4voice", 0x80, sb=True, sb_wave="native",
                          mix_rate=22000)
-    assert len(native) > len(plain) + 200            # NES duties resolve to a table
+    assert len(sine) == len(plain) == len(native)    # same engine, different bank
+    assert native == plain                           # the default IS the song's own
+    assert sine != plain                             # ...and a forced bank differs
+    # quieter notes really are quieter: level 3 is ~3/7 of full amplitude
+    bank = D._sb_wave_bank("square")
+    amp = lambda lv: max(b - 256 if b > 127 else b for b in bank[lv * 256:(lv + 1) * 256])
+    assert amp(0) == 0 and amp(7) == D._SB_AMP and 0 < amp(3) < amp(7)
     pwm = D.build_com(s, "4voice", 0x80, spk_wave="sine", mix_rate=24000)
     assert len(pwm) > 700
     with pytest.raises(ValueError):                  # PWM modeling needs a high carrier

@@ -42,19 +42,27 @@ TARGET_WAVEFORMS = {
 }
 
 
+#: Targets whose hardware can actually express per-note nuance. A real DAC can
+#: sound each note's own waveform at its own volume; the 1-bit speaker engines
+#: and MCS's notation cannot, so for them the reduction drops that detail (a
+#: preview that kept it would lie about what the target plays).
+KEEPS_NOTE_DETAIL = frozenset({"sb"})
+
+
 def _tone_events(song: Song, include_perc: bool = False):
-    """Per-track (start, dur, midi) for the melodic content: tone tracks' non-
-    percussive notes. Noise/drum tracks and percussive notes are excluded (they
-    go through the percussion path) — unless `include_perc` (the "pitched"
-    percussion mode), which plays marked drums at their written pitches too."""
+    """Per-track (start, dur, midi, note) for the melodic content: tone tracks'
+    non-percussive notes. Noise/drum tracks and percussive notes are excluded
+    (they go through the percussion path) — unless `include_perc` (the "pitched"
+    percussion mode), which plays marked drums at their written pitches too.
+    The source note rides along so a rich target can keep its velocity/waveform."""
     out = []
     for t in song.tracks:
         if t.kind != KIND_TONE:
             if include_perc:                     # noise/drum notes as tones
-                out.append([(n.start_tick, n.duration_ticks, n.midi_note)
+                out.append([(n.start_tick, n.duration_ticks, n.midi_note, n)
                             for n in t.notes if not n.is_rest])
             continue
-        out.append([(n.start_tick, n.duration_ticks, n.midi_note)
+        out.append([(n.start_tick, n.duration_ticks, n.midi_note, n)
                     for n in t.notes
                     if not n.is_rest and (include_perc or not n.percussive)])
     return out
@@ -91,11 +99,12 @@ def _perc_hits(song: Song) -> List[Tuple[int, bool]]:
 
 
 def _allocate(events, n: int):
-    """Deal (start, dur, midi) events onto n monophonic voices, highest first
-    (same policy as audio._allocate_voices, kept here to avoid the import)."""
+    """Deal (start, dur, midi, note) events onto n monophonic voices, highest
+    first (same policy as audio._allocate_voices, kept here to avoid the
+    import). The source note is carried through unchanged."""
     evs = sorted((e for track in events for e in track), key=lambda e: (e[0], -e[2]))
     ends = [0] * n
-    chans: List[List[Tuple[int, int, int]]] = [[] for _ in range(n)]
+    chans: List[List[Tuple]] = [[] for _ in range(n)]
     for e in evs:
         free = [i for i in range(n) if ends[i] <= e[0]]
         i = free[0] if free else min(range(n), key=ends.__getitem__)
@@ -104,7 +113,7 @@ def _allocate(events, n: int):
         dur = e[1] - (start - e[0])
         if dur <= 0:
             continue
-        chans[i].append((start, dur, e[2]))
+        chans[i].append((start, dur, e[2], e[3]))
         ends[i] = start + dur
     return chans
 
@@ -167,10 +176,20 @@ def retrack(song: Song, target: str, drum_sound: Optional[str] = None,
                timesig_code=song.timesig_code,
                tempo_tick_seconds=song.tempo_tick_seconds)
 
+    keep_detail = target in KEEPS_NOTE_DETAIL
+
     def carry(track: Track, events, waveform: str) -> Track:
-        for start, dur, midi in events:
-            track.add(NoteEvent(start_tick=start, duration_ticks=dur,
-                                midi_note=midi))
+        for start, dur, midi, src in events:
+            if keep_detail:
+                # a real DAC sounds each note's own waveform at its own volume
+                track.add(NoteEvent(start_tick=start, duration_ticks=dur,
+                                    midi_note=midi, velocity=src.velocity,
+                                    waveform=(src.waveform
+                                              if src.waveform in allowed else ""),
+                                    effects=dict(src.effects)))
+            else:
+                track.add(NoteEvent(start_tick=start, duration_ticks=dur,
+                                    midi_note=midi))
         track.waveform = waveform
         return track
 

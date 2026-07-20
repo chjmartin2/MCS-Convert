@@ -183,14 +183,20 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, 
     channel from percussion."""
     per_track, perc = _split_notes(song)
     voices = _allocate_voices(per_track, n=3)
-    events: Dict[int, List[Tuple[int, int, int]]] = {}
+    # note velocities, so the SoundBlaster engine can play a quiet note quietly
+    # (the 1-bit speaker engines ignore the level -- they have no volume)
+    vel = {(n.start_tick, n.midi_note): n.velocity
+           for t in song.tracks for n in t.notes if not n.is_rest}
+    events: Dict[int, List[Tuple[int, int, int, int]]] = {}
     for v, voice in enumerate(voices):
         for start, dur, midi in voice:
             on = start * _SUBTICKS
             off = _artic_off(on, dur)
             freq = midi_to_freq(midi)
-            events.setdefault(on, []).append((v, _spk4_inc(freq, fs), _viz_period(freq)))
-            events.setdefault(off, []).append((v, 0, 0))
+            lvl = _sb_level(vel.get((start, midi), 100))
+            events.setdefault(on, []).append(
+                (v, _spk4_inc(freq, fs), _viz_period(freq), lvl))
+            events.setdefault(off, []).append((v, 0, 0, 0))
     seen = set()
     for start, midi in perc:                        # drums -> noise voice (3)
         on = start * _SUBTICKS
@@ -199,16 +205,19 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, 
         seen.add(on)
         off = on + max(1, _SUBTICKS - 1)
         events.setdefault(on, []).append(
-            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI, fs), _NOISE_VIZ_P))
-        events.setdefault(off, []).append((3, 0, 0))
+            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI, fs), _NOISE_VIZ_P,
+             _SB_LEVELS - 1))
+        events.setdefault(off, []).append((3, 0, 0, 0))
     return events
 
 
 def _build_spk4_stream(song: Song, fs: float = _SPK4_FS) -> Tuple[bytes, int]:
     """(stream bytes, total sub-ticks). One record per sub-tick:
-    [nchanges][voice, inc_lo, inc_hi, viz]* -- only voices that CHANGE are listed,
-    so a held note emits nothing and keeps its phase. A final all-off record
-    silences the voices before the loop restarts. `fs` is the mixing sample rate."""
+    [nchanges][voice|level<<4, inc_lo, inc_hi, viz]* -- only voices that CHANGE
+    are listed, so a held note emits nothing and keeps its phase. The voice byte
+    is 0-3, so its high nibble carries the note's VOLUME level for free (the
+    SoundBlaster engine reads it; the 1-bit engines mask it off). A final all-off
+    record silences the voices before the loop restarts."""
     events = _spk4_events(song, fs)
     ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
     total = ticks * _SUBTICKS
@@ -216,8 +225,9 @@ def _build_spk4_stream(song: Song, fs: float = _SPK4_FS) -> Tuple[bytes, int]:
     for s in range(total):
         ch = events.get(s, [])
         out.append(len(ch))
-        for v, inc, viz in ch:
-            out += bytes([v & 0xFF, inc & 0xFF, (inc >> 8) & 0xFF, viz & 0xFF])
+        for v, inc, viz, lvl in ch:
+            out += bytes([(v & 0x0F) | ((lvl & 0x0F) << 4),
+                          inc & 0xFF, (inc >> 8) & 0xFF, viz & 0xFF])
     out.append(_SPK4_VOICES)                        # trailing all-off sub-tick
     for v in range(_SPK4_VOICES):
         out += bytes([v, 0, 0, 0])
@@ -2160,6 +2170,27 @@ def _wave_table(waveform: str, amp: int, signed: bool) -> bytes:
     return bytes(out)
 
 
+# SoundBlaster VOLUME: the DAC can play a note quietly, so each voice indexes a
+# table scaled to its note's velocity instead of blasting every note at full
+# amplitude. _SB_LEVELS tables of 256 entries sit back to back, so a voice's
+# table base is wavetbl + level*256 -- one pointer per voice, no per-sample
+# multiply (an 8088 mul would cost more than the whole synth).
+_SB_LEVELS = 8                   # volume steps 0 (silent) .. 7 (full _SB_AMP)
+
+
+def _sb_wave_bank(waveform: str) -> bytes:
+    """The volume-scaled wavetable bank: level v plays at v/7 of full amplitude."""
+    return b"".join(_wave_table(waveform, round(_SB_AMP * v / (_SB_LEVELS - 1)),
+                                signed=True)
+                    for v in range(_SB_LEVELS))
+
+
+def _sb_level(velocity: int) -> int:
+    """Note velocity (0-127) -> a volume level. A sounding note never falls to
+    level 0 (silence) -- that's what a note-OFF is for."""
+    return max(1, min(_SB_LEVELS - 1, round(velocity * (_SB_LEVELS - 1) / 100.0)))
+
+
 def _emit_sb_write(a: "_Asm", value: int) -> None:
     """Poll the DSP write-status port (base+0xC bit7) then write command `value`.
     DX must be base+0xC on entry (and is left there)."""
@@ -2181,28 +2212,24 @@ def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
     _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
 
 
-def _emit_sb_synth_out(a: "_Asm", sb_port: int, use_table: bool = False) -> None:
-    """One 8-bit sample: sum the 4 voices as signed levels and write it to the
-    DSP DAC. bh accumulates the signed mix. Default: each tone contributes
-    +/-AMP by its square's high bit. With `use_table`, each tone's level comes
-    from the 256-entry `wavetbl` (sine/triangle/NES-duty...) indexed by the
-    accumulator's high byte — a real wavetable synth on the SB DAC."""
-    a.db(0x30, 0xFF)                                 # xor bh,bh (signed sum)
+def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
+    """One 8-bit sample for the SoundBlaster DAC: a real MIX, not a voice count.
+
+    Each voice looks its level up in its own volume-scaled wavetable (`wptr`
+    points at wavetbl + level*256), so a voice contributes a continuous
+    amplitude -- its actual waveform at its note's volume -- rather than a
+    +/-AMP sign bit. The four levels sum in BX (16-bit, so the mix can't wrap
+    the way a byte accumulator did) and the total lands in the DAC's range."""
+    a.db(0x31, 0xDB)                                 # xor bx,bx (16-bit signed sum)
     for i in range(_SPK4_TONES):
         a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
         a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
         a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
-        if use_table:
-            a.db(0x88, 0xE2).db(0x30, 0xF6)          # mov dl,ah; xor dh,dh
-            a.db(0x89, 0xD6)                         # mov si,dx (phase high byte)
-            a.db(0x8A, 0x94).abs16("wavetbl")        # mov dl,[si+wavetbl]
-            a.db(0x00, 0xD7)                         # add bh,dl
-        else:
-            a.db(0x01, 0xC0)                         # add ax,ax (CF = bit15 = square level)
-            a.db(0x18, 0xD2)                         # sbb dl,dl (0x00 or 0xFF)
-            a.db(0x80, 0xE2, 2 * _SB_AMP)            # and dl, 2*AMP
-            a.db(0x80, 0xEA, _SB_AMP)                # sub dl, AMP  -> -AMP or +AMP
-            a.db(0x00, 0xD7)                         # add bh, dl
+        a.db(0x8B, 0x36).abs16("wptr", i * 2)        # mov si,[wptr+i] (volume table)
+        a.db(0x88, 0xE0).db(0x30, 0xE4)              # mov al,ah; xor ah,ah (phase hi)
+        a.db(0x01, 0xC6)                             # add si,ax (table + phase)
+        a.db(0x8A, 0x04).db(0x98)                    # mov al,[si]; cbw (signed sample)
+        a.db(0x01, 0xC3)                             # add bx,ax
     nz = _SPK4_TONES * 2                             # noise voice
     a.db(0xA1).abs16("inc", nz).db(0x09, 0xC0)       # ax=ninc; or ax,ax
     a.db(0x74).rel8("sb_nmute")                      # jz muted (contributes 0)
@@ -2213,14 +2240,17 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int, use_table: bool = False) -> None
     a.label("sb_nf")
     a.db(0xA3).abs16("nlfsr")
     a.label("sb_nobit")
+    # the noise voice reads its own volume table too: a set LFSR bit takes the
+    # table's high half (+amp), a clear bit the low half (-amp)
+    a.db(0x8B, 0x36).abs16("wptr", nz)               # mov si,[wptr+3]
     a.db(0xF6, 0x06).abs16("nlfsr").db(0x01)         # test byte[nlfsr],1
-    a.db(0x74).rel8("sb_nlo")                        # jz low
-    a.db(0x80, 0xC7, _SB_AMP).db(0xEB).rel8("sb_nmute")   # add bh,AMP; jmp done
-    a.label("sb_nlo")
-    a.db(0x80, 0xEF, _SB_AMP)                        # sub bh,AMP
+    a.db(0x75).rel8("sb_nhi")                        # jnz high
+    a.db(0x81, 0xC6).bytes(_w(128))                  # add si,128 (the -amp half)
+    a.label("sb_nhi")
+    a.db(0x8A, 0x04).db(0x98).db(0x01, 0xC3)         # mov al,[si]; cbw; add bx,ax
     a.label("sb_nmute")
-    # sample = bh + 0x80 (signed level -> 0..255); write cmd 0x10 then the sample
-    a.db(0x88, 0xF8).db(0x04, 0x80).db(0x88, 0xC4)   # al=bh; add al,0x80; ah=al
+    # sample = mix + 0x80 (signed level -> 0..255); write cmd 0x10 then the sample
+    a.db(0x88, 0xD8).db(0x04, 0x80).db(0x88, 0xC4)   # al=bl; add al,0x80; ah=al
     a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
     _emit_sb_write(a, 0x10)                          # DSP cmd 0x10 (direct DAC)
     a.db(0xEC).db(0xA8, 0x80).db(0x75, 0xFB)         # poll write-ready
@@ -2362,7 +2392,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
     if sb:
-        _emit_sb_synth_out(a, sb_port, bool(wave_table))   # 8-bit mix -> SB DAC
+        _emit_sb_synth_out(a, sb_port)               # volume-mixed 8-bit -> SB DAC
     elif wave_table:
         _emit_spk_wave_synth(a, mcs)                 # PWM waveform modeling
     else:
@@ -2417,9 +2447,17 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xAC).db(0x88, 0xC1).db(0x30, 0xED)         # lodsb (nchanges); cl=al; ch=0
     a.db(0xE3).rel8("sp_noev")                       # jcxz noev
     a.label("sp_evl")
-    a.db(0xAC).db(0x30, 0xE4)                        # lodsb (voice); xor ah,ah
+    a.db(0xAC)                                        # lodsb (voice | level<<4)
+    a.db(0x88, 0xC2)                                 # mov dl,al (keep the packed byte)
+    a.db(0x24, 0x0F).db(0x30, 0xE4)                  # and al,0x0F (voice); xor ah,ah
     a.db(0x89, 0xC7)                                 # mov di,ax (voice: byte index)
     a.db(0x89, 0xC3).db(0x01, 0xDB)                 # mov bx,ax; add bx,bx (voice*2: word)
+    if sb and wave_table:
+        # the note's volume level picks this voice's wavetable: base + level*256
+        a.db(0xD0, 0xEA, 0xD0, 0xEA, 0xD0, 0xEA, 0xD0, 0xEA)   # shr dl,1 x4 -> level
+        a.db(0x88, 0xD6).db(0x30, 0xD2)              # mov dh,dl; xor dl,dl (dx=level*256)
+        a.db(0x81, 0xC2).abs16("wavetbl")            # add dx, wavetbl
+        a.db(0x89, 0x97).abs16("wptr")               # [wptr+bx] = dx
     a.db(0xAD)                                        # lodsw (inc)
     a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
     a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
@@ -2453,6 +2491,10 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
     a.label("kbctr"); a.db(0x01, 0x00)               # countdown to the next keyboard poll
+    if sb:                                           # per-voice volume-table pointers
+        a.label("wptr")                              # start on level 0 = silence,
+        for _ in range(_SPK4_VOICES):                # so a voice is quiet until its
+            a.abs16("wavetbl")                       # first note sets its level
     if wave_table:
         a.label("wavetbl"); a.bytes(wave_table)      # 256-entry oscillator cycle
     if static:
@@ -2522,11 +2564,13 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         # -- waveform table selection (the universal waveforms reach DOS here) --
         wave_table = b""
         if sb:
-            wf = sb_wave or "square"
+            # every SB voice mixes through the volume-scaled bank, so each one
+            # contributes a real amplitude at its note's volume. "native" plays
+            # the song's own waveforms (NES duties, the stepped triangle...).
+            wf = sb_wave or "native"
             if wf == "native":
                 wf = _native_waveform(song)
-            if wf != "square":                       # square = the fast bit path
-                wave_table = _wave_table(wf, _SB_AMP, signed=True)
+            wave_table = _sb_wave_bank(wf)
         elif spk_wave and spk_wave not in ("square", "native"):
             if fs < _SPK4_WAVE_MIN_RATE:
                 raise ValueError(

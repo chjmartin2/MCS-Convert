@@ -154,11 +154,15 @@ def test_4voice_pc_speaker_mixes_in_software():
     assert b"\xE6\x61" in com                         # out 0x61,al (drives the speaker)
     assert b"\x3C\x04" in com                         # cmp al,4 : 4-voice delta-sigma threshold
     assert b"\x35\x00\xB4" in com                     # xor ax,0xB400 : the noise LFSR taps
-    # the stream is per sub-tick: [nchanges][voice, inc_lo, inc_hi, viz]*
+    # the stream is per sub-tick: [nchanges][voice|level<<4, inc_lo, inc_hi, viz]*
+    # (the voice byte only needs 2 bits, so its high nibble carries the note's
+    # VOLUME level for the SoundBlaster engine; the 1-bit engines mask it off)
     stream, total = D._build_spk4_stream(song)
     assert stream[0] == 3                             # sub-tick 0 = three note-ons
-    voice, lo, hi = stream[1], stream[2], stream[3]
-    assert voice == 0 and (lo | (hi << 8)) == D._spk4_inc(D.midi_to_freq(72))
+    packed, lo, hi = stream[1], stream[2], stream[3]
+    assert (packed & 0x0F) == 0                       # voice 0
+    assert (packed >> 4) == D._sb_level(100)          # full-velocity note
+    assert (lo | (hi << 8)) == D._spk4_inc(D.midi_to_freq(72))
     # the graphics oscilloscope is Tandy-only, but text scopes are allowed
     with pytest.raises(ValueError):
         D.build_com(song, "4voice", 0x80, scope=True)
@@ -176,7 +180,7 @@ def test_4voice_percussion_drives_the_noise_voice():
     song.add_track(mel)
     song.add_track(drums)
     events = D._spk4_events(song)
-    at0 = dict((v, inc) for v, inc, viz in events[0])   # voice -> inc at sub-tick 0
+    at0 = dict((v, inc) for v, inc, viz, lvl in events[0])   # voice -> inc at sub-tick 0
     assert at0[0] == D._spk4_inc(D.midi_to_freq(60))  # melody on voice 0
     assert at0[3] == D._spk4_noise_inc(True)          # bright hi-hat on the noise voice
     assert D._spk4_noise_inc(True) > D._spk4_noise_inc(False)   # brighter = faster clock
