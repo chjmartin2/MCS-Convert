@@ -660,7 +660,8 @@ class PlayerApp:
             return
         master, _, sr = self._scope_data
         wav = wav_bytes(pcm16(master), sr)                 # always full volume
-        default = os.path.splitext(os.path.basename(getattr(self, "path", "song")))[0] + ".wav"
+        default = os.path.splitext(os.path.basename(
+            self.path or self.song.title or "song"))[0] + ".wav"
         out = filedialog.asksaveasfilename(
             title="Export decoded playback as WAV", defaultextension=".wav",
             initialfile=default, filetypes=[("WAV audio", "*.wav")])
@@ -677,7 +678,8 @@ class PlayerApp:
     def export_tracker(self) -> None:
         if not self.song:
             return
-        default = os.path.splitext(os.path.basename(getattr(self, "path", "song")))[0] + ".txt"
+        default = os.path.splitext(os.path.basename(
+            self.path or self.song.title or "song"))[0] + ".txt"
         out = filedialog.asksaveasfilename(
             title="Export tracker grid as text", defaultextension=".txt",
             initialfile=default, filetypes=[("Text", "*.txt")])

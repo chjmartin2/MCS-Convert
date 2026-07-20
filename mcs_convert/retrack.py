@@ -124,7 +124,8 @@ def _drum_click_notes(hits, drum_sound: str) -> List[NoteEvent]:
 
 
 def retrack(song: Song, target: str, drum_sound: Optional[str] = None,
-            percussion: str = "clicks") -> Song:
+            percussion: str = "clicks", voices: Optional[int] = None,
+            drop_noise: bool = False) -> Song:
     """Reduce `song` to what `target` can play; returns a NEW Song (the input is
     never modified). See the module docstring for the per-target shapes.
 
@@ -132,15 +133,29 @@ def retrack(song: Song, target: str, drum_sound: Optional[str] = None,
     captures and marks drums): "clicks" voices them on the target's percussion
     path (MCS register-extreme clicks / the noise channel), with `drum_sound`
     picking the click palette; "pitched" plays them at their written pitches as
-    ordinary tones; "drop" silences them."""
+    ordinary tones; "drop" silences them. `voices` (mcs target only) caps the
+    voice count for the destination player: 4 = the PC-speaker 4-voice engine
+    (default), 3 = Tandy/PCjr's three tone channels, 1 = a single beeper line.
+    `drop_noise` removes the noise CHANNEL specifically (kind="noise" tracks)
+    while other percussion (DPCM, marked drums) still follows `percussion`."""
     if target not in TARGET_WAVEFORMS:
         raise ValueError(f"unknown retrack target {target!r} "
                          f"(one of {tuple(TARGET_WAVEFORMS)})")
     if percussion not in ("clicks", "pitched", "drop"):
         raise ValueError(f"percussion must be clicks/pitched/drop, "
                          f"not {percussion!r}")
+    if voices is not None and (target != "mcs" or voices not in (1, 3, 4)):
+        raise ValueError("voices applies to the mcs target only, as 1, 3 or 4")
     if drum_sound is None:
         drum_sound = getattr(song, "percussion_pref", (None, "auto"))[1] or "auto"
+    if drop_noise:
+        pruned = Song(title=song.title, tick_hz=song.tick_hz, source=song.source,
+                      time_signature=song.time_signature,
+                      key_signature=song.key_signature,
+                      timesig_code=song.timesig_code,
+                      tempo_tick_seconds=song.tempo_tick_seconds)
+        pruned.tracks = [t for t in song.tracks if t.kind != KIND_NOISE]
+        song = pruned
     allowed = TARGET_WAVEFORMS[target]
     tones = _tone_events(song, include_perc=(percussion == "pitched"))
     hits = _perc_hits(song) if percussion == "clicks" else []
@@ -160,13 +175,17 @@ def retrack(song: Song, target: str, drum_sound: Optional[str] = None,
         return track
 
     if target == "mcs":
-        # 4 notation voices; percussion becomes click notes sharing voice 4
-        # (or its own voice when free) exactly like the classic converter.
-        voices = _allocate(tones, 4 if not hits else 3)
-        for i, ev in enumerate(voices):
+        # Up to `voices` notation voices (4 = the PC-speaker 4-voice engine,
+        # 3 = Tandy/PCjr, 1 = single beeper line); percussion takes the last
+        # voice as click notes, exactly like the classic converter. A single
+        # voice keeps only the top line — no room for drums.
+        nv = voices or 4
+        use_drums = bool(hits) and nv > 1
+        chans = _allocate(tones, nv - 1 if use_drums else nv)
+        for i, ev in enumerate(chans):
             out.add_track(carry(Track(name=f"Voice {i + 1}", chip="mcs"), ev,
                                 "square"))
-        if hits:
+        if use_drums:
             drum = Track(name="Drums", chip="mcs", kind=KIND_DRUM,
                          waveform="square")
             drum.notes = _drum_click_notes(hits, drum_sound)

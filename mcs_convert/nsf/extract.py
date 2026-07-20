@@ -353,7 +353,7 @@ def align_to_tempo(onsets: List[int], play_hz: float, target_byte0: int):
 
 
 def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
-                   percussion: str = "clicks", drum_sound: str = "cluster",
+                   percussion: str = "clicks", drum_sound: str = "auto",
                    grid: Optional[Tuple[float, int]] = None) -> Tuple[Song, int]:
     """Frame-domain log -> (Song in 32nd ticks, mcs_tempo_byte0).
 
@@ -481,7 +481,7 @@ def _requantize(song: Song, grid_fn):
 
 def extract_song(path: str, subsong: Optional[int] = None,
                  max_seconds: float = 180.0, percussion: str = "clicks",
-                 drum_sound: str = "cluster", detect_end: bool = True,
+                 drum_sound: str = "auto", detect_end: bool = True,
                  grid: Optional[Tuple[float, int]] = None) -> Tuple[Song, int]:
     """Emulate an NSF subsong and return (Song, mcs_tempo_byte0)."""
     with open(path, "rb") as fh:

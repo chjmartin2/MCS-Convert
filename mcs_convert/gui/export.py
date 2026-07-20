@@ -60,10 +60,8 @@ _DRUM_MODES = {
 
 def nearest_tempo_byte0(tick_seconds: float) -> int:
     """The MCS tempo byte whose tick length is closest to `tick_seconds`."""
-    def err(b):
-        step = (b - 0x77) // 3
-        return abs((0.067 + 0.016 * step) - tick_seconds)
-    return min(_MCS_TEMPOS, key=err)
+    return min(_MCS_TEMPOS,
+               key=lambda b: abs(tick_seconds_for(b) - tick_seconds))
 
 
 class ExportDialog(tk.Toplevel):
@@ -118,7 +116,7 @@ class ExportDialog(tk.Toplevel):
                  insertbackground=_FG).grid(row=row, column=2, sticky="e", **pad)
         row += 1
 
-        tk.Label(self, text="Scope", bg=_BG, fg=_ACCENT).grid(
+        tk.Label(self, text="Visualization", bg=_BG, fg=_ACCENT).grid(
             row=row, column=0, sticky="w", **pad)
         self.scope = tk.StringVar(value="text 5")
         ttk.Combobox(self, textvariable=self.scope, width=14, state="readonly",
@@ -141,8 +139,30 @@ class ExportDialog(tk.Toplevel):
                                 state="readonly", values=list(_DRUM_MODES))
         drum_box.grid(row=row, column=1, sticky="w", **pad)
         drum_box.bind("<<ComboboxSelected>>", lambda e: self._update_size())
-        tk.Label(self, text="(clicks: kick=low bass B2, hat=E7 on MCS; the "
-                            "real noise voice on Tandy/speaker/SB)",
+        self.drop_noise = tk.BooleanVar(value=False)
+        noise_chk = tk.Checkbutton(self, text="remove noise channel",
+                                   variable=self.drop_noise,
+                                   command=self._update_size, bg=_BG, fg=_FG,
+                                   selectcolor="#22252e", activebackground=_BG,
+                                   activeforeground=_FG)
+        noise_chk.grid(row=row, column=2, sticky="w", **pad)
+        row += 1
+
+        # .MCS destination player: how many voices the file is arranged for.
+        tk.Label(self, text="MCS voices", bg=_BG, fg=_ACCENT).grid(
+            row=row, column=0, sticky="w", **pad)
+        self._mcs_voices = {"4 voices (PC Speaker)": 4,
+                            "3 voices (Tandy / PCjr)": 3,
+                            "single voice": 1}
+        self.mcs_voices = tk.StringVar(value="4 voices (PC Speaker)")
+        self.mcs_voices_box = ttk.Combobox(self, textvariable=self.mcs_voices,
+                                           width=22, state="readonly",
+                                           values=list(self._mcs_voices))
+        self.mcs_voices_box.grid(row=row, column=1, sticky="w", **pad)
+        self.mcs_voices_box.bind("<<ComboboxSelected>>",
+                                 lambda e: self._update_size())
+        tk.Label(self, text="(.MCS target only: the player the file is "
+                            "arranged for)",
                  bg=_BG, fg="#888888", font=("TkDefaultFont", 8)).grid(
             row=row, column=2, sticky="w", **pad)
         row += 1
@@ -224,6 +244,8 @@ class ExportDialog(tk.Toplevel):
         self.wave_box.configure(values=vals)
         if self.wave.get() not in vals:
             self.wave.set("native")
+        self.mcs_voices_box.configure(
+            state="readonly" if rt == "mcs" else "disabled")
 
     def _byte0(self) -> int:
         """The MCS tempo byte from the Tempo picker (pure playback speed —
@@ -316,6 +338,9 @@ class ExportDialog(tk.Toplevel):
         if result:
             self._apply_requantized(*result)
 
+    def _voice_count(self) -> int:
+        return self._mcs_voices.get(self.mcs_voices.get(), 4)
+
     def _drum_opts(self):
         """(percussion mode, drum_sound) from the Drums dropdown."""
         return _DRUM_MODES.get(self.drum.get(), ("clicks", "auto"))
@@ -327,7 +352,9 @@ class ExportDialog(tk.Toplevel):
             return self.song
         percussion, drum_sound = self._drum_opts()
         out = retrack(self.song, rt, drum_sound=drum_sound,
-                      percussion=percussion)
+                      percussion=percussion,
+                      voices=(self._voice_count() if rt == "mcs" else None),
+                      drop_noise=self.drop_noise.get())
         wave = self.wave.get()
         if wave != "native":                  # user forced a waveform
             for t in out.tracks:
@@ -337,7 +364,21 @@ class ExportDialog(tk.Toplevel):
     # -- preview ------------------------------------------------------------
     def preview(self) -> None:
         self.stop_preview()
-        song = self._reduced()
+        label, rt, _, _ = self._spec()
+        is_mcs = label.startswith(".MCS")
+        staves = None
+        if is_mcs:
+            # the TRUEST preview: encode the actual .MCS bytes and play the
+            # round-trip — the notation view draws from the same records.
+            from ..mcs import reader as R
+            try:
+                data = self._build_mcs()
+                song = R.parse_bytes(data)
+                staves = R.split_staves(R.parse_records(data))
+            except Exception:                         # fall back to the reduction
+                song = self._reduced()
+        else:
+            song = self._reduced()
         master, voices, sr = render_song(
             song, step_seconds=self._step_seconds(), waveform="auto")
         if not np.any(master):
@@ -347,24 +388,43 @@ class ExportDialog(tk.Toplevel):
         self._preview_data = (master, voices, sr)
         self.app.player.play(pcm16(master), sr,
                              self.app.volume.get() / 100.0)
-        if self.dosviz.get():
+        style = self._dos_style()
+        if self.dosviz.get() and style is not None:
             names = [t.name[:4] for t in song.tracks][:4] or ["P1", "P2", "Tr", "Nz"]
-            style = self._dos_style()
             if self._dos_win is None or not self._dos_win.alive():
                 self._dos_win = viz.DosVizWindow(self, style, names)
             else:
-                self._dos_win.style = style
+                self._dos_win.set_style(style)        # live restyle + retitle
+            if style == "static poster":
+                self._dos_win.set_song(song, self._step_seconds())
+            elif style == "MCS notation" and staves is not None:
+                from ..tracker import _measure_ticks
+                self._dos_win.set_notation(
+                    staves, _measure_ticks(song.time_signature),
+                    self._step_seconds())
             self._periods = viz.voice_periods(song)
+        elif self._dos_win is not None and self._dos_win.alive():
+            self._dos_win.win.destroy()               # selection says: no window
+            self._dos_win = None
         self._tick()
-        self.status.configure(text=f"Previewing through "
-                                   f"{self._spec()[0]}…")
+        self.status.configure(text=f"Previewing through {label}…")
 
-    def _dos_style(self) -> str:
-        s = self.scope.get()
-        return {"text 5": viz.DOS_STYLES[0], "text 4": viz.DOS_STYLES[1],
-                "VU meters": viz.DOS_STYLES[2], "text 3": viz.DOS_STYLES[3],
-                "text 2": viz.DOS_STYLES[3], "text 1": viz.DOS_STYLES[4],
-                }.get(s, viz.DOS_STYLES[0])
+    def _dos_style(self):
+        """The DOS replica for the current selections: the .MCS target always
+        shows its music notation; 'none' shows nothing; every .COM viz maps to
+        its own distinct replica."""
+        if self.target.get().startswith(".MCS"):
+            return "MCS notation"
+        return {"none": None,
+                "graphics (Tandy)": "Tandy graphics",
+                "VGA 256": "VGA 256",
+                "text 1": "block scopes (text 1)",
+                "text 2": "line trace (text 2)",
+                "text 3": "line scopes (text 3)",
+                "text 4": "spectrum analyzer (text 4)",
+                "text 5": "combined monitor (text 5)",
+                "VU meters": "VU meters",
+                "static screen": "static poster"}.get(self.scope.get())
 
     def _tick(self) -> None:
         if self._preview_data is None:
@@ -379,7 +439,8 @@ class ExportDialog(tk.Toplevel):
             span = int(0.03 * sr)
             levels = viz._rms_levels(voices, idx, span)
             spec = viz._spectrum(master, idx, sr, 18)
-            self._dos_win.draw(levels, spec, getattr(self, "_periods", None))
+            self._dos_win.draw(levels, spec, getattr(self, "_periods", None),
+                               elapsed=pos)
         self._follow_id = self.after(33, self._tick)
 
     def stop_preview(self) -> None:
@@ -428,11 +489,13 @@ class ExportDialog(tk.Toplevel):
         from ..mcs.encode import encode_song
         bar_ticks = self._meters[self.meter.get()]
         percussion, drum_sound = self._drum_opts()
+        nv = self._voice_count()
         return encode_song(retrack(self.song, "mcs", drum_sound=drum_sound,
-                                   percussion=percussion),
+                                   percussion=percussion, voices=nv,
+                                   drop_noise=self.drop_noise.get()),
                            tempo_byte0=self._byte0(), cap=True,
                            fit_meter=bar_ticks is None,
-                           bar_ticks=bar_ticks or 32, balance=True, voices=4)
+                           bar_ticks=bar_ticks or 32, balance=True, voices=nv)
 
     def _build(self, label: str, rt, com_mode) -> bytes:
         byte0 = self._byte0()
@@ -455,8 +518,9 @@ class ExportDialog(tk.Toplevel):
             kwargs["mcs"] = "MCS drive" in label
             kwargs["sb"] = label.startswith("SoundBlaster")
             if kwargs["sb"]:
+                # the scope engine is audio-agnostic (it reads viz[]/strike[]),
+                # so SoundBlaster builds get the full visualization family too
                 kwargs["sb_port"] = int(self.sb_port.get(), 0)
-                kwargs["text_scope"] = 0          # SB build: audio only for now
                 wave = self.wave.get()
                 if wave != "native":
                     kwargs["sb_wave"] = wave

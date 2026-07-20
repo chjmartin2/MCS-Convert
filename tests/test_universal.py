@@ -109,6 +109,29 @@ def test_pt3_mark_mode_and_drumbright_wins_over_pitch():
     assert any(n.midi_note == 60 for t in out.tracks for n in t.notes)
 
 
+def test_retrack_mcs_voice_counts_and_drop_noise():
+    s = _universal_song()
+    # 3 voices (Tandy/PCjr): 2 tone voices + the drum voice
+    tandy3 = retrack(s, "mcs", voices=3)
+    assert sum(1 for t in tandy3.tracks if t.kind == "tone") == 2
+    assert any(t.kind == "drum" for t in tandy3.tracks)
+    # single voice: top line only, no drums
+    solo = retrack(s, "mcs", voices=1)
+    assert len(solo.tracks) == 1 and solo.tracks[0].kind == "tone"
+    # drop_noise kills the noise CHANNEL but keeps other drums (the DPCM hit)
+    nonoise = retrack(s, "mcs", drop_noise=True)
+    drums_t = [t for t in nonoise.tracks if t.kind == "drum"]
+    assert drums_t and len(drums_t[0].notes) == 1     # DPCM only, noise gone
+    # ...and works for the noise-native targets too
+    tandy = retrack(s, "tandy", drop_noise=True)
+    nz = [t for t in tandy.tracks if t.kind == "noise"][0]
+    assert len(nz.notes) == 1                         # DPCM only
+    with pytest.raises(ValueError):
+        retrack(s, "tandy", voices=3)                 # mcs-only option
+    with pytest.raises(ValueError):
+        retrack(s, "mcs", voices=2)                   # 1/3/4 only
+
+
 def test_target_waveform_matrix():
     assert TARGET_WAVEFORMS["mcs"] == ("square",)
     assert "sine" in TARGET_WAVEFORMS["sb"] and "nestri" in TARGET_WAVEFORMS["sb"]
