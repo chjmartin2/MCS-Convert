@@ -28,11 +28,20 @@ _DOS = {"yellow": "#ffff55", "red": "#aa0000", "brightred": "#ff5555",
 _DOS_CH = ("#ffff55", "#ff5555", "#5555ff", "#55ff55", "#ffffff")
 
 
-def _window(parent, title: str, minsize=(360, 240)):
+def _window(parent, title: str, minsize=(360, 240), on_close=None):
+    """A visualization Toplevel. `on_close` runs when the user closes it (the
+    export preview passes its stop, so shutting the window stops the audio)."""
     win = tk.Toplevel(parent)
     win.title(title)
     win.configure(bg=_BG)
     win.minsize(*minsize)
+    if on_close is not None:
+        def _closed():
+            try:
+                on_close()
+            finally:
+                win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _closed)
     return win
 
 
@@ -179,8 +188,9 @@ class DosVizWindow:
     the scrolling music-notation view, drawn from the ENCODED staff records)."""
 
     def __init__(self, parent, style: str = DOS_STYLES[0],
-                 names: Optional[List[str]] = None) -> None:
-        self.win = _window(parent, f"DOS preview — {style}", (480, 320))
+                 names: Optional[List[str]] = None, on_close=None) -> None:
+        self.win = _window(parent, f"DOS preview — {style}", (480, 320),
+                           on_close=on_close)
         self.canvas = tk.Canvas(self.win, bg="#000000", highlightthickness=0,
                                 width=640, height=400)
         self.canvas.pack(fill="both", expand=True)

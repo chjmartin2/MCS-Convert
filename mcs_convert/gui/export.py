@@ -392,7 +392,9 @@ class ExportDialog(tk.Toplevel):
         if self.dosviz.get() and style is not None:
             names = [t.name[:4] for t in song.tracks][:4] or ["P1", "P2", "Tr", "Nz"]
             if self._dos_win is None or not self._dos_win.alive():
-                self._dos_win = viz.DosVizWindow(self, style, names)
+                # closing the preview window stops the audio with it
+                self._dos_win = viz.DosVizWindow(self, style, names,
+                                                 on_close=self.stop_preview)
             else:
                 self._dos_win.set_style(style)        # live restyle + retitle
             if style == "static poster":
