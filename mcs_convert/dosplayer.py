@@ -366,23 +366,30 @@ def _tandy_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, 
     return by
 
 
-def _mono_stream(song: Song) -> Dict[int, List[Tuple[int, int]]]:
+def _mono_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, int]]]:
     """Per-sub-tick writes for the single PC-speaker voice: play the highest
-    voice (channel 0), articulated so repeated notes re-attack."""
+    voice (channel 0), articulated so repeated notes re-attack. With `scope`,
+    also emit viz records so the one voice can drive a display -- without them
+    every scope on this target would just flatline."""
     per_track, _ = _split_notes(song)
     voice = _allocate_voices(per_track, n=3)[0]     # channel 0 = the top line
     by: Dict[int, List[Tuple[int, int]]] = {}
     for start, dur, midi in voice:
         on = start * _SUBTICKS
         off = _artic_off(on, dur)
-        by.setdefault(on, []).extend(_spk_note_on(midi_to_freq(midi)))
+        freq = midi_to_freq(midi)
+        by.setdefault(on, []).extend(_spk_note_on(freq))
         by.setdefault(off, []).extend(_spk_note_off())
+        if scope:
+            by.setdefault(on, []).append((_VIZ_PORT, _viz_period(freq)))
+            by.setdefault(off, []).append((_VIZ_PORT, 0))
     return by
 
 
 def _build_stream(song: Song, mode: str, scope: bool = False) -> Tuple[bytes, int]:
     """(stream bytes, total_subticks). One record per sub-tick: [n][port,val]*."""
-    by = _tandy_stream(song, scope) if mode == "tandy" else _mono_stream(song)
+    by = (_tandy_stream(song, scope) if mode == "tandy"
+          else _mono_stream(song, scope))
     ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
     total = ticks * _SUBTICKS
     out = bytearray()
@@ -2235,10 +2242,28 @@ def _sb_level(velocity: int) -> int:
     return max(1, min(_SB_LEVELS - 1, round(velocity * (_SB_LEVELS - 1) / 100.0)))
 
 
+# A DSP poll must NEVER spin forever. On a machine with no SoundBlaster (or at
+# the wrong base port) the port reads back 0xFF from open bus, so "wait until
+# the status bit clears" never comes true -- the original unbounded spin hung
+# the player at startup on its very first command, before a single frame was
+# drawn: no sound AND no graphics. Bounded, a card-less machine just plays
+# silently and the visualization still runs.
+_SB_SPIN = 400                   # poll attempts before giving up on the DSP
+
+
+def _emit_sb_poll(a: "_Asm", ready_high: bool = False) -> None:
+    """Spin (at most _SB_SPIN times) until the DSP status bit says go. DX must
+    be the status port. Falls through either way -- never hangs. Clobbers CX."""
+    a.db(0xB9).bytes(_w(_SB_SPIN))                   # mov cx, spin limit
+    a.db(0xEC).db(0xA8, 0x80)                        # .w: in al,dx; test al,0x80
+    a.db(0x75 if ready_high else 0x74, 0x02)         # jnz/jz ready (bit set/clear)
+    a.db(0xE2, 0xF9)                                 # loop .w  (times out cleanly)
+
+
 def _emit_sb_write(a: "_Asm", value: int) -> None:
-    """Poll the DSP write-status port (base+0xC bit7) then write command `value`.
+    """Wait for the DSP write port (base+0xC bit7 clear), then write `value`.
     DX must be base+0xC on entry (and is left there)."""
-    a.db(0xEC).db(0xA8, 0x80).db(0x75, 0xFB)         # .w: in al,dx; test al,0x80; jnz .w (-5)
+    _emit_sb_poll(a)
     a.db(0xB0, value).db(0xEE)                       # mov al, value; out dx, al
 
 
@@ -2250,7 +2275,7 @@ def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
     a.db(0xB9).bytes(_w(200)).db(0xE2, 0xFE)         # mov cx,200; .d: loop .d (~delay)
     a.db(0x30, 0xC0).db(0xEE)                        # al=0; out (release reset)
     a.db(0xBA).bytes(_w(sb_port + 0x0E))             # mov dx, base+0xE (read-status)
-    a.db(0xEC).db(0xA8, 0x80).db(0x74, 0xFB)         # .r: in al,dx; test al,0x80; jz .r (wait ready)
+    _emit_sb_poll(a, ready_high=True)                # wait for data-available
     a.db(0xBA).bytes(_w(sb_port + 0x0A)).db(0xEC)    # mov dx, base+0xA; in al,dx (read 0xAA)
     a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC (write port)
     _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
@@ -2297,7 +2322,7 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
     a.db(0x88, 0xD8).db(0x04, 0x80).db(0x88, 0xC4)   # al=bl; add al,0x80; ah=al
     a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
     _emit_sb_write(a, 0x10)                          # DSP cmd 0x10 (direct DAC)
-    a.db(0xEC).db(0xA8, 0x80).db(0x75, 0xFB)         # poll write-ready
+    _emit_sb_poll(a)                                 # bounded: never hangs the ISR
     a.db(0x88, 0xE0).db(0xEE)                        # al=ah (the sample); out dx,al
 
 
@@ -2644,8 +2669,9 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     vis = _vis_for(scope, text_scope)                # remaining modes: tandy / 1voice
     if vis == "static":
         raise ValueError("the 'static screen' poster is 4-voice only")
-    if vis and mode != "tandy":
-        raise ValueError("scopes are only available with --tandy or --4voice")
+    if vis == "graphics" and mode != "tandy":
+        raise ValueError("the mode-9 graphics scope is Tandy hardware only; "
+                         "use --scope-vga (mode 13h) anywhere else")
     stream, total = _build_stream(song, mode, bool(vis))
     if total == 0:
         raise ValueError("nothing to play (no notes)")

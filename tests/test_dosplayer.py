@@ -465,8 +465,17 @@ def test_text_scope_uses_text_mode_and_is_smaller():
     assert b"\xB8\x00\xB8\x8E\xC0" in txt            # mov ax,0xB800 ; mov es,ax (text page)
     gfx = D.build_com(_song([(0, 4, 60), (4, 4, 67)]), "tandy", 0x80, scope=True)
     assert len(txt) < len(gfx)                       # text renderer is lighter
-    with pytest.raises(ValueError):                  # Tandy only
-        D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, text_scope=True)
+    # 1-voice carries a display too now: its stream emits viz records for the
+    # single voice, so a scope has something to show instead of flatlining
+    mono = D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, text_scope=True)
+    assert mono[:5] == b"\xB8\x03\x00\xCD\x10"
+    by = D._mono_stream(_song([(0, 4, 60), (4, 4, 67)]), scope=True)
+    assert any(port == D._VIZ_PORT for evs in by.values() for port, _v in evs)
+    # ...but the mode-9 graphics scope is Tandy HARDWARE, so it stays gated
+    with pytest.raises(ValueError):
+        D.build_com(_song([(0, 4, 60)]), "1voice", 0x80, scope=True)
+    with pytest.raises(ValueError):
+        D.build_com(_song([(0, 4, 60)]), "4voice", 0x80, scope=True)
 
 
 def test_text2_uses_box_drawing_glyphs():
