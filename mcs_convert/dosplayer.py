@@ -208,10 +208,19 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS,
             continue
         seen.add(on)
         off = on + max(1, _SUBTICKS - 1)
-        events.setdefault(on, []).append(
-            (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI, fs), _NOISE_VIZ_P,
-             _SB_LEVELS - 1))
-        events.setdefault(off, []).append((3, 0, 0, 0))
+        if fm:
+            # FM: strike the chip's own rhythm voice -- bright hits the hi-hat,
+            # dark the bass drum. The word is the 0xBD register value; clearing
+            # the strike bit on note-off is what re-arms it for the next hit.
+            bright = midi >= _DRUM_BRIGHT_MIDI
+            hit = _OPL_RHYTHM | (_OPL_HH if bright else _OPL_BD)
+            events.setdefault(on, []).append((3, hit, _NOISE_VIZ_P, 0))
+            events.setdefault(off, []).append((3, _OPL_RHYTHM, 0, 0))
+        else:
+            events.setdefault(on, []).append(
+                (3, _spk4_noise_inc(midi >= _DRUM_BRIGHT_MIDI, fs), _NOISE_VIZ_P,
+                 _SB_LEVELS - 1))
+            events.setdefault(off, []).append((3, 0, 0, 0))
     return events
 
 
@@ -2208,6 +2217,9 @@ _OPL_CHANS = 9                   # melodic channels
 #: operator offsets for channels 0..8 (modulator; carrier is +3)
 _OPL_OP = (0x00, 0x01, 0x02, 0x08, 0x09, 0x0A, 0x10, 0x11, 0x12)
 _OPL_CLOCK = 49716.0             # F-number reference
+_OPL_RHYTHM = 0x20               # 0xBD bit 5: rhythm mode on (channels 6/7/8)
+_OPL_BD, _OPL_HH = 0x10, 0x01    # 0xBD strike bits: bass drum / hi-hat
+_OPL_BD_HZ, _OPL_HH_HZ = 90.0, 1400.0    # the two drum voices' pitches
 
 
 def _opl_fnum(freq: float) -> Tuple[int, int]:
@@ -2337,30 +2349,59 @@ def _emit_opl_write(a: "_Asm", reg: int, val: int) -> None:
 
 
 def _emit_opl_init(a: "_Asm", waveform: str) -> None:
-    """Silence every OPL2 register, enable the waveform-select extension, then
-    voice the three melodic channels with a patch approximating `waveform`."""
+    """Voice the OPL2: silence it, enable the waveform-select extension, set up
+    the three melodic tone channels, and arm RHYTHM MODE for percussion.
+
+    The envelope settings matter more than they look. Register 0x20 bit 5 is
+    EG-TYP: clear means a PERCUSSIVE envelope, which runs attack -> decay ->
+    release even while the key is held, so with sustain-level 0 and a fast
+    release every note keyed on and died instantly -- silence. Tone voices must
+    set it (a SUSTAINING envelope that holds while the key is on)."""
     mod_wave, car_wave = _opl_patch(waveform)
-    for reg in range(0x01, 0xF6):                    # a clean slate
-        if reg in (0x01,):
-            continue
-        _emit_opl_write(a, reg, 0x00)
+    # a clean slate: key everything off and mute every operator (writing all
+    # 245 registers would cost ~6 KB of code for no benefit)
+    for ch in range(_OPL_CHANS):
+        _emit_opl_write(a, 0xB0 + ch, 0x00)          # key off
+        _emit_opl_write(a, 0xC0 + ch, 0x00)
+    for op in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x08, 0x09, 0x0A,
+               0x0B, 0x0C, 0x0D, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15):
+        _emit_opl_write(a, 0x40 + op, 0x3F)          # total level 63 = silent
     _emit_opl_write(a, 0x01, 0x20)                   # WSE: allow waveforms 1-3
     _emit_opl_write(a, 0x08, 0x00)                   # no split keyboard
-    _emit_opl_write(a, 0xBD, 0x00)                   # melodic mode (no rhythm)
-    for ch in range(_SPK4_TONES):
+    _emit_opl_write(a, 0xBD, 0x00)                   # rhythm off while we set up
+    for ch in range(_SPK4_TONES):                    # the melodic tone voices
         op = _OPL_OP[ch]
-        # modulator: no tremolo/vibrato, sustaining, max multiple 1
-        _emit_opl_write(a, 0x20 + op, 0x01)
+        # 0x21 = EG-TYP (sustain while keyed) + frequency multiple 1
+        _emit_opl_write(a, 0x20 + op, 0x21)
         _emit_opl_write(a, 0x40 + op, 0x10)          # modulator level (drives FM)
-        _emit_opl_write(a, 0x60 + op, 0xF0)          # fast attack, no decay
-        _emit_opl_write(a, 0x80 + op, 0x0F)          # full sustain, quick release
+        _emit_opl_write(a, 0x60 + op, 0xF0)          # fastest attack, no decay
+        _emit_opl_write(a, 0x80 + op, 0x0F)          # hold at full, quick release
         _emit_opl_write(a, 0xE0 + op, mod_wave)
-        _emit_opl_write(a, 0x20 + op + 3, 0x01)      # carrier
+        _emit_opl_write(a, 0x20 + op + 3, 0x21)      # carrier, also sustaining
         _emit_opl_write(a, 0x40 + op + 3, 0x00)      # carrier at full volume
         _emit_opl_write(a, 0x60 + op + 3, 0xF0)
         _emit_opl_write(a, 0x80 + op + 3, 0x0F)
         _emit_opl_write(a, 0xE0 + op + 3, car_wave)
-        _emit_opl_write(a, 0xC0 + ch, 0x0E)          # both speakers, feedback 3
+        _emit_opl_write(a, 0xC0 + ch, 0x0C)          # feedback 6, FM connection
+    # -- percussion on the chip's own RHYTHM channels (6/7/8) ----------------
+    # Rhythm voices are PERCUSSIVE by design (EG-TYP clear) -- they should decay
+    # away, which is exactly what a drum does. Bass drum = the dark hit, hi-hat
+    # = the bright one; both are struck by setting their bit in 0xBD.
+    for op, lvl, env in ((0x10, 0x00, 0xF8), (0x13, 0x00, 0xF8),   # BD pair
+                         (0x11, 0x00, 0xFA), (0x14, 0x00, 0xFA)):  # HH / SD
+        _emit_opl_write(a, 0x20 + op, 0x01)          # percussive, multiple 1
+        _emit_opl_write(a, 0x40 + op, lvl)           # full volume
+        _emit_opl_write(a, 0x60 + op, env)           # fast attack, quick decay
+        _emit_opl_write(a, 0x80 + op, 0xF8)          # low sustain, fast release
+        _emit_opl_write(a, 0xE0 + op, 0x00)
+    _emit_opl_write(a, 0xC0 + 6, 0x0C)               # bass-drum channel
+    blk, fnum = _opl_fnum(_OPL_BD_HZ)                # a low thump
+    _emit_opl_write(a, 0xA6, fnum & 0xFF)
+    _emit_opl_write(a, 0xB6, (blk << 2) | (fnum >> 8))   # NO key-on: 0xBD strikes it
+    blk, fnum = _opl_fnum(_OPL_HH_HZ)                # a bright tick
+    _emit_opl_write(a, 0xA7, fnum & 0xFF)
+    _emit_opl_write(a, 0xB7, (blk << 2) | (fnum >> 8))
+    _emit_opl_write(a, 0xBD, _OPL_RHYTHM)            # rhythm mode armed, nothing struck
 
 
 def _emit_opl_keyoff(a: "_Asm") -> None:
@@ -2388,6 +2429,17 @@ def _emit_opl_event(a: "_Asm", pfx: str) -> None:
     a.db(0x89, 0xF8).db(0x04, 0xB0).db(0xEE)         # mov ax,di (voice); +0xB0; out
     _emit_opl_delay(a, 6)
     a.db(0x42).db(0x58).db(0x88, 0xE0).db(0xEE).db(0x4A)   # inc dx; pop ax; al=ah; out; dec dx
+    _emit_opl_delay(a, 35)
+
+
+def _emit_opl_rhythm(a: "_Asm") -> None:
+    """Strike (or release) a rhythm voice: write register 0xBD with the value in
+    AL. DI is the voice; the stream's low byte carries the 0xBD bits."""
+    a.db(0x50)                                       # push ax (the value)
+    a.db(0xBA).bytes(_w(_OPL_PORT))                  # mov dx,0x388
+    a.db(0xB0, 0xBD).db(0xEE)                        # address = 0xBD
+    _emit_opl_delay(a, 6)
+    a.db(0x42).db(0x58).db(0xEE).db(0x4A)            # inc dx; pop ax; out; dec dx
     _emit_opl_delay(a, 35)
 
 
@@ -2591,8 +2643,10 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
-    if sb:
+    if sb and not fm:
         _emit_sb_synth_out(a, sb_port, fm)           # volume-mixed 8-bit -> SB DAC
+    elif sb and fm:
+        pass                                          # OPL2 holds every voice
     elif wave_table:
         _emit_spk_wave_synth(a, mcs)                 # PWM waveform modeling
     else:
@@ -2651,7 +2705,11 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("sp_apply")
     a.db(0x8B, 0x36).abs16("streamptr")              # si=[streamptr]
     a.db(0xAC).db(0x88, 0xC1).db(0x30, 0xED)         # lodsb (nchanges); cl=al; ch=0
-    a.db(0xE3).rel8("sp_noev")                       # jcxz noev
+    if fm:                                           # body too long for a short jump
+        a.db(0xE3, 0x03).db(0xE9).rel16("sp_evl")    # jcxz +3 ; jmp near evl
+        a.db(0xE9).rel16("sp_noev")                  # (cx==0) jmp near noev
+    else:
+        a.db(0xE3).rel8("sp_noev")                   # jcxz noev
     a.label("sp_evl")
     a.db(0xAC)                                        # lodsb (voice | level<<4)
     a.db(0x88, 0xC2)                                 # mov dl,al (keep the packed byte)
@@ -2666,12 +2724,17 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.db(0x89, 0x97).abs16("wptr")               # [wptr+bx] = dx
     a.db(0xAD)                                        # lodsw (the note word)
     if fm:
-        # FM build: voices 0..2 are OPL2 channels (the word is the packed OPL
-        # note), voice 3 is the DAC noise voice (the word is a phase increment)
+        # FM build: EVERY voice is on the OPL2 -- voices 0..2 are melodic
+        # channels (the word is the packed note), voice 3 is percussion (the
+        # word is the 0xBD rhythm register). Nothing goes to the DAC, so there
+        # is no per-sample work at all.
         a.db(0x83, 0xFF, _SPK4_TONES)                # cmp di, 3
-        a.db(0x73).rel8("sp_dac")                    # jae the DAC voice
+        a.db(0x73).rel8("sp_perc")                   # jae the rhythm voice
         _emit_opl_event(a, "sp")
         a.db(0xEB).rel8("sp_vz")                     # jmp on to the viz byte
+        a.label("sp_perc")
+        _emit_opl_rhythm(a)                          # write 0xBD = AL
+        a.db(0xEB).rel8("sp_vz")
         a.label("sp_dac")
     a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
     a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
@@ -2681,7 +2744,11 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0x08, 0xC0).db(0x74).rel8("sp_nostr")       # or al,al; jz (note-off, no strike)
     a.db(0xC6, 0x85).abs16("strike").db(0x01)        # [strike+di]=1 (VU onset)
     a.label("sp_nostr")
-    a.db(0xE2).rel8("sp_evl")                        # loop
+    if fm:
+        a.db(0xE0, 0x03).db(0xE9).rel16("sp_noev")   # loopnz +3 ; jmp near noev
+        a.db(0xE9).rel16("sp_evl")                   # ...else round again
+    else:
+        a.db(0xE2).rel8("sp_evl")                    # loop
     a.label("sp_noev")
     a.db(0x89, 0x36).abs16("streamptr")              # [streamptr]=si
     a.db(0xFF, 0x0E).abs16("ticksleft")              # dec word[ticksleft]
@@ -2805,6 +2872,14 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
                              "count exceeds 16 bits)")
         subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
         samps = max(1, min(65535, round(fs * subtick_s)))
+        if sb_fm:
+            # Everything sounds on the OPL2, which HOLDS its notes in hardware,
+            # so there is no per-sample synthesis to do. Fire the timer once per
+            # sub-tick (a few hundred Hz) instead of at the mixing rate: the CPU
+            # is then essentially free, which is what lets the scopes redraw at
+            # a sensible speed.
+            div = max(_SPK4_DIV_MIN, min(65535, round(_PIT_HZ * subtick_s)))
+            samps = 1
         poster = _render_static_poster(song) if vis == "static" else b""
         # the scopes draw the contour of what this build actually sounds: the
         # SB wavetable, the speaker's PWM-modelled shape, or a plain square
