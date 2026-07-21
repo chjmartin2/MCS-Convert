@@ -365,10 +365,19 @@ class DosVizWindow:
                     r = cen - int(round(v * _TAMP))
                     if prev is None or prev == r:
                         cell(x, r, "─", ink)
-                    else:                             # a step: draw the riser
+                    else:
+                        # a step: a proper connected riser — the corner at the
+                        # row we LEAVE turns down/up out of the incoming line,
+                        # the one we ARRIVE at turns back out to the right
+                        down = r > prev
                         for yy in range(min(prev, r), max(prev, r) + 1):
-                            cell(x, yy, "│" if yy not in (prev, r) else
-                                 ("┘" if yy == prev else "┐"), ink)
+                            if yy == prev:
+                                glyph = "┐" if down else "┘"
+                            elif yy == r:
+                                glyph = "└" if down else "┌"
+                            else:
+                                glyph = "│"
+                            cell(x, yy, glyph, ink)
                     prev = r
         # the master band, and the labels DOS prints down the left edge
         mcen, mink = _TCEN[4], attr[0x0F]

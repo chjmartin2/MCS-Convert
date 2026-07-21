@@ -736,6 +736,10 @@ def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
     direction. A silent channel flatlines on its centre."""
     a.db(0x80, 0x3E).abs16("viz", ch).db(0x00)          # cmp byte[viz+ch],0
     a.db(0x75).rel8(f"{pfx}_s")                         # jne sounding
+    if quarters:
+        # a silent channel has NO leftover: without this the cap state survives
+        # from the previous channel and paints a stray glyph into its band
+        a.db(0xC6, 0x06).abs16("wrem").db(0x00)         # mov byte[wrem],0
     a.db(0xB9).bytes(_w(rc))                            # mov cx,centre
     a.db(0xEB).rel8(f"{pfx}_d")                         # jmp done
     a.label(f"{pfx}_s")

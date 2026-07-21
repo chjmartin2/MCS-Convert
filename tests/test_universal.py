@@ -314,3 +314,42 @@ def test_graphics_preview_replicates_the_com_layout():
         assert glyphs & {"▄", "▀", "░", "▓"}          # the sub-row caps
     finally:
         root.destroy()
+
+
+def test_silent_channel_clears_the_cap_state():
+    # The sub-row cap is drawn from wrem/wrow, which _emit_wave_pick only sets
+    # on its SOUNDING path. A silent channel used to fall through with the
+    # PREVIOUS channel's leftover still in wrem, so the cap painted a stray
+    # glyph into that channel's band -- a character appearing and vanishing as
+    # voices came in and out. The silent path must zero wrem.
+    cap = {}
+    real = D._Asm.resolve
+
+    def capture(self):
+        out = real(self)
+        cap["labels"], cap["com"] = dict(self.labels), out
+        return out
+
+    song = Song(title="t", source="t")
+    tr = Track(name="a")
+    tr.add(NoteEvent(0, 8, 72))
+    song.add_track(tr)
+    song.add_track(Track(name="silent"))             # never sounds
+    D._Asm.resolve = capture
+    try:
+        D.build_com(song, "4voice", 0x80, sb=True, sb_wave="sine",
+                    mix_rate=22000, text_scope=1)
+    finally:
+        D._Asm.resolve = real
+    L, com = cap["labels"], cap["com"]
+    import struct
+    clear = b"\xC6\x06" + struct.pack("<H", L["wrem"]) + b"\x00"
+    # one clear per tone channel's silent path (plus the sounding-path stores)
+    assert com.count(clear) >= 3
+    # and the block scope only ever caps INSIDE its own band: a cap is drawn at
+    # centre -/+ (full+1), and a full 2-row swing leaves no remainder at all
+    q = [b - 256 if b > 127 else b for b in D._wave_shape("sine", D._TAMP * 4)]
+    for v in q:
+        full, rem = abs(v) >> 2, abs(v) & 3
+        if rem:
+            assert full + 1 <= D._TAMP                # stays within the band
