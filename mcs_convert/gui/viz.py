@@ -286,22 +286,17 @@ class DosVizWindow:
             self._draw_spectrum(c, w, h, sp, full=True)
         elif style.startswith("VU"):
             self._draw_vu(c, w, h, lv, 0, 0, w, h, big=True)
-        elif style.startswith("line trace"):           # text 2: stacked traces
-            self._draw_bands(c, w, h, lv, pr)
+        elif style.startswith("line trace") or style.startswith("block")                 or style.startswith("line scopes"):
+            self._draw_textgrid(c, w, h, lv, pr, style)   # a real 80x25 grid
         elif style.startswith("Tandy") or style.startswith("VGA"):
-            # the graphics scopes: 2x2 grid + the master pane below, in the
-            # mode's own palette (mode-9 packed colours vs mode-13h indices)
-            colors = _TANDY_CH if style.startswith("Tandy") else _VGA_CH
-            self._draw_scopegrid(c, w, h, lv, pr, 0, 0, w, h * 0.62, line=True,
-                                 colors=colors)
-            self._draw_master(c, 0, h * 0.62, w, h, lv, colors)
+            self._draw_graphics(c, w, h, lv, pr,
+                                tandy=style.startswith("Tandy"))
         elif style.startswith("static"):
             self._draw_poster(c, w, h)
         elif style.startswith("MCS"):
             self._draw_notation(c, w, h)
         else:
-            line = style.startswith("line")
-            self._draw_scopegrid(c, w, h, lv, pr, 0, 0, w, h, line=line)
+            self._draw_textgrid(c, w, h, lv, pr, style)
 
     def _draw_combined(self, c, w, h, lv, sp, pr) -> None:
         """The text-5 combined monitor: 2x2 scopes on top, spectrum bottom-left,
@@ -314,6 +309,137 @@ class DosVizWindow:
         c.create_line(2, h * 0.5, w - 2, h * 0.5, fill=grey)
         c.create_line(w * 0.5, 2, w * 0.5, h - 2, fill=grey)
         c.create_line(2, h * 0.25, w - 2, h * 0.25, fill=grey)
+
+    # -- the text scopes, drawn as a real 80x25 character grid ---------------
+    #: CP437 glyphs the text engines write, in the order the caps ladder uses.
+    _G_FULL, _G_QUARTER, _G_THREE = "█", "░", "▓"
+    _G_HALF_UP, _G_HALF_DOWN = "▄", "▀"
+
+    def _draw_textgrid(self, c, w, h, lv, pr, style: str) -> None:
+        """The text scopes as DOS actually shows them: an 80x25 CHARACTER grid
+        with the engine's own glyphs, bands and colours — not smooth vector
+        lines. text 1 fills blocks from each band's centre and caps the column
+        with the sub-row ladder (░ ▄/▀ ▓); the line styles trace with box
+        drawing; every cell lands on the character grid."""
+        from ..dosplayer import _TAMP, _TATTR, _TCEN, _wave_value
+        cols, rows = 80, 25
+        cw, ch_ = w / cols, h / rows
+        fs = max(6, int(min(cw * 1.7, ch_ * 0.92)))
+        font = ("Consolas", fs)
+        attr = {0x0E: "#ffff55", 0x04: "#aa0000", 0x01: "#0000aa",
+                0x0A: "#55ff55", 0x0F: "#ffffff"}
+
+        def cell(x, y, glyph, ink):
+            c.create_text((x + 0.5) * cw, (y + 0.5) * ch_, text=glyph,
+                          fill=ink, font=font)
+
+        blocks = style.startswith("block")            # text 1 fills; others trace
+        scroll = self.phase * 2.0
+        msum = [0.0] * cols
+        for k in range(4):
+            cen, ink = _TCEN[k], attr[_TATTR[k]]
+            if lv[k] <= 0.001:                        # silent: a flat centre line
+                for x in range(cols):
+                    cell(x, cen, "─" if not blocks else self._G_FULL, ink)
+                continue
+            cycle = max(4.0, pr[k] * 60.0)
+            prev = None
+            for x in range(cols):
+                v = _wave_value(self.wave, ((x + scroll) % cycle) / cycle)
+                msum[x] += 1.0 if v >= 0 else -1.0
+                if blocks:
+                    # quarter-row height, then the same cap ladder the .COM bakes
+                    q = int(round(-v * _TAMP * 4))
+                    up, n = q < 0, abs(q)
+                    full, rem = n >> 2, n & 3
+                    for r in range(1, full + 1):
+                        cell(x, cen - r if up else cen + r, self._G_FULL, ink)
+                    cell(x, cen, self._G_FULL, ink)
+                    if rem:
+                        cap = (self._G_HALF_UP if up else self._G_HALF_DOWN) \
+                            if rem == 2 else (self._G_QUARTER if rem == 1
+                                              else self._G_THREE)
+                        cell(x, (cen - full - 1) if up else (cen + full + 1),
+                             cap, ink)
+                else:
+                    r = cen - int(round(v * _TAMP))
+                    if prev is None or prev == r:
+                        cell(x, r, "─", ink)
+                    else:                             # a step: draw the riser
+                        for yy in range(min(prev, r), max(prev, r) + 1):
+                            cell(x, yy, "│" if yy not in (prev, r) else
+                                 ("┘" if yy == prev else "┐"), ink)
+                    prev = r
+        # the master band, and the labels DOS prints down the left edge
+        mcen, mink = _TCEN[4], attr[0x0F]
+        for x in range(cols):
+            r = mcen - int(round(max(-2, min(2, msum[x] / 1.5))))
+            cell(x, r, self._G_FULL if blocks else "─", mink)
+        for k, name in enumerate(self.names[:4]):
+            for i, chx in enumerate(name[:2]):
+                cell(i, _TCEN[k], chx, attr[_TATTR[k]])
+
+    # -- the graphics scopes, drawn to the .COM's OWN layout -----------------
+    #: the 16-colour palette both graphics modes index into (Tandy mode 9 packs
+    #: two of these per byte; VGA mode 13h uses them as plain indices)
+    _PAL16 = ("#000000", "#0000aa", "#00aa00", "#00aaaa", "#aa0000", "#aa00aa",
+              "#aa5500", "#aaaaaa", "#555555", "#5555ff", "#55ff55", "#55ffff",
+              "#ff5555", "#ff55ff", "#ffff55", "#ffffff")
+
+    def _draw_graphics(self, c, w, h, lv, pr, tandy: bool) -> None:
+        """A faithful replica of the mode-9 / mode-13h scope screen: the same
+        160x200 layout the .COM draws — four framed channel scopes in a 2x2
+        grid plus the master pane, at the engine's own band coordinates,
+        amplitude and palette. The traces carry the build's waveform contour,
+        connected column to column exactly as the player's vline does."""
+        from ..dosplayer import (_CH, _CH13, _CHW, _FRAMES, _GAMP,
+                                 _MASTER_CEN_Y, _MASTER_K, _NOISE_CEN,
+                                 _wave_value)
+        chans = _CH if tandy else _CH13
+        sx, sy = w / 160.0, h / 200.0                # the engine's coordinate space
+        col = lambda i: self._PAL16[(i >> 4) if tandy else i]
+
+        def frame(x0, x1, y0, y1, ink="#ffffff"):
+            c.create_rectangle(x0 * sx, y0 * sy, x1 * sx, y1 * sy, outline=ink)
+
+        scroll = self.phase * 2.0                    # _SCROLL_SPEED
+        sums = [0.0] * _CHW                          # the master's per-column sum
+        for k in range(4):
+            hi, lo, cen, packed, left = chans[k]
+            ink = col(packed)
+            if k == 3:                               # noise: shimmering spikes
+                if lv[3] > 0.001:
+                    seed = int(self.phase) * 25173 + 13849
+                    for L in range(_CHW):
+                        seed = (seed * 25173 + 13849) & 0xFFFF
+                        y = _NOISE_CEN + ((seed >> 8) & 0x1F) - 16
+                        x = (left + L) * sx
+                        c.create_line(x, _NOISE_CEN * sy, x, y * sy, fill=ink)
+                else:
+                    c.create_line(left * sx, _NOISE_CEN * sy,
+                                  (left + _CHW) * sx, _NOISE_CEN * sy, fill=ink)
+                continue
+            if lv[k] <= 0.001:                       # silent: the centre line
+                c.create_line(left * sx, cen * sy, (left + _CHW) * sx, cen * sy,
+                              fill=ink)
+                continue
+            cycle = max(4.0, pr[k] * 60.0)           # columns per full cycle
+            pts = []
+            for L in range(_CHW):
+                v = _wave_value(self.wave, ((L + scroll) % cycle) / cycle)
+                pts.extend([(left + L) * sx, (cen - v * _GAMP) * sy])
+                sums[L] += 1.0 if v >= 0 else -1.0   # the master follows the sign
+            c.create_line(*pts, fill=ink, width=2)
+        # the master pane: the tone levels summed into discrete bands, 2 wide
+        mink = self._PAL16[15]
+        mpts = []
+        for L in range(_CHW):
+            y = _MASTER_CEN_Y - sums[L] * _MASTER_K
+            mpts.extend([(10 + 2 * L) * sx, y * sy])
+        if len(mpts) >= 4:
+            c.create_line(*mpts, fill=mink, width=2)
+        for fr in _FRAMES:                           # the white frames, last
+            frame(*fr, ink=mink)
 
     def _draw_master(self, c, x0, y0, x1, y1, lv, colors) -> None:
         """The graphics scopes' framed master pane: the summed square trace."""

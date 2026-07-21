@@ -266,3 +266,51 @@ def test_text_scope_resolves_sub_row_heights_with_caps():
                       mix_rate=22000, text_scope=1)
     for glyph in (D._CAP_QUARTER, D._CAP_THREE, D._CAP_HALF_UP, D._CAP_HALF_DOWN):
         assert bytes([0xB0, glyph]) in com                 # mov al,<glyph>
+
+
+def test_graphics_preview_replicates_the_com_layout():
+    # The DOS-replica preview draws the graphics scopes to the .COM's OWN
+    # layout, so what you preview is what the built player shows: the same
+    # 160x200 band coordinates, amplitude, frames and per-mode palette.
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:                              # headless CI: nothing to draw
+        pytest.skip("no display")
+    root.withdraw()
+    from mcs_convert.gui import viz
+    win = viz.DosVizWindow(root, "Tandy graphics", ["P1", "P2", "Tr", "Nz"])
+    try:
+        def inks(style):
+            win.set_style(style)
+            win.draw([0.6, 0.5, 0.7, 0.0], [0.3] * 18, [0.25, 0.4, 0.6, 0.5], 1.0)
+            return {win.canvas.itemcget(i, "fill")
+                    for i in win.canvas.find_all() if win.canvas.itemcget(i, "fill")}
+        win.set_wave("sine")
+        tandy, vga = inks("Tandy graphics"), inks("VGA 256")
+        # mode 9 packs its colours (dark red/blue); mode 13h indexes bright ones
+        assert "#aa0000" in tandy and "#0000aa" in tandy      # mode-9 ch1/ch2
+        assert "#ff5555" in vga and "#55ffff" in vga          # VGA ch1/ch2
+        assert tandy != vga
+        assert "#ffff55" in tandy and "#ffff55" in vga        # ch0 yellow in both
+        # a silent screen is just the flat centre lines + master + the 5 frames
+        win.set_style("Tandy graphics")
+        win.draw([0, 0, 0, 0], [0] * 18, [0.3] * 4, 0.0)
+        from mcs_convert.dosplayer import _FRAMES
+        assert len(win.canvas.find_all()) == 4 + 1 + len(_FRAMES)
+        # every style renders for every waveform without error
+        for wf in ("square", "sine", "triangle", "nestri", "pulse12"):
+            win.set_wave(wf)
+            for st in viz.DOS_STYLES:
+                win.set_style(st)
+                win.draw([0.6] * 4, [0.3] * 18, [0.3] * 4, 1.0)
+        # the text styles land on a real character grid, with the cap ladder
+        win.set_wave("sine")
+        win.set_style("block scopes (text 1)")
+        win.draw([0.9, 0.9, 0.9, 0.0], [0] * 18, [0.5] * 4, 0.0)
+        glyphs = {win.canvas.itemcget(i, "text") for i in win.canvas.find_all()
+                  if win.canvas.type(i) == "text"}
+        assert "█" in glyphs                          # block fill
+        assert glyphs & {"▄", "▀", "░", "▓"}          # the sub-row caps
+    finally:
+        root.destroy()
