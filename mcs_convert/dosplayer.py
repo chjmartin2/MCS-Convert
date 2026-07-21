@@ -2745,8 +2745,13 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xC6, 0x85).abs16("strike").db(0x01)        # [strike+di]=1 (VU onset)
     a.label("sp_nostr")
     if fm:
-        a.db(0xE0, 0x03).db(0xE9).rel16("sp_noev")   # loopnz +3 ; jmp near noev
-        a.db(0xE9).rel16("sp_evl")                   # ...else round again
+        # NOT loopnz: that also tests ZF, which the strike check above leaves
+        # SET on every note-off -- the loop then bailed out early and silently
+        # dropped the rest of the sub-tick's events (dropped note-ons = the
+        # "skipped notes"). Decrement and branch on CX alone.
+        a.db(0x49)                                   # dec cx
+        a.db(0x74, 0x03)                             # jz +3 (fall through to noev)
+        a.db(0xE9).rel16("sp_evl")                   # jmp near evl
     else:
         a.db(0xE2).rel8("sp_evl")                    # loop
     a.label("sp_noev")
