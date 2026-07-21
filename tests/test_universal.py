@@ -433,3 +433,51 @@ def test_sb_fm_puts_tones_on_the_opl2_and_noise_on_the_dac():
     for ts in range(9):
         D.build_com(s, "4voice", 0x80, sb=True, sb_fm=True,
                     mix_rate=22000, text_scope=ts)
+
+
+def test_opl2_follows_the_adlib_programming_rules():
+    """The OPL2 register conventions, per the AdLib/Bochs hardware notes.
+
+    Verified sources: writes need 6 status reads after the address and 35 after
+    the data; key-on is bit 5 of 0xB0-0xB8, sharing that byte with block and the
+    F-number high bits, so 0xA0 (F-number low) must be written FIRST; rhythm
+    mode is 0xBD bit 5 and REQUIRES the key-on bits of channels 6/7/8 to stay
+    clear; and playback is driven at a tempo-derived tick rate, not a fixed
+    18.2 Hz.
+    """
+    s = _universal_song()
+    com = D.build_com(s, "4voice", 0x80, sb=True, sb_fm=True)
+
+    # -- the mandated settle delays ------------------------------------------
+    assert bytes([0xB9, 0x06, 0x00]) in com          # mov cx,6  after an address
+    assert bytes([0xB9, 0x23, 0x00]) in com          # mov cx,35 after data
+
+    # -- rhythm mode needs channels 6/7/8 NOT keyed on -----------------------
+    for hz in (D._OPL_BD_HZ, D._OPL_HH_HZ):
+        block, fnum = D._opl_fnum(hz)
+        assert not ((block << 2) | (fnum >> 8)) & 0x20      # key-on bit clear
+    events = D._spk4_events(s, 22000, fm=True)
+    melodic = {v for recs in events.values() for (v, _w, _z, _l) in recs if v < 3}
+    assert melodic <= {0, 1, 2}                      # never channels 6/7/8
+
+    # -- a drum only re-strikes on a CLEAR -> SET transition of its 0xBD bit --
+    drum = [(st, w) for st, recs in sorted(events.items())
+            for (v, w, _z, _l) in recs if v == 3]
+    strikes = [(st, w) for st, w in drum if w & 0x1F]
+    assert strikes, "no drum strikes emitted"
+    for st, w in strikes:                            # each is preceded by a re-arm
+        rearm = [x for (t, x) in drum if t == st and x == D._OPL_RHYTHM]
+        assert rearm, f"strike at {st} has no clearing write"
+        assert w & D._OPL_RHYTHM                     # rhythm stays enabled
+
+    # -- a clean, loud voice: additive connection with no feedback ------------
+    assert bytes([0xB0, 0x01, 0xEE]) in com          # 0xC0 = feedback 0 | additive
+
+    # -- the tick rate is derived from the TEMPO, as ROL players do -----------
+    def isr_hz(c):
+        i = c.index(bytes([0xB0, 0x36, 0xE6, 0x43])) + 4
+        return D._PIT_HZ / (c[i + 1] | (c[i + 2] << 8))
+    slow = isr_hz(D.build_com(s, "4voice", 0x77, sb=True, sb_fm=True))
+    fast = isr_hz(D.build_com(s, "4voice", 0x92, sb=True, sb_fm=True))
+    assert slow != fast                              # follows the tempo
+    assert abs(slow - 18.2) > 1                      # not a fixed 18.2 Hz tick

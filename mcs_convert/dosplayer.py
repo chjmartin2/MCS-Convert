@@ -210,11 +210,17 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS,
         off = on + max(1, _SUBTICKS - 1)
         if fm:
             # FM: strike the chip's own rhythm voice -- bright hits the hi-hat,
-            # dark the bass drum. The word is the 0xBD register value; clearing
-            # the strike bit on note-off is what re-arms it for the next hit.
+            # dark the bass drum.
+            #
+            # A rhythm voice only re-strikes on a CLEAR -> SET transition of its
+            # bit in 0xBD. Relying on the note-off to do the clearing meant any
+            # two hits closer together than the note length never retriggered at
+            # all -- dropped drums. So each hit clears and then sets, back to
+            # back in the same sub-tick, and is guaranteed to sound.
             bright = midi >= _DRUM_BRIGHT_MIDI
             hit = _OPL_RHYTHM | (_OPL_HH if bright else _OPL_BD)
-            events.setdefault(on, []).append((3, hit, _NOISE_VIZ_P, 0))
+            events.setdefault(on, []).append((3, _OPL_RHYTHM, 0, 0))   # re-arm
+            events.setdefault(on, []).append((3, hit, _NOISE_VIZ_P, 0))  # strike
             events.setdefault(off, []).append((3, _OPL_RHYTHM, 0, 0))
         else:
             events.setdefault(on, []).append(
@@ -2220,6 +2226,7 @@ _OPL_CLOCK = 49716.0             # F-number reference
 _OPL_RHYTHM = 0x20               # 0xBD bit 5: rhythm mode on (channels 6/7/8)
 _OPL_BD, _OPL_HH = 0x10, 0x01    # 0xBD strike bits: bass drum / hi-hat
 _OPL_BD_HZ, _OPL_HH_HZ = 90.0, 1400.0    # the two drum voices' pitches
+_OPL_TL = 0x08                   # operator level: full is 0, 63 is silent
 
 
 def _opl_fnum(freq: float) -> Tuple[int, int]:
@@ -2372,17 +2379,16 @@ def _emit_opl_init(a: "_Asm", waveform: str) -> None:
     for ch in range(_SPK4_TONES):                    # the melodic tone voices
         op = _OPL_OP[ch]
         # 0x21 = EG-TYP (sustain while keyed) + frequency multiple 1
-        _emit_opl_write(a, 0x20 + op, 0x21)
-        _emit_opl_write(a, 0x40 + op, 0x10)          # modulator level (drives FM)
-        _emit_opl_write(a, 0x60 + op, 0xF0)          # fastest attack, no decay
-        _emit_opl_write(a, 0x80 + op, 0x0F)          # hold at full, quick release
-        _emit_opl_write(a, 0xE0 + op, mod_wave)
-        _emit_opl_write(a, 0x20 + op + 3, 0x21)      # carrier, also sustaining
-        _emit_opl_write(a, 0x40 + op + 3, 0x00)      # carrier at full volume
-        _emit_opl_write(a, 0x60 + op + 3, 0xF0)
-        _emit_opl_write(a, 0x80 + op + 3, 0x0F)
-        _emit_opl_write(a, 0xE0 + op + 3, car_wave)
-        _emit_opl_write(a, 0xC0 + ch, 0x0C)          # feedback 6, FM connection
+        for slot, wav in ((op, mod_wave), (op + 3, car_wave)):
+            # 0x21 = EG-TYP (hold while keyed) + frequency multiple 1
+            _emit_opl_write(a, 0x20 + slot, 0x21)
+            _emit_opl_write(a, 0x40 + slot, _OPL_TL)     # level (headroom for 3 voices)
+            _emit_opl_write(a, 0x60 + slot, 0xF0)        # instant attack, no decay
+            _emit_opl_write(a, 0x80 + slot, 0x07)        # hold at full, gentle release
+            _emit_opl_write(a, 0xE0 + slot, wav)         # the approximating waveform
+        # feedback 0 + ADDITIVE connection: both operators sound in parallel, so
+        # the voice is a clean bright tone rather than a deep-FM growl
+        _emit_opl_write(a, 0xC0 + ch, 0x01)
     # -- percussion on the chip's own RHYTHM channels (6/7/8) ----------------
     # Rhythm voices are PERCUSSIVE by design (EG-TYP clear) -- they should decay
     # away, which is exactly what a drum does. Bass drum = the dark hit, hi-hat
