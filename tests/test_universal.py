@@ -396,6 +396,21 @@ def test_sb_fm_puts_tones_on_the_opl2_and_noise_on_the_dac():
     assert bytes([0xBA, 0x88, 0x03]) in fm            # mov dx,0x388 (OPL2)
     assert bytes([0xBA, 0x88, 0x03]) not in dac       # the DAC build has no OPL
     assert b"\xB0\xD1" in fm                          # ...but still resets the DSP
+    assert bytes([0xB0, 0xBD, 0xEE]) in fm            # rhythm register 0xBD
+    # Tone operators must be SUSTAINING (register 0x20 bit 5). A percussive
+    # envelope runs attack->decay->release even while the key is held, so with
+    # sustain level 0 and a fast release every note died the instant it
+    # started -- that is why the FM build had no audio until the noise channel.
+    assert bytes([0xB0, 0x21, 0xEE]) in fm            # EG-TYP | multiple 1
+    # The timer fires once per SUB-TICK rather than per sample, because the OPL
+    # holds its own notes: orders of magnitude fewer interrupts, which is what
+    # leaves the CPU free to redraw the visualization.
+    def isr_hz(com):
+        i = com.index(bytes([0xB0, 0x36, 0xE6, 0x43])) + 4
+        return D._PIT_HZ / (com[i + 1] | (com[i + 2] << 8))
+    assert isr_hz(fm) < 400                           # a few hundred Hz
+    assert isr_hz(dac) > 10000                        # the DAC must run at Fs
+    assert isr_hz(dac) / isr_hz(fm) > 50
     # the OPL pitch encoding is accurate across the range
     for freq in (65.41, 261.63, 440.0, 1046.5, 4186.0):
         block, fnum = D._opl_fnum(freq)
