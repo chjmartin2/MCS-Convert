@@ -268,50 +268,80 @@ def test_text_scope_resolves_sub_row_heights_with_caps():
         assert bytes([0xB0, glyph]) in com                 # mov al,<glyph>
 
 
-def test_graphics_preview_replicates_the_com_layout():
-    # The DOS-replica preview draws the graphics scopes to the .COM's OWN
-    # layout, so what you preview is what the built player shows: the same
-    # 160x200 band coordinates, amplitude, frames and per-mode palette.
+def test_graphics_preview_is_a_native_framebuffer():
+    # The graphics screens are rendered into a REAL 320x200 palette-indexed
+    # framebuffer with the engine's own constants and blitted at 2x, so the
+    # preview is pixel-for-pixel what DOS shows rather than a vector sketch.
     tk = pytest.importorskip("tkinter")
     try:
         root = tk.Tk()
-    except tk.TclError:                              # headless CI: nothing to draw
+    except tk.TclError:                              # headless CI
         pytest.skip("no display")
     root.withdraw()
     from mcs_convert.gui import viz
     win = viz.DosVizWindow(root, "Tandy graphics", ["P1", "P2", "Tr", "Nz"])
     try:
-        def inks(style):
+        # the canvas IS the DOS screen: 320x200 at 2x
+        assert (win.NATIVE_W, win.NATIVE_H, win.ZOOM) == (320, 200, 2)
+        assert int(win.canvas["width"]) == 640 and int(win.canvas["height"]) == 400
+
+        def pixels(style):
             win.set_style(style)
-            win.draw([0.6, 0.5, 0.7, 0.0], [0.3] * 18, [0.25, 0.4, 0.6, 0.5], 1.0)
-            return {win.canvas.itemcget(i, "fill")
-                    for i in win.canvas.find_all() if win.canvas.itemcget(i, "fill")}
+            win.draw([0.6, 0.5, 0.7, 0.4], [0.3] * 18, [0.25, 0.4, 0.6, 0.5], 2.0)
+            # one blitted image, not a pile of vector items
+            assert len(win.canvas.find_all()) == 1
+            img = win._img
+            assert (img.width(), img.height()) == (640, 400)
+            return {img.get(x, y) if isinstance(img.get(x, y), tuple)
+                    else tuple(int(v) for v in str(img.get(x, y)).split())
+                    for x in range(0, 640, 7) for y in range(0, 400, 5)}
+
         win.set_wave("sine")
-        tandy, vga = inks("Tandy graphics"), inks("VGA 256")
-        # mode 9 packs its colours (dark red/blue); mode 13h indexes bright ones
-        assert "#aa0000" in tandy and "#0000aa" in tandy      # mode-9 ch1/ch2
-        assert "#ff5555" in vga and "#55ffff" in vga          # VGA ch1/ch2
+        tandy, vga = pixels("Tandy graphics"), pixels("VGA 256")
+        # mode 9 packs the dark palette entries; mode 13h indexes the bright ones
+        assert (170, 0, 0) in tandy and (0, 0, 170) in tandy       # dark red/blue
+        assert (255, 85, 85) in vga and (85, 255, 255) in vga      # bright red/cyan
+        assert (255, 255, 85) in tandy and (255, 255, 85) in vga   # ch0 yellow both
+        assert (255, 255, 255) in tandy                            # the frames
         assert tandy != vga
-        assert "#ffff55" in tandy and "#ffff55" in vga        # ch0 yellow in both
-        # a silent screen is just the flat centre lines + master + the 5 frames
-        win.set_style("Tandy graphics")
-        win.draw([0, 0, 0, 0], [0] * 18, [0.3] * 4, 0.0)
-        from mcs_convert.dosplayer import _FRAMES
-        assert len(win.canvas.find_all()) == 4 + 1 + len(_FRAMES)
-        # every style renders for every waveform without error
+        # every style renders at native size for every waveform
         for wf in ("square", "sine", "triangle", "nestri", "pulse12"):
             win.set_wave(wf)
             for st in viz.DOS_STYLES:
                 win.set_style(st)
                 win.draw([0.6] * 4, [0.3] * 18, [0.3] * 4, 1.0)
-        # the text styles land on a real character grid, with the cap ladder
+        # the text screens use the true VGA cell grid (80x25 of 8x16 = 640x400)
+        assert win.CELL_W * 80 == 640 and win.CELL_H * 25 == 400
         win.set_wave("sine")
         win.set_style("block scopes (text 1)")
         win.draw([0.9, 0.9, 0.9, 0.0], [0] * 18, [0.5] * 4, 0.0)
         glyphs = {win.canvas.itemcget(i, "text") for i in win.canvas.find_all()
                   if win.canvas.type(i) == "text"}
-        assert "█" in glyphs                          # block fill
-        assert glyphs & {"▄", "▀", "░", "▓"}          # the sub-row caps
+        assert "█" in glyphs and glyphs & {"▄", "▀", "░", "▓"}
+    finally:
+        root.destroy()
+
+
+def test_static_poster_preview_shows_the_baked_framebuffer():
+    # The poster preview unpacks the ACTUAL CGA framebuffer the .COM carries,
+    # so it is the very image DOS displays -- not a redrawing of the song.
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    from mcs_convert.gui import viz
+    song = _universal_song()
+    win = viz.DosVizWindow(root, "static poster")
+    try:
+        win.set_song(song, 0.075)
+        win.draw([0.5] * 4, [0.3] * 18, [0.3] * 4, 1.0)
+        assert len(win.canvas.find_all()) == 1        # one blit
+        assert win._poster == D._render_static_poster(song)   # the real bytes
+        assert len(win._poster) == 0x4000             # a full CGA framebuffer
+        win.draw([0.5] * 4, [0.3] * 18, [0.3] * 4, 2.0)
+        assert win._poster_for is song                # cached, not re-rendered
     finally:
         root.destroy()
 

@@ -189,11 +189,15 @@ class DosVizWindow:
 
     def __init__(self, parent, style: str = DOS_STYLES[0],
                  names: Optional[List[str]] = None, on_close=None) -> None:
-        self.win = _window(parent, f"DOS preview — {style}", (480, 320),
+        self.win = _window(parent, f"DOS preview — {style}", (640, 400),
                            on_close=on_close)
+        # the DOS screen at native size: 320x200 blitted 2x, and 80x25 text on
+        # the same 8x16 cell grid -- both are exactly 640x400, so the window is
+        # fixed there and nothing is stretched or approximated
         self.canvas = tk.Canvas(self.win, bg="#000000", highlightthickness=0,
                                 width=640, height=400)
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas.pack()
+        self.win.resizable(False, False)
         self.style = style
         self.names = (names or ["P1", "P2", "Tr", "Nz"])[:4]
         self.vu = [0.0] * 4
@@ -202,6 +206,9 @@ class DosVizWindow:
         self.phase = 0.0
         self.wave = "square"             # the waveform this build sounds
         self.song = None                 # for the static poster (set_song)
+        self._poster = None              # the baked CGA framebuffer, cached
+        self._poster_for = None
+        self._img = None                 # the blitted frame (kept referenced)
         self.staves = None               # for MCS notation (set_notation)
         self.bar_ticks = 32
         self.step_seconds = 0.075
@@ -235,10 +242,9 @@ class DosVizWindow:
 
     # -- shared painters ----------------------------------------------------
     def _grid_cell(self):
-        c = self.canvas
-        w = max(c.winfo_width(), 320)
-        h = max(c.winfo_height(), 200)
-        return c, w, h
+        """The canvas is pinned to the DOS screen's real size (640x400), so the
+        drawing space never depends on how the window happens to be sized."""
+        return (self.canvas, self.NATIVE_W * self.ZOOM, self.NATIVE_H * self.ZOOM)
 
     def _scope_trace(self, c, x0, y0, x1, y1, level: float, period: float,
                      color: str, line: bool) -> None:
@@ -323,9 +329,8 @@ class DosVizWindow:
         drawing; every cell lands on the character grid."""
         from ..dosplayer import _TAMP, _TATTR, _TCEN, _wave_value
         cols, rows = 80, 25
-        cw, ch_ = w / cols, h / rows
-        fs = max(6, int(min(cw * 1.7, ch_ * 0.92)))
-        font = ("Consolas", fs)
+        cw, ch_ = self.CELL_W, self.CELL_H        # the real VGA text cell
+        font = ("Consolas", -self.CELL_H)         # -N = pixel height, not points
         attr = {0x0E: "#ffff55", 0x04: "#aa0000", 0x01: "#0000aa",
                 0x0A: "#55ff55", 0x0F: "#ffffff"}
 
@@ -388,6 +393,53 @@ class DosVizWindow:
             for i, chx in enumerate(name[:2]):
                 cell(i, _TCEN[k], chx, attr[_TATTR[k]])
 
+    # -- native-resolution framebuffer blitting -------------------------------
+    # The graphics screens are drawn into a REAL 320x200 palette-indexed buffer,
+    # exactly as the .COM builds one, then blitted as a single image scaled 2x
+    # to 640x400. That makes the preview pixel-for-pixel what DOS shows —
+    # canvas vectors could only ever approximate it (and 64000 rectangles would
+    # be far too slow). Text screens use the true 80x25 / 8x16 cell grid, which
+    # is the same 640x400.
+    NATIVE_W, NATIVE_H, ZOOM = 320, 200, 2
+    CELL_W, CELL_H = 8, 16                       # VGA 80x25 text cell = 640x400
+
+    def _blit(self, c, px, palette) -> None:
+        """Show a 320x200 index buffer through `palette` at 2x — one image."""
+        row = bytearray()
+        rgb = [bytes.fromhex(p[1:]) for p in palette]
+        for y in range(self.NATIVE_H):
+            line = px[y]
+            for x in range(self.NATIVE_W):
+                row += rgb[line[x]]
+        img = tk.PhotoImage(
+            data=b"P6 %d %d 255 " % (self.NATIVE_W, self.NATIVE_H) + bytes(row)
+        ).zoom(self.ZOOM, self.ZOOM)
+        self._img = img                          # keep a reference alive
+        c.create_image(0, 0, image=img, anchor="nw")
+
+    def _plot_v(self, px, x_col, y0, y1, ink) -> None:
+        """The engine's vline: a column (2 pixels wide, as both graphics modes
+        write it) filled from y0 to y1 inclusive."""
+        if y0 > y1:
+            y0, y1 = y1, y0
+        x = x_col * 2
+        for y in range(max(0, y0), min(self.NATIVE_H - 1, y1) + 1):
+            row = px[y]
+            if 0 <= x < self.NATIVE_W:
+                row[x] = ink
+            if 0 <= x + 1 < self.NATIVE_W:
+                row[x + 1] = ink
+
+    def _plot_frame(self, px, x0, x1, y0, y1, ink) -> None:
+        for x in range(x0, x1 + 1):
+            self._plot_v(px, x, y0, y0, ink)
+            self._plot_v(px, x, y1, y1, ink)
+        for y in (y0, y1):
+            pass
+        for y in range(y0, y1 + 1):
+            for xc in (x0, x1):
+                self._plot_v(px, xc, y, y, ink)
+
     # -- the graphics scopes, drawn to the .COM's OWN layout -----------------
     #: the 16-colour palette both graphics modes index into (Tandy mode 9 packs
     #: two of these per byte; VGA mode 13h uses them as plain indices)
@@ -396,59 +448,78 @@ class DosVizWindow:
               "#ff5555", "#ff55ff", "#ffff55", "#ffffff")
 
     def _draw_graphics(self, c, w, h, lv, pr, tandy: bool) -> None:
-        """A faithful replica of the mode-9 / mode-13h scope screen: the same
-        160x200 layout the .COM draws — four framed channel scopes in a 2x2
-        grid plus the master pane, at the engine's own band coordinates,
-        amplitude and palette. The traces carry the build's waveform contour,
-        connected column to column exactly as the player's vline does."""
+        """The mode-9 / mode-13h scope screen, rendered into a real 320x200
+        framebuffer with the engine's OWN constants and drawing rules, then
+        blitted at 2x. Pixel-for-pixel what the .COM puts on screen: the same
+        bands, amplitude, 2-pixel columns, vline connections, noise shimmer,
+        stepped master and white frames, in the mode's own palette."""
         from ..dosplayer import (_CH, _CH13, _CHW, _FRAMES, _GAMP,
                                  _MASTER_CEN_Y, _MASTER_K, _NOISE_CEN,
                                  _wave_value)
         chans = _CH if tandy else _CH13
-        sx, sy = w / 160.0, h / 200.0                # the engine's coordinate space
-        col = lambda i: self._PAL16[(i >> 4) if tandy else i]
-
-        def frame(x0, x1, y0, y1, ink="#ffffff"):
-            c.create_rectangle(x0 * sx, y0 * sy, x1 * sx, y1 * sy, outline=ink)
-
+        px = [bytearray(self.NATIVE_W) for _ in range(self.NATIVE_H)]
+        idx = lambda packed: (packed >> 4) if tandy else packed
         scroll = self.phase * 2.0                    # _SCROLL_SPEED
-        sums = [0.0] * _CHW                          # the master's per-column sum
+        sums = [0.0] * _CHW
         for k in range(4):
             hi, lo, cen, packed, left = chans[k]
-            ink = col(packed)
-            if k == 3:                               # noise: shimmering spikes
+            ink = idx(packed)
+            if k == 3:                               # noise: the LCG shimmer
                 if lv[3] > 0.001:
-                    seed = int(self.phase) * 25173 + 13849
+                    seed = (int(self.phase) * 25173 + 13849) & 0xFFFF
                     for L in range(_CHW):
                         seed = (seed * 25173 + 13849) & 0xFFFF
                         y = _NOISE_CEN + ((seed >> 8) & 0x1F) - 16
-                        x = (left + L) * sx
-                        c.create_line(x, _NOISE_CEN * sy, x, y * sy, fill=ink)
+                        self._plot_v(px, left + L, _NOISE_CEN, y, ink)
                 else:
-                    c.create_line(left * sx, _NOISE_CEN * sy,
-                                  (left + _CHW) * sx, _NOISE_CEN * sy, fill=ink)
+                    for L in range(_CHW):
+                        self._plot_v(px, left + L, _NOISE_CEN, _NOISE_CEN, ink)
                 continue
             if lv[k] <= 0.001:                       # silent: the centre line
-                c.create_line(left * sx, cen * sy, (left + _CHW) * sx, cen * sy,
-                              fill=ink)
+                for L in range(_CHW):
+                    self._plot_v(px, left + L, cen, cen, ink)
                 continue
-            cycle = max(4.0, pr[k] * 60.0)           # columns per full cycle
-            pts = []
+            cycle = max(4.0, pr[k] * 60.0)
+            prev = cen
             for L in range(_CHW):
                 v = _wave_value(self.wave, ((L + scroll) % cycle) / cycle)
-                pts.extend([(left + L) * sx, (cen - v * _GAMP) * sy])
-                sums[L] += 1.0 if v >= 0 else -1.0   # the master follows the sign
-            c.create_line(*pts, fill=ink, width=2)
-        # the master pane: the tone levels summed into discrete bands, 2 wide
-        mink = self._PAL16[15]
-        mpts = []
+                y = int(round(cen - v * _GAMP))
+                self._plot_v(px, left + L, prev, y, ink)   # connect, like vline
+                prev = y
+                sums[L] += 1.0 if v >= 0 else -1.0
+        prev = _MASTER_CEN_Y                         # the master, 2 columns wide
         for L in range(_CHW):
-            y = _MASTER_CEN_Y - sums[L] * _MASTER_K
-            mpts.extend([(10 + 2 * L) * sx, y * sy])
-        if len(mpts) >= 4:
-            c.create_line(*mpts, fill=mink, width=2)
+            y = int(round(_MASTER_CEN_Y - sums[L] * _MASTER_K))
+            self._plot_v(px, 10 + 2 * L, prev, y, 15)
+            self._plot_v(px, 10 + 2 * L + 1, prev, y, 15)
+            prev = y
         for fr in _FRAMES:                           # the white frames, last
-            frame(*fr, ink=mink)
+            self._plot_frame(px, fr[0], fr[1], fr[2], fr[3], 15)
+        self._blit(c, px, self._PAL16)
+
+    def _draw_poster(self, c, w, h) -> None:
+        """The static screen: unpack the ACTUAL baked CGA framebuffer the .COM
+        carries and show it. Not a redrawing — the very bytes DOS displays."""
+        from ..dosplayer import _CGA_GREEN, _CGA_RED, _CGA_YELLOW, _render_static_poster
+        if self.song is None:
+            return
+        if self._poster_for is not self.song:        # cache: it never changes
+            self._poster_for = self.song
+            self._poster = _render_static_poster(self.song)
+        fb = self._poster
+        px = [bytearray(self.NATIVE_W) for _ in range(self.NATIVE_H)]
+        for y in range(self.NATIVE_H):               # even/odd interleaved planes
+            base = (0x2000 if (y & 1) else 0) + (y >> 1) * 80
+            row = px[y]
+            for bx in range(80):
+                b = fb[base + bx]
+                x = bx * 4
+                row[x] = (b >> 6) & 3
+                row[x + 1] = (b >> 4) & 3
+                row[x + 2] = (b >> 2) & 3
+                row[x + 3] = b & 3
+        # CGA mode 4, palette 0 + intensity: black / green / red / yellow
+        self._blit(c, px, ("#000000", "#55ff55", "#ff5555", "#ffff55"))
 
     def _draw_master(self, c, x0, y0, x1, y1, lv, colors) -> None:
         """The graphics scopes' framed master pane: the summed square trace."""
@@ -480,66 +551,6 @@ class DosVizWindow:
             self._scope_trace(c, 60, y0 + 4, w - 8, y0 + band - 4,
                               level, period, color, True)
             c.create_line(2, y0 + band, w - 2, y0 + band, fill=_DOS["grey"])
-
-    def _draw_poster(self, c, w, h) -> None:
-        """The static-screen CGA poster: the WHOLE song as a piano roll in the
-        black/green/red/yellow palette, drawn once per frame from the song (a
-        faithful preview of dosplayer's baked 320x200x4 image), with a thin
-        playhead the real DOS build doesn't have."""
-        song = self.song
-        if song is None:
-            c.create_text(w / 2, h / 2, text="(no song)", fill=_CGA4["green"])
-            return
-        tone_tracks = [t for t in song.tracks
-                       if getattr(t, "kind", "tone") == "tone"][:3]
-        notes = [(n.start_tick, n.end_tick, n.midi_note, vi)
-                 for vi, t in enumerate(tone_tracks)
-                 for n in t.notes if not n.is_rest and not n.percussive]
-        perc = [n.start_tick for t in song.tracks for n in t.notes
-                if not n.is_rest and (n.percussive
-                                      or getattr(t, "kind", "tone") in
-                                      ("noise", "drum"))]
-        if not notes:
-            return
-        tot = max(e for _, e, _, _ in notes) or 1
-        lo = min(m for _, _, m, _ in notes)
-        hi = max(m for _, _, m, _ in notes)
-        span = max(1, hi - lo)
-        top, bot = 14, h - 24
-        colors = (_CGA4["yellow"], _CGA4["green"], _CGA4["red"])   # lead/2nd/bass
-        for cc in range(12, 128, 12):                 # dotted octave gridlines
-            if lo <= cc <= hi:
-                y = bot - (cc - lo) * (bot - top) / span
-                for x in range(2, int(w) - 2, 12):
-                    c.create_line(x, y, x + 4, y, fill="#1a5c1a")
-        for vi in (2, 1, 0):                          # bass under, lead on top
-            for s, e, m, v in notes:
-                if v != vi:
-                    continue
-                y = bot - (m - lo) * (bot - top) / span
-                c.create_rectangle(2 + s * (w - 4) / tot, y - 1,
-                                   2 + e * (w - 4) / tot, y + 1,
-                                   fill=colors[vi], outline="")
-        for s in perc:                                # drum strip along the bottom
-            x = 2 + s * (w - 4) / tot
-            c.create_line(x, h - 18, x, h - 8, fill=_CGA4["yellow"])
-        for i, (label, colr) in enumerate((("P1", "yellow"), ("P2", "green"),
-                                           ("Tri", "red"), ("Drums", "yellow"))):
-            c.create_text(8 + i * 46, 4, text=label, anchor="nw",
-                          fill=_CGA4[colr], font=("Consolas", 9, "bold"))
-        if self.step_seconds > 0:                     # preview-only playhead
-            x = 2 + (self.elapsed / self.step_seconds) * (w - 4) / tot
-            if x <= w - 2:
-                c.create_line(x, top, x, h - 6, fill="#ffffff")
-
-    # -- MCS notation (the .MCS target's preview) ----------------------------
-    # Drawn from the ENCODED file's own records: each entry carries the exact
-    # vertical staff position (v: top staff lines at 12/14/16/18/20, bottom at
-    # 32..40 — calibrated against the encoder) and x-slot (8px columns, 24 per
-    # measure) that Music Construction Set renders. Symbols: notes 0x00-0x05
-    # (whole..32nd via _note_value), beamed 0x14-0x18, rests 0x07-0x0C,
-    # accidentals 0x0E-0x10, dot 0x11, 8va 0x12, ties 0x13/0x19.
-    _MEASURE_SLOTS = 24
 
     def _draw_notation(self, c, w, h) -> None:
         from ..mcs import reader as R
