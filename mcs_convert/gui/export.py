@@ -36,7 +36,8 @@ TARGETS = (
     ("PC Speaker 1-voice .COM", "1voice", "1voice", ".com"),
     ("PC Speaker 4-voice .COM", "4voice", "4voice", ".com"),
     ("PC Speaker 4-voice (MCS drive) .COM", "4voice", "4voice", ".com"),
-    ("SoundBlaster .COM", "sb", "4voice", ".com"),
+    ("SoundBlaster .COM (DAC)", "sb", "4voice", ".com"),
+    ("SoundBlaster .COM (FM + DAC)", "sb", "4voice", ".com"),
     ("WAV (universal render)", None, None, ".wav"),
 )
 
@@ -544,6 +545,7 @@ class ExportDialog(tk.Toplevel):
                                              if c.isdigit()) or "16000")
             kwargs["mcs"] = "MCS drive" in label
             kwargs["sb"] = label.startswith("SoundBlaster")
+            kwargs["sb_fm"] = "FM" in label          # tones on the OPL2
             if kwargs["sb"]:
                 # the scope engine is audio-agnostic (it reads viz[]/strike[]),
                 # so SoundBlaster builds get the full visualization family too

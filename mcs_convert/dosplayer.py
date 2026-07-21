@@ -174,7 +174,8 @@ def _spk4_noise_inc(bright: bool, fs: float = _SPK4_FS) -> int:
     return _spk4_inc(_SPK4_NOISE_BRIGHT_HZ if bright else _SPK4_NOISE_DARK_HZ, fs)
 
 
-def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, int, int]]]:
+def _spk4_events(song: Song, fs: float = _SPK4_FS,
+                 fm: bool = False) -> Dict[int, List[Tuple[int, int, int, int]]]:
     """sub-tick -> [(voice, inc, viz)] changes: each note-on sets its voice's
     increment (at sample rate `fs`), each articulated note-off sets it to 0
     (silent). `viz` is the on-screen scope period (0 = silent) that the text
@@ -194,8 +195,11 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, 
             off = _artic_off(on, dur)
             freq = midi_to_freq(midi)
             lvl = _sb_level(vel.get((start, midi), 100))
+            # FM builds put the tone voices on the OPL2, so the record carries
+            # the packed OPL word instead of a phase increment
+            word = _opl_note_word(freq) if fm else _spk4_inc(freq, fs)
             events.setdefault(on, []).append(
-                (v, _spk4_inc(freq, fs), _viz_period(freq), lvl))
+                (v, word, _viz_period(freq), lvl))
             events.setdefault(off, []).append((v, 0, 0, 0))
     seen = set()
     for start, midi in perc:                        # drums -> noise voice (3)
@@ -211,14 +215,15 @@ def _spk4_events(song: Song, fs: float = _SPK4_FS) -> Dict[int, List[Tuple[int, 
     return events
 
 
-def _build_spk4_stream(song: Song, fs: float = _SPK4_FS) -> Tuple[bytes, int]:
+def _build_spk4_stream(song: Song, fs: float = _SPK4_FS,
+                       fm: bool = False) -> Tuple[bytes, int]:
     """(stream bytes, total sub-ticks). One record per sub-tick:
     [nchanges][voice|level<<4, inc_lo, inc_hi, viz]* -- only voices that CHANGE
     are listed, so a held note emits nothing and keeps its phase. The voice byte
     is 0-3, so its high nibble carries the note's VOLUME level for free (the
     SoundBlaster engine reads it; the 1-bit engines mask it off). A final all-off
     record silences the voices before the loop restarts."""
-    events = _spk4_events(song, fs)
+    events = _spk4_events(song, fs, fm)
     ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
     total = ticks * _SUBTICKS
     out = bytearray()
@@ -2191,6 +2196,41 @@ _SPK4_MCS_PULSE = 24             # timer-2 one-shot pulse width in PIT ticks (MC
 _SB_PORT = 0x220                 # default SoundBlaster base I/O port (BLASTER A220)
 _SB_AMP = 30                     # per-voice amplitude in the 8-bit (0..255) mix
 
+# ---- OPL2 FM synthesis (YM3812) ---------------------------------------------
+# Every SoundBlaster carries an OPL2 alongside the DAC, and it is the better
+# home for the tone voices: nine hardware channels that hold a note once written
+# and cost the CPU NOTHING per sample. The DAC engine has to synthesize every
+# sample in a timer ISR, which is what starves the visualization; with the tones
+# on FM the ISR only has to service the noise voice, so the scopes run properly.
+# We use both together -- FM for pitch, the DAC for the LFSR noise/percussion.
+_OPL_PORT = 0x388                # OPL2 address/data at 0x388/0x389 (also SB+8/9)
+_OPL_CHANS = 9                   # melodic channels
+#: operator offsets for channels 0..8 (modulator; carrier is +3)
+_OPL_OP = (0x00, 0x01, 0x02, 0x08, 0x09, 0x0A, 0x10, 0x11, 0x12)
+_OPL_CLOCK = 49716.0             # F-number reference
+
+
+def _opl_fnum(freq: float) -> Tuple[int, int]:
+    """(block, F-number) for `freq` -- the OPL2's octave + 10-bit pitch. Picks
+    the lowest block that fits, keeping the most resolution (<0.05% error)."""
+    for block in range(8):
+        fnum = int(round(freq * (1 << (20 - block)) / _OPL_CLOCK))
+        if fnum < 1024:
+            return block, max(1, fnum)
+    return 7, 1023
+
+
+def _opl_patch(waveform: str) -> Tuple[int, int]:
+    """(modulator waveform, carrier waveform) approximating a chiptune timbre.
+    The OPL2's four shapes are 0 sine, 1 half-sine, 2 abs-sine, 3 pulse-sine;
+    with feedback off and additive-ish settings these land close enough to the
+    native waveforms to read as the same instrument."""
+    return {"square": (3, 3), "pulse50": (3, 3),     # pulse-sine = squarest
+            "pulse12": (3, 1), "pulse25": (3, 1),    # narrower, brighter
+            "pulse75": (3, 3),
+            "triangle": (2, 2), "nestri": (2, 2),    # abs-sine ~ triangle
+            "sine": (0, 0)}.get(waveform, (3, 3))
+
 # Waveform tables: 256 entries spanning one oscillator cycle, indexed by the
 # phase accumulator's HIGH BYTE (no shifting needed on the 8088 — the natural
 # 256-entry table makes the lookup a single mov). The SB engine uses SIGNED
@@ -2281,7 +2321,93 @@ def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
     _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
 
 
-def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
+def _emit_opl_write(a: "_Asm", reg: int, val: int) -> None:
+    """Write one OPL2 register. The chip needs a settling delay after the
+    address and after the data; re-reading the status port the prescribed
+    number of times is the standard way to spend it (and works at any speed)."""
+    a.db(0xBA).bytes(_w(_OPL_PORT))                  # mov dx, 0x388 (address)
+    a.db(0xB0, reg).db(0xEE)                         # mov al,reg; out dx,al
+    a.db(0xB9, 0x06, 0x00)                           # mov cx,6   (address delay)
+    a.db(0xEC).db(0xE2, 0xFD)                        # .d: in al,dx; loop .d
+    a.db(0x42)                                       # inc dx (0x389 = data)
+    a.db(0xB0, val).db(0xEE)                         # mov al,val; out dx,al
+    a.db(0x4A)                                       # dec dx
+    a.db(0xB9, 0x23, 0x00)                           # mov cx,35  (data delay)
+    a.db(0xEC).db(0xE2, 0xFD)                        # .d: in al,dx; loop .d
+
+
+def _emit_opl_init(a: "_Asm", waveform: str) -> None:
+    """Silence every OPL2 register, enable the waveform-select extension, then
+    voice the three melodic channels with a patch approximating `waveform`."""
+    mod_wave, car_wave = _opl_patch(waveform)
+    for reg in range(0x01, 0xF6):                    # a clean slate
+        if reg in (0x01,):
+            continue
+        _emit_opl_write(a, reg, 0x00)
+    _emit_opl_write(a, 0x01, 0x20)                   # WSE: allow waveforms 1-3
+    _emit_opl_write(a, 0x08, 0x00)                   # no split keyboard
+    _emit_opl_write(a, 0xBD, 0x00)                   # melodic mode (no rhythm)
+    for ch in range(_SPK4_TONES):
+        op = _OPL_OP[ch]
+        # modulator: no tremolo/vibrato, sustaining, max multiple 1
+        _emit_opl_write(a, 0x20 + op, 0x01)
+        _emit_opl_write(a, 0x40 + op, 0x10)          # modulator level (drives FM)
+        _emit_opl_write(a, 0x60 + op, 0xF0)          # fast attack, no decay
+        _emit_opl_write(a, 0x80 + op, 0x0F)          # full sustain, quick release
+        _emit_opl_write(a, 0xE0 + op, mod_wave)
+        _emit_opl_write(a, 0x20 + op + 3, 0x01)      # carrier
+        _emit_opl_write(a, 0x40 + op + 3, 0x00)      # carrier at full volume
+        _emit_opl_write(a, 0x60 + op + 3, 0xF0)
+        _emit_opl_write(a, 0x80 + op + 3, 0x0F)
+        _emit_opl_write(a, 0xE0 + op + 3, car_wave)
+        _emit_opl_write(a, 0xC0 + ch, 0x0E)          # both speakers, feedback 3
+
+
+def _emit_opl_keyoff(a: "_Asm") -> None:
+    """Key-off every melodic channel (used at teardown)."""
+    for ch in range(_OPL_CHANS):
+        _emit_opl_write(a, 0xB0 + ch, 0x00)
+
+
+def _emit_opl_event(a: "_Asm", pfx: str) -> None:
+    """Apply one FM tone event in the ISR. DI = voice (0-2) and AX carries the
+    packed OPL word the stream stored for this note: the low byte is the
+    F-number's low 8 bits, the high byte is the 0xB0 register value (key-on |
+    block | F-number high). A key-OFF is simply a zero high byte.
+
+    Writing a register is address-then-data with a settle in between; CX holds
+    the caller's event count so it is pushed around the delays."""
+    a.db(0x50)                                       # push ax (the packed word)
+    # -- 0xA0 + voice : F-number low --------------------------------------
+    a.db(0xBA).bytes(_w(_OPL_PORT))                  # mov dx,0x388
+    a.db(0x89, 0xF8).db(0x04, 0xA0).db(0xEE)         # mov ax,di (voice); +0xA0; out
+    _emit_opl_delay(a, 6)
+    a.db(0x42).db(0x58).db(0x50).db(0xEE).db(0x4A)   # inc dx; al=fnum low; out; dec dx
+    _emit_opl_delay(a, 35)
+    # -- 0xB0 + voice : key-on | block | F-number high --------------------
+    a.db(0x89, 0xF8).db(0x04, 0xB0).db(0xEE)         # mov ax,di (voice); +0xB0; out
+    _emit_opl_delay(a, 6)
+    a.db(0x42).db(0x58).db(0x88, 0xE0).db(0xEE).db(0x4A)   # inc dx; pop ax; al=ah; out; dec dx
+    _emit_opl_delay(a, 35)
+
+
+def _emit_opl_delay(a: "_Asm", n: int) -> None:
+    """The OPL2's post-write settle: re-read the status port n times. CX is the
+    ISR's event counter, so it is saved across the loop."""
+    a.db(0x51)                                       # push cx
+    a.db(0xB9).bytes(_w(n))                          # mov cx,n
+    a.db(0xEC).db(0xE2, 0xFD)                        # .d: in al,dx; loop .d
+    a.db(0x59)                                       # pop cx
+
+
+def _opl_note_word(freq: float) -> int:
+    """The stream's packed OPL word for a note at `freq`: F-number low in the
+    low byte, the 0xB0 register (key-on | block | F-number high) in the high."""
+    block, fnum = _opl_fnum(freq)
+    return (fnum & 0xFF) | ((0x20 | (block << 2) | (fnum >> 8)) << 8)
+
+
+def _emit_sb_synth_out(a: "_Asm", sb_port: int, fm: bool = False) -> None:
     """One 8-bit sample for the SoundBlaster DAC: a real MIX, not a voice count.
 
     Each voice looks its level up in its own volume-scaled wavetable (`wptr`
@@ -2290,8 +2416,8 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int) -> None:
     +/-AMP sign bit. The four levels sum in BX (16-bit, so the mix can't wrap
     the way a byte accumulator did) and the total lands in the DAC's range."""
     a.db(0x31, 0xDB)                                 # xor bx,bx (16-bit signed sum)
-    for i in range(_SPK4_TONES):
-        a.db(0xA1).abs16("acc", i * 2)               # mov ax,[acc+i]
+    for i in range(0 if fm else _SPK4_TONES):        # FM: tones are on the OPL2,
+        a.db(0xA1).abs16("acc", i * 2)               # so the DAC only mixes noise
         a.db(0x03, 0x06).abs16("inc", i * 2)         # add ax,[inc+i]
         a.db(0xA3).abs16("acc", i * 2)               # mov [acc+i],ax
         a.db(0x8B, 0x36).abs16("wptr", i * 2)        # mov si,[wptr+i] (volume table)
@@ -2375,7 +2501,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
                    poster: bytes = b"", mcs: bool = False, sb: bool = False,
                    sb_port: int = _SB_PORT, wave_table: bytes = b"",
-                   wave: str = "square") -> bytes:
+                   wave: str = "square", fm: bool = False) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -2404,6 +2530,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
     if sb:                                           # SoundBlaster: reset DSP + speaker on
         _emit_sb_init(a, sb_port)
+        if fm:                                       # ...and voice the OPL2
+            _emit_opl_init(a, wave)
     else:
         a.db(0xE4, 0x61).db(0xA2).abs16("old61")     # in al,0x61; save
         if mcs:
@@ -2445,6 +2573,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     # ---- teardown: silence, restore timer + vector, exit -----------------------
     a.db(0xFA)                                        # cli
     if sb:                                            # SoundBlaster speaker off (cmd 0xD3)
+        if fm:
+            _emit_opl_keyoff(a)                       # silence the FM channels
         a.db(0xBA).bytes(_w(sb_port + 0x0C))
         _emit_sb_write(a, 0xD3)
     else:
@@ -2462,7 +2592,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
     if sb:
-        _emit_sb_synth_out(a, sb_port)               # volume-mixed 8-bit -> SB DAC
+        _emit_sb_synth_out(a, sb_port, fm)           # volume-mixed 8-bit -> SB DAC
     elif wave_table:
         _emit_spk_wave_synth(a, mcs)                 # PWM waveform modeling
     else:
@@ -2505,7 +2635,13 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
             a.db(0xA0).abs16("base61").db(0x08, 0xD0).db(0xE6, _SPEAKER)   # al=base|dl(bit1); out
     # timing: every samps_per_sub samples, apply the next sub-tick
     a.db(0xFF, 0x0E).abs16("sampctr")                # dec word[sampctr]
-    a.db(0x75).rel8("isr_eoi")                       # jnz eoi (fast path skips di)
+    if fm:
+        # the OPL writes make the event body too far for a short jump, so the
+        # (rare) branch to the EOI goes near; the plain builds keep the tight
+        # 2-byte form on what is the hot path for every sample
+        a.db(0x74, 0x03).db(0xE9).rel16("isr_eoi")   # jz +3 ; jmp near eoi
+    else:
+        a.db(0x75).rel8("isr_eoi")                   # jnz eoi (fast path skips di)
     a.db(0x57)                                        # push di (the event path uses it)
     a.db(0xA1).abs16("sampsub").db(0xA3).abs16("sampctr")   # reload sampctr
     a.db(0x83, 0x3E).abs16("ticksleft").db(0x00)     # cmp word[ticksleft],0
@@ -2528,9 +2664,19 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.db(0x88, 0xD6).db(0x30, 0xD2)              # mov dh,dl; xor dl,dl (dx=level*256)
         a.db(0x81, 0xC2).abs16("wavetbl")            # add dx, wavetbl
         a.db(0x89, 0x97).abs16("wptr")               # [wptr+bx] = dx
-    a.db(0xAD)                                        # lodsw (inc)
+    a.db(0xAD)                                        # lodsw (the note word)
+    if fm:
+        # FM build: voices 0..2 are OPL2 channels (the word is the packed OPL
+        # note), voice 3 is the DAC noise voice (the word is a phase increment)
+        a.db(0x83, 0xFF, _SPK4_TONES)                # cmp di, 3
+        a.db(0x73).rel8("sp_dac")                    # jae the DAC voice
+        _emit_opl_event(a, "sp")
+        a.db(0xEB).rel8("sp_vz")                     # jmp on to the viz byte
+        a.label("sp_dac")
     a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
     a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
+    if fm:
+        a.label("sp_vz")
     a.db(0xAC).db(0x88, 0x85).abs16("viz")           # lodsb (viz); [viz+di]=al
     a.db(0x08, 0xC0).db(0x74).rel8("sp_nostr")       # or al,al; jz (note-off, no strike)
     a.db(0xC6, 0x85).abs16("strike").db(0x01)        # [strike+di]=1 (VU onset)
@@ -2599,7 +2745,8 @@ def _native_waveform(song: Song) -> str:
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False, mix_rate=None, draw_skip: int = 1,
               mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT,
-              sb_wave: str = None, spk_wave: str = None) -> bytes:
+              sb_wave: str = None, spk_wave: str = None,
+              sb_fm: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
@@ -2621,6 +2768,8 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError("SoundBlaster output is only available with --4voice")
     if sb and mcs:
         raise ValueError("--sb and --mcs are different speaker drives; pick one")
+    if sb_fm and not sb:
+        raise ValueError("--sb-fm needs --sb (it adds the OPL2 to the SB output)")
     if spk_wave and (sb or mode != "4voice"):
         raise ValueError("spk_wave (PWM waveform modeling) is 4-voice speaker only")
     draw_skip = max(1, min(255, int(draw_skip)))
@@ -2648,7 +2797,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
                     f"{_SPK4_WAVE_MIN_RATE} (the carrier must be inaudible); "
                     f"got {fs:.0f} Hz")
             wave_table = _wave_table(spk_wave, _SPK4_WAVE_FULL, signed=False)
-        stream, total = _build_spk4_stream(song, fs)
+        stream, total = _build_spk4_stream(song, fs, sb_fm)
         if total <= 1:
             raise ValueError("nothing to play (no notes)")
         if total > 65535:
@@ -2662,7 +2811,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         scope_wave = (wf if sb else
                       (spk_wave if spk_wave and spk_wave != "native" else "square"))
         com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster,
-                             mcs, sb, sb_port, wave_table, scope_wave)
+                             mcs, sb, sb_port, wave_table, scope_wave, sb_fm)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
         return com

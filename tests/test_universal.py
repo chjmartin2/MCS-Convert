@@ -383,3 +383,38 @@ def test_silent_channel_clears_the_cap_state():
         full, rem = abs(v) >> 2, abs(v) & 3
         if rem:
             assert full + 1 <= D._TAMP                # stays within the band
+
+
+def test_sb_fm_puts_tones_on_the_opl2_and_noise_on_the_dac():
+    # --sb-fm uses BOTH SoundBlaster outputs: the tone voices go to the OPL2 FM
+    # synth (nine hardware channels that hold a note once written, costing the
+    # CPU nothing per sample) while the noise/percussion stays on the DAC. That
+    # also frees the timer ISR, which is what starved the visualizations.
+    s = _universal_song()
+    dac = D.build_com(s, "4voice", 0x80, sb=True, mix_rate=22000)
+    fm = D.build_com(s, "4voice", 0x80, sb=True, sb_fm=True, mix_rate=22000)
+    assert bytes([0xBA, 0x88, 0x03]) in fm            # mov dx,0x388 (OPL2)
+    assert bytes([0xBA, 0x88, 0x03]) not in dac       # the DAC build has no OPL
+    assert b"\xB0\xD1" in fm                          # ...but still resets the DSP
+    # the OPL pitch encoding is accurate across the range
+    for freq in (65.41, 261.63, 440.0, 1046.5, 4186.0):
+        block, fnum = D._opl_fnum(freq)
+        assert 0 <= block <= 7 and 1 <= fnum < 1024
+        back = fnum * D._OPL_CLOCK / (1 << (20 - block))
+        assert abs(back / freq - 1.0) < 0.001         # within 0.1%
+    # the stream carries the packed OPL word for tone voices in FM builds
+    word = D._opl_note_word(440.0)
+    block, fnum = D._opl_fnum(440.0)
+    assert word & 0xFF == fnum & 0xFF                 # F-number low byte
+    assert (word >> 8) & 0x20                         # key-on bit
+    assert ((word >> 8) >> 2) & 7 == block            # block
+    fm_stream, _ = D._build_spk4_stream(s, 22000, True)
+    dac_stream, _ = D._build_spk4_stream(s, 22000, False)
+    assert fm_stream != dac_stream                    # different note encoding
+    # --sb-fm is meaningless without --sb
+    with pytest.raises(ValueError):
+        D.build_com(s, "4voice", 0x80, sb_fm=True, mix_rate=22000)
+    # every visualization still builds on the FM target
+    for ts in range(9):
+        D.build_com(s, "4voice", 0x80, sb=True, sb_fm=True,
+                    mix_rate=22000, text_scope=ts)

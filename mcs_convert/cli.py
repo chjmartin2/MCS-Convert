@@ -72,10 +72,14 @@ def _cmd_convert(args) -> int:
                           6 if args.scope_vu else 5 if args.scope_text5 else
                           4 if args.scope_text4 else 3 if args.scope_text3 else
                           2 if args.scope_text2 else 1 if args.scope_text else 0)
+            # Only the mode-9 graphics scope is hardware-bound (it is a
+            # PCjr/Tandy video mode); every other visualization works on every
+            # target, including the 1-voice beeper, which emits viz records.
             if args.scope and target != "tandy":
-                raise ValueError("--scope (Tandy mode-9 oscilloscope) needs --tandy")
-            if text_scope and target not in ("tandy", "4voice"):
-                raise ValueError("--scope-.. needs --tandy or --4voice")
+                raise ValueError("--scope is the Tandy mode-9 oscilloscope; use "
+                                 "--scope-vga (mode 13h) on other targets")
+            if args.scope_static and target != "4voice":
+                raise ValueError("--scope-static (the whole-song poster) needs --4voice")
             if args.mix_rate and target != "4voice":
                 raise ValueError("--mix-rate only applies to --4voice")
             if args.mcs and target != "4voice":
@@ -87,7 +91,8 @@ def _cmd_convert(args) -> int:
                              text_scope=text_scope, mix_rate=args.mix_rate,
                              draw_skip=args.draw_skip, mcs=args.mcs,
                              sb=args.sb, sb_port=args.sb_port,
-                             sb_wave=args.sb_wave, spk_wave=args.spk_wave)
+                             sb_wave=args.sb_wave, spk_wave=args.spk_wave,
+                             sb_fm=args.sb_fm)
         else:                                        # the default .MCS song file
             # The universal Song may carry noise tracks / waveforms / effects MCS
             # can't voice — retrack() reduces to 4 square voices + drum clicks.
@@ -208,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("--sb-port", dest="sb_port", type=lambda s: int(s, 0),
                         default=0x220, metavar="PORT",
                         help="SoundBlaster base I/O port (default 0x220)")
+    p_conv.add_argument("--sb-fm", dest="sb_fm", action="store_true",
+                        help="with --sb: put the TONE voices on the SoundBlaster's "
+                             "OPL2 FM synth (hardware-held notes, no per-sample "
+                             "CPU) and keep the noise/percussion on the DAC -- "
+                             "both outputs at once, and the scopes run free")
     p_conv.add_argument("--sb-wave", dest="sb_wave", default=None,
                         choices=("native", "square", "triangle", "sine", "nestri",
                                  "pulse12", "pulse25", "pulse50", "pulse75"),
