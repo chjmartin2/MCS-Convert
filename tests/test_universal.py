@@ -481,3 +481,44 @@ def test_opl2_follows_the_adlib_programming_rules():
     fast = isr_hz(D.build_com(s, "4voice", 0x92, sb=True, sb_fm=True))
     assert slow != fast                              # follows the tempo
     assert abs(slow - 18.2) > 1                      # not a fixed 18.2 Hz tick
+
+
+def test_graphics_scope_draws_smooth_full_resolution_waveforms():
+    # The graphics scopes (mode 9 / VGA 13h) have 20 scanlines of amplitude, so
+    # a 16-step phase table drew curves as a coarse staircase -- a triangle
+    # jumped ~6 scanlines a step. They now sample a 256-entry table by the FULL
+    # phase high byte, so the trace steps at most one scanline at a time.
+    tri16 = [b - 256 if b > 127 else b for b in D._wave_shape("triangle", D._GAMP, 16)]
+    tri256 = [b - 256 if b > 127 else b for b in D._wave_shape("triangle", D._GAMP, 256)]
+    jump = lambda t: max(abs(t[i] - t[i - 1]) for i in range(1, len(t)))
+    assert jump(tri16) >= 5                           # the old staircase
+    assert jump(tri256) <= 1                          # a smooth curve now
+    assert len(set(tri256)) > 3 * len(set(tri16))     # far more distinct heights
+    sine = [b - 256 if b > 127 else b for b in D._wave_shape("sine", D._GAMP, 256)]
+    assert jump(sine) <= 1 and min(sine) == -D._GAMP and max(sine) == D._GAMP
+
+    # the graphics channel pick indexes the FULL byte (no 4-bit shift): the
+    # 8-byte 'shr al,1' run that quantised the phase must be gone from the pick.
+    song = _universal_song()
+    gfx = D.build_com(song, "tandy", 0x80, text_scope=8)   # VGA mode 13h
+    assert b"\xD0\xE8\xD0\xE8\xD0\xE8\xD0\xE8" not in gfx
+    # ...while a TEXT scope, whose band is only a couple of rows, still quantises
+    txt = D.build_com(song, "tandy", 0x80, text_scope=2)
+    assert b"\xD0\xE8\xD0\xE8\xD0\xE8\xD0\xE8" in txt
+
+    # the noise channel now carries its own previous-y slot (prevy has a 4th
+    # word) so it draws as a connected jagged trace, not centre-anchored spikes
+    cap = {}
+    real = D._Asm.resolve
+
+    def capture(self):
+        out = real(self)
+        cap["labels"] = dict(self.labels)
+        return out
+
+    D._Asm.resolve = capture
+    try:
+        D.build_com(song, "tandy", 0x80, scope=True)
+    finally:
+        D._Asm.resolve = real
+    assert "prevy" in cap["labels"]                   # the noise connects prev->cur

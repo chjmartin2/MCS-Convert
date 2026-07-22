@@ -464,13 +464,15 @@ class DosVizWindow:
         for k in range(4):
             hi, lo, cen, packed, left = chans[k]
             ink = idx(packed)
-            if k == 3:                               # noise: the LCG shimmer
+            if k == 3:                               # noise: a jagged CONNECTED trace
                 if lv[3] > 0.001:
                     seed = (int(self.phase) * 25173 + 13849) & 0xFFFF
+                    prev = _NOISE_CEN
                     for L in range(_CHW):
                         seed = (seed * 25173 + 13849) & 0xFFFF
                         y = _NOISE_CEN + ((seed >> 8) & 0x1F) - 16
-                        self._plot_v(px, left + L, _NOISE_CEN, y, ink)
+                        self._plot_v(px, left + L, prev, y, ink)   # connect, like vline
+                        prev = y
                 else:
                     for L in range(_CHW):
                         self._plot_v(px, left + L, _NOISE_CEN, _NOISE_CEN, ink)

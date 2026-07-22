@@ -625,7 +625,7 @@ def _emit_channel_draw(a: "_Asm", ch: int, colors=_CH) -> None:
     this one with a vline -- so the square is solid and edges stay crisp."""
     hi, lo, cen, packed, _cs = colors[ch]
     a.db(0xB2, packed)                                  # mov dl, packed colour
-    _emit_wave_pick(a, ch, cen, f"c{ch}", shape="wshapeg")
+    _emit_wave_pick(a, ch, cen, f"c{ch}", shape="wshapeg", fine=True)
     a.db(0xA1).abs16("prevy", ch * 2)                   # mov ax,[prevy+ch] (previous y)
     a.db(0x89, 0x0E).abs16("prevy", ch * 2)             # mov [prevy+ch],cx (save this y)
     a.db(0x39, 0xC8).db(0x76).rel8(f"c{ch}_o").db(0x91)  # cmp ax,cx; jbe o; xchg ax,cx
@@ -635,14 +635,17 @@ def _emit_channel_draw(a: "_Asm", ch: int, colors=_CH) -> None:
 
 
 def _emit_noise_draw(a: "_Asm", colors=_CH) -> None:
-    """Channel 3 is NOISE: a single-colour spike from the band centre to a random
-    y that swings BOTH ways (an evolving LCG seed makes it shimmer). Silent -> a
-    flat centre line. Contributes its spike direction (±1) to the master sum."""
+    """Channel 3 is NOISE: a jagged trace that bounces to a fresh random y every
+    column (an evolving LCG makes it shimmer), each point CONNECTED to the last
+    so it reads as a band of hash rather than a fan of spikes from the centre.
+    Silent -> a flat centre line."""
     _, _, cen, packed, _cs = colors[3]
     a.db(0xB2, packed)                                  # mov dl, packed colour
     a.db(0x80, 0x3E).abs16("viz", 3).db(0x00)           # cmp byte[viz+3],0
     a.db(0x75).rel8("n_act")                            # jne active
-    a.db(0xB9).bytes(_w(cen)).db(0xE8).rel16("ploty")   # mov cx,cen; call ploty (flat)
+    a.db(0xB9).bytes(_w(cen))                           # mov cx,cen
+    a.db(0x89, 0x0E).abs16("prevy", 6)                  # noise prev = centre (flat)
+    a.db(0xE8).rel16("ploty")                           # call ploty (flat)
     a.db(0xEB).rel8("n_done")                           # jmp done
     a.label("n_act")
     a.db(0xA1).abs16("seed").db(0xB9, 0x55, 0x62).db(0xF7, 0xE1)  # mov ax,[seed];mov cx,25173;mul cx
@@ -650,12 +653,13 @@ def _emit_noise_draw(a: "_Asm", colors=_CH) -> None:
     a.db(0x88, 0xE1).db(0x80, 0xE1, 0x1F).db(0x30, 0xED)   # mov cl,ah; and cl,0x1F (0..31); xor ch,ch
     a.db(0x81, 0xE9).bytes(_w(16))                      # sub cx,16  (-16..15)
     a.db(0x81, 0xC1).bytes(_w(cen))                     # add cx,cen (y = cen-16..cen+15)
-    a.db(0xB8).bytes(_w(cen))                           # mov ax,cen  (noise is NOT in the master sum)
+    a.db(0xA1).abs16("prevy", 6)                        # mov ax,[prevy+6] (last y)
+    a.db(0x89, 0x0E).abs16("prevy", 6)                  # mov [prevy+6],cx (save this y)
     a.db(0x39, 0xC8).db(0x76).rel8("n_o").db(0x91)      # cmp ax,cx; jbe o; xchg ax,cx
     a.label("n_o")
     a.db(0xA3).abs16("vtop").db(0x89, 0x0E).abs16("vbot")   # vtop=top; vbot=bottom
     a.db(0xB2, packed)                                  # mov dl,packed (LCG's mul clobbered DL!)
-    a.db(0xE8).rel16("vline")                           # call vline (spike)
+    a.db(0xE8).rel16("vline")                           # call vline (connect prev->cur)
     a.label("n_done")
 
 
@@ -701,6 +705,7 @@ def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
     for ch in range(3):                                 # phase each tone channel by scroll
         _emit_wave_setup(a, ch, "rst")
         a.db(0xC7, 0x06).abs16("prevy", ch * 2).bytes(_w(colors[ch][2]))  # prevy[ch]=cen_y
+    a.db(0xC7, 0x06).abs16("prevy", 6).bytes(_w(_NOISE_CEN))    # noise prev = centre
     a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=158
     a.db(0x31, 0xED)                                    # xor bp,bp  (L = column 0..69)
     a.label("xloop")
@@ -779,7 +784,7 @@ def _emit_wave_setup(a: "_Asm", ch: int, pfx: str) -> None:
 
 def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
                     shape: str = "wshape", msum: bool = True,
-                    quarters: bool = False) -> None:
+                    quarters: bool = False, fine: bool = False) -> None:
     """Per column: CX = the row/scanline this channel's wave sits on. Advances
     the phase, reads the baked shape, and feeds the master sum the wave's
     direction. A silent channel flatlines on its centre."""
@@ -796,7 +801,8 @@ def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
     a.db(0x03, 0x06).abs16("wstep", ch * 2)             # add ax,[wstep+ch]
     a.db(0xA3).abs16("wphase", ch * 2)                  # mov [wphase+ch],ax
     a.db(0x88, 0xE0)                                    # mov al,ah (phase high byte)
-    a.db(0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8)   # shr al,1 x4 -> 0..15
+    if not fine:
+        a.db(0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8, 0xD0, 0xE8)   # shr al,1 x4 -> 0..15
     a.db(0x30, 0xE4).db(0x89, 0xC6)                     # xor ah,ah; mov si,ax
     a.db(0x8A, 0x84).abs16(shape)                       # mov al,[si+shape]
     a.db(0x98)                                          # cbw (signed offset)
@@ -1994,10 +2000,10 @@ def _emit_scope_vars(a: "_Asm", vis: str, wave: str = "square") -> None:
         a.label("wdir"); a.db(0x00)                      # 1 = wave runs up
         a.label("wrow"); a.db(0x00, 0x00)                # last fully-filled row
         if vis in ("graphics", "vga"):
-            a.label("wshapeg"); a.bytes(_wave_shape(wave, _GAMP))  # scanlines
+            a.label("wshapeg"); a.bytes(_wave_shape(wave, _GAMP, 256))  # full-res
     if vis in ("graphics", "vga"):                   # mode-9 / VGA vline/frame state
         a.label("prev_my"); a.db(0x00, 0x00)             # master's previous y (line)
-        a.label("prevy"); a.db(0, 0, 0, 0, 0, 0)         # 3 tone channels' previous y
+        a.label("prevy"); a.db(0, 0, 0, 0, 0, 0, 0, 0)   # 3 tones + noise: previous y
         a.label("vtop"); a.db(0x00, 0x00)                # vline top y
         a.label("vbot"); a.db(0x00, 0x00)                # vline bottom y
         a.label("hend"); a.db(0x00, 0x00)                # hline end column
