@@ -522,3 +522,45 @@ def test_graphics_scope_draws_smooth_full_resolution_waveforms():
     finally:
         D._Asm.resolve = real
     assert "prevy" in cap["labels"]                   # the noise connects prev->cur
+
+
+def test_sb_dac_vga_has_a_real_output_scope():
+    # The SoundBlaster DAC synthesizes every sample in the CPU, so on the VGA
+    # display the scope draws the ACTUAL mixed output: the ISR logs each 8-bit
+    # sample into a 256-byte ring, and the master reads it back. FM (hardware
+    # audio) and the text displays keep the synthetic mean -- there is no sample
+    # stream to scope there.
+    import struct
+    s = _universal_song()
+
+    def labels(**kw):
+        cap = {}
+        real = D._Asm.resolve
+
+        def capture(self):
+            out = real(self)
+            cap["labels"], cap["com"] = dict(self.labels), out
+            return out
+
+        D._Asm.resolve = capture
+        try:
+            D.build_com(s, "4voice", 0x80, mix_rate=22000, **kw)
+        finally:
+            D._Asm.resolve = real
+        return cap
+
+    dac_vga = labels(sb=True, text_scope=8)           # SB DAC + VGA -> real
+    assert "wavebuf" in dac_vga["labels"]             # the 256-byte ring
+    assert "wavehead" in dac_vga["labels"]
+    # the ISR captures the output byte: mov [bx+wavebuf],ah
+    cap_op = b"\x88\xA7" + struct.pack("<H", dac_vga["labels"]["wavebuf"])
+    assert cap_op in dac_vga["com"]
+    # the master reads bp*3 into the ring: mov ax,bp; add ax,ax; add ax,bp
+    assert b"\x89\xE8\x01\xC0\x01\xE8" in dac_vga["com"]
+
+    # FM builds have NO ring -- the OPL makes the sound, the CPU sees no samples
+    assert "wavebuf" not in labels(sb=True, sb_fm=True, text_scope=8)["labels"]
+    # a TEXT scope keeps the synthetic mean even on the DAC (its band is coarse)
+    assert "wavebuf" not in labels(sb=True, text_scope=5)["labels"]
+    # the plain 4-voice speaker (not a DAC we scope) stays synthetic too
+    assert "wavebuf" not in labels(text_scope=8)["labels"]

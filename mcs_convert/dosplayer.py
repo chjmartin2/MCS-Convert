@@ -665,13 +665,24 @@ def _emit_noise_draw(a: "_Asm", colors=_CH) -> None:
     a.label("n_done")
 
 
-def _emit_master_draw(a: "_Asm", white: int = 0xFF) -> None:
-    """Master (framed, below the grid): y = 158 - (sum of the 3 tone levels)*12,
-    so it steps between discrete bands, connected column to column. Drawn 2 wide
-    (10+2L, 10+2L+1; BP = L = 0..69), centred in its frame."""
-    a.db(0xA1).abs16("msum")                            # mov ax,[msum] (sum of 4 offsets)
-    a.db(0xD1, 0xF8)                                    # sar ax,1 (the mean, scaled to fill)
-    a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
+def _emit_master_draw(a: "_Asm", white: int = 0xFF, real: bool = False) -> None:
+    """Master (framed, below the grid), connected column to column, drawn 2 wide
+    (10+2L, 10+2L+1; BP = L = 0..69). `real` scopes the ACTUAL mixed output from
+    the DAC ring buffer; otherwise it is the arithmetic MEAN of the four voices."""
+    if real:
+        # sample = wavebuf[(wavehead + L*3) & 0xFF] -- L*3 spans ~210 of the 256
+        # logged samples across the 70 columns; centre at 128, scale to the band
+        a.db(0x89, 0xE8).db(0x01, 0xC0).db(0x01, 0xE8)  # ax=bp; +ax; +bp (=bp*3)
+        a.db(0x02, 0x06).abs16("wavehead")          # add al,[wavehead] (mod 256)
+        a.db(0x88, 0xC3).db(0x30, 0xFF)             # bl=al; bh=0
+        a.db(0x8A, 0x87).abs16("wavebuf")           # al=[bx+wavebuf]
+        a.db(0x2C, 0x80).db(0x98)                   # sub al,0x80; cbw (signed)
+        a.db(0xD1, 0xF8).db(0xD1, 0xF8)             # sar ax,1 x2 (÷4 -> +/-32)
+        a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # cx=158; sub cx,ax
+    else:
+        a.db(0xA1).abs16("msum")                        # mov ax,[msum] (sum of 4 offsets)
+        a.db(0xD1, 0xF8)                                # sar ax,1 (the mean, scaled to fill)
+        a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
     a.db(0xA1).abs16("prev_my").db(0x89, 0x0E).abs16("prev_my")  # mov ax,[prev_my];mov[prev_my],cx
     a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
     a.label("m_o")
@@ -695,7 +706,7 @@ def _emit_blit(a: "_Asm") -> None:
 
 
 def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
-                    clear_words: int = 16384) -> None:
+                    clear_words: int = 16384, real: bool = False) -> None:
     """Redraw all five scopes straight into the back buffer, per column (0..159).
     Tone channels scroll as solid squares; ch3 is noise; the master is the summed
     trace. `colors`/`white`/`clear_words` retarget it (mode-9 packed vs VGA 256)."""
@@ -717,7 +728,7 @@ def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
         _emit_channel_draw(a, ch, colors)
     a.db(0xBB).bytes(_w(colors[3][4])).db(0x01, 0xEB)  # mov bx,86; add bx,bp (noise)
     _emit_noise_draw(a, colors)
-    _emit_master_draw(a, white)
+    _emit_master_draw(a, white, real)
     a.db(0x45).db(0x83, 0xFD, _CHW)                    # inc bp; cmp bp,70
     a.db(0x73).rel8("xdone").db(0xE9).rel16("xloop")    # jae xdone; jmp xloop
     a.label("xdone")
@@ -1906,7 +1917,7 @@ def _emit_vu_drawframe(a: "_Asm") -> None:
     a.db(0xC3)
 
 
-def _emit_scope_code(a: "_Asm", vis: str) -> None:
+def _emit_scope_code(a: "_Asm", vis: str, real: bool = False) -> None:
     """Emit the scope renderer routines + baked tables for `vis`. Audio-agnostic:
     they only read the viz[]/strike[] tables and draw to the back buffer, so both
     the Tandy engine and the 4-voice engine share them."""
@@ -1922,7 +1933,7 @@ def _emit_scope_code(a: "_Asm", vis: str) -> None:
         _emit_ploty13(a)                             # linear pixel writer (label 'ploty')
         _emit_vline(a)
         _emit_hline(a)
-        _emit_drawframe(a, _CH13, _VGA_WHITE, 32000)
+        _emit_drawframe(a, _CH13, _VGA_WHITE, 32000, real)
         _emit_blit13(a)
         a.label("rowaddr")                           # linear byte offset of each scanline
         a.bytes(struct.pack(f"<{len(_ROWADDR13)}H", *_ROWADDR13))
@@ -2491,7 +2502,8 @@ def _opl_note_word(freq: float) -> int:
     return (fnum & 0xFF) | ((0x20 | (block << 2) | (fnum >> 8)) << 8)
 
 
-def _emit_sb_synth_out(a: "_Asm", sb_port: int, fm: bool = False) -> None:
+def _emit_sb_synth_out(a: "_Asm", sb_port: int, fm: bool = False,
+                       capture: bool = False) -> None:
     """One 8-bit sample for the SoundBlaster DAC: a real MIX, not a voice count.
 
     Each voice looks its level up in its own volume-scaled wavetable (`wptr`
@@ -2534,6 +2546,12 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int, fm: bool = False) -> None:
     _emit_sb_write(a, 0x10)                          # DSP cmd 0x10 (direct DAC)
     _emit_sb_poll(a)                                 # bounded: never hangs the ISR
     a.db(0x88, 0xE0).db(0xEE)                        # al=ah (the sample); out dx,al
+    if capture:
+        # log the ACTUAL 8-bit output into a 256-byte ring, so the scope can
+        # draw the real mixed waveform instead of a synthetic reconstruction
+        a.db(0x8A, 0x1E).abs16("wavehead").db(0x30, 0xFF)   # bl=[wavehead]; bh=0
+        a.db(0x88, 0xA7).abs16("wavebuf")           # mov [bx+wavebuf], ah (the sample)
+        a.db(0xFE, 0x06).abs16("wavehead")          # inc byte[wavehead] (wraps at 256)
 
 
 def _emit_spk_wave_synth(a: "_Asm", mcs: bool) -> None:
@@ -2598,6 +2616,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     cost -- the XT answer), or nothing. Auto-repeats; a keypress restores and exits."""
     a = _Asm()
     static = vis == "static"
+    # the "real" oscilloscope shows the ACTUAL mixed output; only possible where
+    # the CPU synthesizes the samples (the SB DAC) and on the pixel display
+    real_scope = sb and not fm and vis == "vga"
     if static:                                       # draw the whole-song poster once
         _emit_static_setup(a)
     elif vis:                                         # live scope: set mode + back buffer
@@ -2676,7 +2697,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("isr")
     a.db(0x50, 0x53, 0x51, 0x52, 0x56)               # push ax,bx,cx,dx,si (ds already = cs)
     if sb and not fm:
-        _emit_sb_synth_out(a, sb_port, fm)           # volume-mixed 8-bit -> SB DAC
+        _emit_sb_synth_out(a, sb_port, fm, real_scope)   # volume-mixed 8-bit -> SB DAC
     elif sb and fm:
         pass                                          # OPL2 holds every voice
     elif wave_table:
@@ -2794,7 +2815,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)      # pop si,dx,cx,bx,ax; iret
     if not static:                                   # the static poster needs no renderer
-        _emit_scope_code(a, vis)                      # scope renderers (shared)
+        _emit_scope_code(a, vis, real_scope)          # scope renderers (shared)
     # ---- variables + data ------------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -2811,6 +2832,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
     a.label("kbctr"); a.db(0x01, 0x00)               # countdown to the next keyboard poll
+    if real_scope:                                   # the real-output ring for the scope
+        a.label("wavehead"); a.db(0x00)
+        a.label("wavebuf"); a.bytes(bytes(256))
     if sb:                                           # per-voice volume-table pointers
         a.label("wptr")                              # start on level 0 = silence,
         for _ in range(_SPK4_VOICES):                # so a voice is quiet until its
