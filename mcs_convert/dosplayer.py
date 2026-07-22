@@ -486,7 +486,29 @@ class _Asm:
 # gives a scanline's byte offset (bank y&3 at (y>>2)*160). Waves are drawn by
 # connecting consecutive samples with a vertical line (vline) -- the same way for
 # every scope, so square edges stay crisp.
-_SCROLL_SPEED = 2               # columns the waves scroll per frame
+_SCROLL_SPEED = 2               # columns the waves scroll per REDRAW (coupled to
+#                                 the frame rate, so a lower fps also calms motion)
+
+# Frame-rate cap. The foreground redraws once per `draw_skip` vertical retraces;
+# at draw_skip 1 that is the full ~60-70 Hz refresh, which on a fast CPU makes
+# the scopes scroll frantically and burns cycles for no benefit. We cap to a
+# sensible frame rate instead -- graphics a little higher than text, which looks
+# choppy below ~15. The scroll is per-redraw, so the cap calms the motion too.
+_SCOPE_REFRESH_HZ = 60          # reference vertical refresh for the throttle
+_FPS_TEXT = 10                  # text-mode scopes: calm, legible, cheap
+_FPS_GRAPHICS = 15              # the pixel scopes: smooth enough to not stutter
+
+
+def _draw_skip_for(vis: str, fps=None) -> int:
+    """Retraces to wait between redraws for a target frame rate. `fps` overrides
+    the per-mode default (text 10 / graphics 15); the static poster never
+    redraws, so it stays at 1."""
+    if not vis or vis == "static":
+        return 1
+    if fps is None:
+        fps = _FPS_GRAPHICS if vis in ("graphics", "vga") else _FPS_TEXT
+    fps = max(1, min(_SCOPE_REFRESH_HZ, int(fps)))
+    return max(1, min(255, round(_SCOPE_REFRESH_HZ / fps)))
 _NOISE_SEED = 0xACE1
 _CHW = 70                       # channel scope width in byte columns; L = 0..69
 _TOP = (10, 50, 30)             # top-row band: hi_y, lo_y, cen_y (drawn y 10..50)
@@ -2821,10 +2843,10 @@ def _native_waveform(song: Song) -> str:
 
 
 def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
-              text_scope: bool = False, mix_rate=None, draw_skip: int = 1,
+              text_scope: bool = False, mix_rate=None, draw_skip=None,
               mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT,
               sb_wave: str = None, spk_wave: str = None,
-              sb_fm: bool = False) -> bytes:
+              sb_fm: bool = False, fps=None) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
@@ -2836,8 +2858,10 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     one-shot pulses). `sb_wave` picks the SoundBlaster wavetable (sine/triangle/
     nestri/pulseNN/"native" = the song's own); `spk_wave` models a non-square
     waveform on the PC speaker via multi-level PWM -- it needs a >= 12 kHz mix
-    rate so the carrier is inaudible. `draw_skip` redraws the scope every Nth
-    frame (>=2 lightens a heavy scope)."""
+    rate so the carrier is inaudible. `fps` caps the scope's redraw rate (default
+    ~10 for text scopes, ~15 for the graphics ones); the scroll is coupled to
+    it, so a lower rate also slows the motion. `draw_skip` is the raw retrace
+    count and overrides `fps` when given."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
     if mcs and mode != "4voice":
@@ -2850,7 +2874,9 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError("--sb-fm needs --sb (it adds the OPL2 to the SB output)")
     if spk_wave and (sb or mode != "4voice"):
         raise ValueError("spk_wave (PWM waveform modeling) is 4-voice speaker only")
-    draw_skip = max(1, min(255, int(draw_skip)))
+    def _skip(vis):                                  # explicit draw_skip wins
+        return (max(1, min(255, int(draw_skip))) if draw_skip
+                else _draw_skip_for(vis, fps))
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
             raise ValueError("the graphics scope is Tandy-only; use a text scope "
@@ -2896,7 +2922,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         # SB wavetable, the speaker's PWM-modelled shape, or a plain square
         scope_wave = (wf if sb else
                       (spk_wave if spk_wave and spk_wave != "native" else "square"))
-        com = _assemble_spk4(div, samps, total, stream, vis, draw_skip, poster,
+        com = _assemble_spk4(div, samps, total, stream, vis, _skip(vis), poster,
                              mcs, sb, sb_port, wave_table, scope_wave, sb_fm)
         if len(com) > 0xFF00:
             raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
@@ -2925,7 +2951,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     # its end instead of hanging the final chord until a key is pressed
     stream += sil_bytes
     total += 1
-    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis, draw_skip,
+    com = _assemble(divider, subdiv, total, sil_bytes, stream, vis, _skip(vis),
                     "square")                        # SN76489 / PIT: real squares
     if len(com) > 0xFF00:
         raise ValueError(f".COM is {len(com)} bytes — too big for one segment; "

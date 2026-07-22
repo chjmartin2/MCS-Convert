@@ -539,7 +539,7 @@ class ExportDialog(tk.Toplevel):
         kwargs = dict(
             scope=(scope == "graphics (Tandy)" and com_mode == "tandy"),
             text_scope=_SCOPE_TS.get(scope, 0),
-            draw_skip=1)
+            fps=None)                            # per-mode default (10 text/15 gfx)
         if com_mode == "4voice":
             kwargs["mix_rate"] = int("".join(c for c in self.mix.get()
                                              if c.isdigit()) or "16000")

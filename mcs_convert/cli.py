@@ -89,7 +89,7 @@ def _cmd_convert(args) -> int:
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope, mix_rate=args.mix_rate,
-                             draw_skip=args.draw_skip, mcs=args.mcs,
+                             draw_skip=args.draw_skip, fps=args.fps, mcs=args.mcs,
                              sb=args.sb, sb_port=args.sb_port,
                              sb_wave=args.sb_wave, spk_wave=args.spk_wave,
                              sb_fm=args.sb_fm)
@@ -227,10 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=("triangle", "sine", "nestri"),
                         help="4voice speaker only: model a non-square waveform "
                              "via multi-level PWM (needs --mix-rate >= 12000)")
-    p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=1,
+    p_conv.add_argument("--fps", dest="fps", type=int, default=None,
                         metavar="N",
-                        help="redraw the scope every Nth frame (default 1; higher "
-                             "= lighter/slower visuals on slow machines)")
+                        help="cap the scope's redraw rate (default ~10 for text "
+                             "scopes, ~15 for the graphics ones); the scroll is "
+                             "coupled to it, so a lower rate also calms the motion")
+    p_conv.add_argument("--draw-skip", dest="draw_skip", type=int, default=None,
+                        metavar="N",
+                        help="raw retrace count between redraws; overrides --fps "
+                             "when given (advanced)")
     p_conv.add_argument("--subsong", type=int, default=None, help="1-based subsong index")
     p_conv.add_argument("--percussion", choices=("clicks", "pitched", "drop"),
                         default="clicks",

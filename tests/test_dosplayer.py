@@ -521,3 +521,35 @@ def test_text4_spectrum_uses_block_and_half_block_glyphs():
     # rows are coloured green(low) -> yellow -> red(high)
     rc = D._s4_rowcol()
     assert rc[D._S4_BASE_ROW] == D._S4_GREEN and rc[D._S4_TOP_ROW] == D._S4_RED
+
+
+def test_scope_frame_rate_is_capped_per_mode():
+    # The foreground redrew every vertical retrace (~60-70 fps), which scrolls
+    # the scopes frantically and burns cycles on a fast CPU. It is now capped to
+    # a sensible frame rate -- text scopes ~10, the pixel scopes ~15 (they look
+    # choppy lower) -- via the retrace-count throttle. The scroll is per-redraw,
+    # so a lower cap also calms the on-screen motion (kept coupled by design).
+    song = _song([(0, 4, 60), (4, 4, 67)])
+
+    def waits(com):
+        # _emit_draw_wait: 'mov cx,<draw_skip>' sits right before 'mov dx,0x3DA'
+        i = com.index(b"\xBA\xDA\x03")
+        return com[i - 2] | (com[i - 1] << 8) if com[i - 3] == 0xB9 else 1
+
+    # per-mode defaults, at the reference 60 Hz refresh
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=5)) == 6   # ~10 fps
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=1)) == 6
+    assert waits(D.build_com(song, "tandy", 0x80, scope=True)) == 4      # ~15 fps
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=8)) == 4    # VGA gfx
+    # an explicit --fps overrides both, uniformly
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=5, fps=30)) == 2
+    assert waits(D.build_com(song, "tandy", 0x80, scope=True, fps=30)) == 2
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=5, fps=60)) == 1
+    # a raw draw_skip still wins when the caller insists
+    assert waits(D.build_com(song, "tandy", 0x80, text_scope=5, draw_skip=8)) == 8
+    # the 4-voice engine caps the same way
+    assert waits(D.build_com(song, "4voice", 0x80, text_scope=5)) == 6
+    assert waits(D.build_com(song, "4voice", 0x80, text_scope=8)) == 4
+    # the helper itself
+    assert D._draw_skip_for("text1") == 6 and D._draw_skip_for("vga") == 4
+    assert D._draw_skip_for("static") == 1            # the poster never redraws
