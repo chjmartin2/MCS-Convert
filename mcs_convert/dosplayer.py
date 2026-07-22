@@ -653,6 +653,8 @@ def _emit_noise_draw(a: "_Asm", colors=_CH) -> None:
     a.db(0x88, 0xE1).db(0x80, 0xE1, 0x1F).db(0x30, 0xED)   # mov cl,ah; and cl,0x1F (0..31); xor ch,ch
     a.db(0x81, 0xE9).bytes(_w(16))                      # sub cx,16  (-16..15)
     a.db(0x81, 0xC1).bytes(_w(cen))                     # add cx,cen (y = cen-16..cen+15)
+    a.db(0x89, 0xC8).db(0x2D).bytes(_w(cen))           # mov ax,cx; sub ax,cen (its offset)
+    a.db(0x01, 0x06).abs16("msum")                     # add word[msum],ax (join the mean)
     a.db(0xA1).abs16("prevy", 6)                        # mov ax,[prevy+6] (last y)
     a.db(0x89, 0x0E).abs16("prevy", 6)                  # mov [prevy+6],cx (save this y)
     a.db(0x39, 0xC8).db(0x76).rel8("n_o").db(0x91)      # cmp ax,cx; jbe o; xchg ax,cx
@@ -667,8 +669,8 @@ def _emit_master_draw(a: "_Asm", white: int = 0xFF) -> None:
     """Master (framed, below the grid): y = 158 - (sum of the 3 tone levels)*12,
     so it steps between discrete bands, connected column to column. Drawn 2 wide
     (10+2L, 10+2L+1; BP = L = 0..69), centred in its frame."""
-    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
-    a.db(0xB9).bytes(_w(_MASTER_K)).db(0xF7, 0xE9)      # mov cx,12; imul cx (ax=sum*12)
+    a.db(0xA1).abs16("msum")                            # mov ax,[msum] (sum of 4 offsets)
+    a.db(0xD1, 0xF8)                                    # sar ax,1 (the mean, scaled to fill)
     a.db(0xB9).bytes(_w(_MASTER_CEN_Y)).db(0x29, 0xC1)  # mov cx,158; sub cx,ax (cx=y)
     a.db(0xA1).abs16("prev_my").db(0x89, 0x0E).abs16("prev_my")  # mov ax,[prev_my];mov[prev_my],cx
     a.db(0x39, 0xC8).db(0x76).rel8("m_o").db(0x91)      # cmp ax,cx; jbe m_o; xchg ax,cx
@@ -709,7 +711,7 @@ def _emit_drawframe(a: "_Asm", colors=_CH, white: int = 0xFF,
     a.db(0xC7, 0x06).abs16("prev_my").bytes(_w(_MASTER_CEN_Y))  # prev_my=158
     a.db(0x31, 0xED)                                    # xor bp,bp  (L = column 0..69)
     a.label("xloop")
-    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # mov byte[msum],0
+    a.db(0xC7, 0x06).abs16("msum").db(0x00, 0x00)             # mov byte[msum],0
     for ch in range(3):
         a.db(0xBB).bytes(_w(colors[ch][4])).db(0x01, 0xEB)  # mov bx,col_start; add bx,bp
         _emit_channel_draw(a, ch, colors)
@@ -825,13 +827,8 @@ def _emit_wave_pick(a: "_Asm", ch: int, rc: int, pfx: str,
     a.db(0xB9).bytes(_w(rc)).db(0x01, 0xC1)             # mov cx,centre; add cx,ax
     if quarters:
         a.db(0x89, 0x0E).abs16("wrow")                  # [wrow]=cx (last full row)
-    if msum:                                            # feed the master trace
-        a.db(0x09, 0xC0).db(0x74).rel8(f"{pfx}_d")      # or ax,ax; jz done
-        a.db(0x78).rel8(f"{pfx}_u")                     # js up (above centre)
-        a.db(0xFE, 0x0E).abs16("msum")                  # dec byte[msum]
-        a.db(0xEB).rel8(f"{pfx}_d")                     # jmp done
-        a.label(f"{pfx}_u")
-        a.db(0xFE, 0x06).abs16("msum")                  # inc byte[msum]
+    if msum:                                            # feed the master its mean
+        a.db(0x01, 0x06).abs16("msum")                  # add word[msum], ax (offset)
     a.label(f"{pfx}_d")
 _TEXTROW = [r * 160 for r in range(25)]   # byte offset of each text row
 
@@ -937,7 +934,7 @@ def _emit_text_master(a: "_Asm") -> None:
     """Master band: level = centre - clamp(sum of 3 tone levels, -2..2) -> discrete
     bands; fill from centre."""
     rc = _TCEN[4]
-    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
+    a.db(0xA1).abs16("msum").db(0xD1, 0xF8).db(0xD1, 0xF8)  # ax=[msum]; sar x2 (mean of 4)
     a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle .c1; mov ax,2
     a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge .c2; mov ax,-2
     a.db(0xB9).bytes(_w(rc)).db(0x29, 0xC1)             # mov cx,centre; sub cx,ax (level)
@@ -959,7 +956,7 @@ def _emit_text_drawframe(a: "_Asm") -> None:
         _emit_wave_setup(a, ch, "tr")
     a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
     a.label("txloop")
-    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    a.db(0xC7, 0x06).abs16("msum").db(0x00, 0x00)             # msum=0
     for ch in range(3):
         _emit_text_channel(a, ch)
     _emit_text_noise(a)
@@ -1060,7 +1057,7 @@ def _emit_text2_noise(a: "_Asm") -> None:
 def _emit_text2_master(a: "_Asm") -> None:
     """Master band: row = centre - clamp(3-tone sum, -2..2) -> discrete line."""
     rc = _TCEN[4]
-    a.db(0xA0).abs16("msum").db(0x98)                   # mov al,[msum]; cbw
+    a.db(0xA1).abs16("msum").db(0xD1, 0xF8).db(0xD1, 0xF8)  # ax=[msum]; sar x2 (mean of 4)
     a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle; mov ax,2
     a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge; mov ax,-2
     a.db(0xB9).bytes(_w(rc)).db(0x29, 0xC1)             # mov cx,centre; sub cx,ax (row)
@@ -1080,7 +1077,7 @@ def _emit_text2_drawframe(a: "_Asm") -> None:
         a.db(0xC7, 0x06).abs16("prevrow", i * 2).bytes(_w(_TCEN[i]))
     a.db(0x31, 0xED)                                    # xor bp,bp (col 0)
     a.label("txloop")
-    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    a.db(0xC7, 0x06).abs16("msum").db(0x00, 0x00)             # msum=0
     for ch in range(3):
         _emit_text2_channel(a, ch)
     _emit_text2_noise(a)
@@ -1244,7 +1241,7 @@ def _emit_text3_drawframe(a: "_Asm") -> None:
     # ---- quadrant loop: 38 columns; store each column's master sum to mbuf ----
     a.db(0x31, 0xED)                                    # xor bp,bp
     a.label("q3loop")
-    a.db(0xC6, 0x06).abs16("msum").db(0x00)             # msum=0
+    a.db(0xC7, 0x06).abs16("msum").db(0x00, 0x00)             # msum=0
     for ch in range(3):
         _emit_text3_channel(a, ch)
     _emit_text3_noise(a)
@@ -1257,6 +1254,7 @@ def _emit_text3_drawframe(a: "_Asm") -> None:
     a.label("m3loop")
     a.db(0x89, 0xEB).db(0xD1, 0xEB)                     # mov bx,bp; shr bx,1 (sample = bp/2)
     a.db(0x8A, 0x87).abs16("mbuf").db(0x98)             # mov al,[mbuf+bx]; cbw
+    a.db(0xD1, 0xF8).db(0xD1, 0xF8)                     # sar ax,1 x2 (mean of 4)
     a.db(0x3D, 0x02, 0x00).db(0x7E, 0x03).db(0xB8, 0x02, 0x00)  # cmp ax,2; jle; mov ax,2
     a.db(0x3D, 0xFE, 0xFF).db(0x7D, 0x03).db(0xB8, 0xFE, 0xFF)  # cmp ax,-2; jge; mov ax,-2
     a.db(0xB9).bytes(_w(_T3_CEN[4])).db(0x29, 0xC1)     # mov cx,centre; sub cx,ax (row)
@@ -1988,7 +1986,7 @@ def _emit_scope_vars(a: "_Asm", vis: str, wave: str = "square") -> None:
     build actually sounds, baked into the trace shape tables."""
     if vis:                                          # shared draw state
         a.label("bufseg"); a.db(0x00, 0x00)              # back-buffer segment
-        a.label("msum"); a.db(0x00)                       # master-sum accumulator
+        a.label("msum"); a.db(0x00, 0x00)                 # sum of the channels' offsets
         a.label("scroll"); a.db(0x00, 0x00)              # horizontal scroll phase
         a.label("seed"); a.bytes(struct.pack("<H", _NOISE_SEED))   # noise PRNG state
         # one wave cycle per channel: phase + per-column step, and the contour

@@ -460,7 +460,9 @@ class DosVizWindow:
         px = [bytearray(self.NATIVE_W) for _ in range(self.NATIVE_H)]
         idx = lambda packed: (packed >> 4) if tandy else packed
         scroll = self.phase * 2.0                    # _SCROLL_SPEED
-        sums = [0.0] * _CHW
+        # the master is the ARITHMETIC MEAN of the four scopes' offsets (not a
+        # sum of signs), so it carries the actual averaged waveform
+        offs = [0.0] * _CHW
         for k in range(4):
             hi, lo, cen, packed, left = chans[k]
             ink = idx(packed)
@@ -472,6 +474,7 @@ class DosVizWindow:
                         seed = (seed * 25173 + 13849) & 0xFFFF
                         y = _NOISE_CEN + ((seed >> 8) & 0x1F) - 16
                         self._plot_v(px, left + L, prev, y, ink)   # connect, like vline
+                        offs[L] += _NOISE_CEN - y    # its offset joins the mean
                         prev = y
                 else:
                     for L in range(_CHW):
@@ -488,10 +491,10 @@ class DosVizWindow:
                 y = int(round(cen - v * _GAMP))
                 self._plot_v(px, left + L, prev, y, ink)   # connect, like vline
                 prev = y
-                sums[L] += 1.0 if v >= 0 else -1.0
+                offs[L] += v * _GAMP                 # the channel's actual offset
         prev = _MASTER_CEN_Y                         # the master, 2 columns wide
         for L in range(_CHW):
-            y = int(round(_MASTER_CEN_Y - sums[L] * _MASTER_K))
+            y = int(round(_MASTER_CEN_Y - offs[L] / 2.0))   # mean (of 4), scaled x2
             self._plot_v(px, 10 + 2 * L, prev, y, 15)
             self._plot_v(px, 10 + 2 * L + 1, prev, y, 15)
             prev = y
