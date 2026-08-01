@@ -274,10 +274,13 @@ def test_mcs_drive_uses_the_timer2_one_shot():
         D.build_com(song, "tandy", 0x80, mcs=True)
 
 
-def test_soundblaster_output_uses_the_dsp_dac():
-    # --sb outputs through a real SoundBlaster DAC: reset the DSP, speaker on
-    # (0xD1), then one 'direct DAC' (cmd 0x10) sample per interrupt. No PC-speaker
-    # port 0x61, no 1-bit PWM -- a full-amplitude 8-bit mix.
+def test_soundblaster_output_streams_the_dac_via_dma():
+    # --sb outputs through a real SoundBlaster DAC. Direct DAC (cmd 0x10) cost a
+    # status poll + port writes on EVERY sample, which pegged the CPU under
+    # emulation. Instead the 8237 streams a tiny auto-init buffer to the DSP at a
+    # hardware clock and the timer ISR just drops each sample into memory -- zero
+    # per-sample port I/O. Reset the DSP, speaker on (0xD1), program DMA channel 1
+    # + the DSP rate, start auto-init 8-bit output (0x1C).
     song = Song(title="t", source="t")
     for midi in (72, 64, 55):
         tr = Track(name="v")
@@ -285,7 +288,12 @@ def test_soundblaster_output_uses_the_dsp_dac():
         song.add_track(tr)
     sb = D.build_com(song, "4voice", 0x80, sb=True, mix_rate=16000)
     assert b"\xB0\xD1" in sb                           # DSP cmd 0xD1: speaker on
-    assert b"\xB0\x10\xEE" in sb                       # DSP cmd 0x10: direct DAC write
+    assert b"\xB0\x10\xEE" not in sb                   # NOT per-sample direct DAC anymore
+    assert b"\xB0\x1C\xEE" in sb                       # DSP cmd 0x1C: start auto-init DMA out
+    assert b"\xB0\x40\xEE" in sb                       # DSP cmd 0x40: set sample rate
+    assert b"\xB0\x48\xEE" in sb                       # DSP cmd 0x48: set DMA block size
+    assert b"\xB0\xDA\xEE" in sb                       # DSP cmd 0xDA: exit auto-init (teardown)
+    assert b"\xBA\x0B\x00\xB0\x59\xEE" in sb           # 8237 ch1 mode: auto-init read
     assert b"\xB0\xD3" in sb                           # DSP cmd 0xD3: speaker off (teardown)
     assert b"\xBA\x26\x02" in sb                       # mov dx, 0x226 (base+6 reset port)
     assert b"\xE6\x61" not in sb                       # never touches the PC speaker port

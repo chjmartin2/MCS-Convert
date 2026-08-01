@@ -2377,6 +2377,64 @@ def _emit_sb_init(a: "_Asm", sb_port: int) -> None:
     _emit_sb_write(a, 0xD1)                          # DSP cmd 0xD1: speaker on
 
 
+# -- DMA playback (the cheap way to feed the DAC) -----------------------------
+# Direct DAC (cmd 0x10) costs a status poll + two port writes PER SAMPLE, which
+# is what pegged the CPU: emulated port I/O is enormously more expensive than a
+# memory write. Instead we let the 8237 DMA controller stream the samples to the
+# DSP at a hardware clock, and the timer ISR just writes each sample into a tiny
+# auto-init DMA buffer -- no per-sample port I/O at all. This is the classic
+# "Goldplay" trick: a small buffer the DMA loops over forever while the ISR keeps
+# it filled with the latest sample. (Research-verified against the Sound Blaster
+# Hardware Programming Guide + DOSBox-X's sblaster.cpp.)
+_DMA1_MASK, _DMA1_FF, _DMA1_MODE = 0x0A, 0x0C, 0x0B   # 8237 channel-1 registers
+_DMA1_ADDR, _DMA1_COUNT, _DMA1_PAGE = 0x02, 0x03, 0x83
+_DMA1_MODE_AUTO = 0x59           # single-mode, auto-init, read (mem->device), ch1
+_SB_DMA_BUF = 4                  # tiny loop buffer -- the ISR refills it every tick
+
+
+def _sb_time_constant(fs: float) -> int:
+    """DSP time constant for a mono playback rate (cmd 0x40): 256 - 1e6/rate."""
+    return max(1, min(255, 256 - round(1_000_000.0 / fs)))
+
+
+def _emit_sb_dma_start(a: "_Asm", sb_port: int, fs: float) -> None:
+    """After reset + speaker-on: point DMA channel 1 at the loop buffer, set the
+    DSP rate, and start auto-init 8-bit output. The buffer physical address is
+    computed at run time from CS (a .COM's data sits just past its code)."""
+    # physical = CS*16 + dmabuf; DMA wants the low 16 bits (offset) + page byte
+    a.db(0x8C, 0xC8).db(0x89, 0xC6)                  # mov ax,cs; mov si,ax
+    a.db(0xB9, 0x0C, 0x00).db(0xD3, 0xEE)            # mov cl,12; shr si,cl (page base)
+    a.db(0xB9, 0x04, 0x00).db(0xD3, 0xE0)            # mov cl,4; shl ax,cl (cs<<4)
+    a.db(0x05).abs16("dmabuf")                       # add ax, dmabuf (offset, may carry)
+    a.db(0x83, 0xD6, 0x00)                           # adc si,0 (page += carry)
+    a.db(0x50)                                       # push ax (the offset)
+    a.db(0xBA).bytes(_w(_DMA1_MASK)).db(0xB0, 0x05).db(0xEE)   # mask channel 1
+    a.db(0xBA).bytes(_w(_DMA1_FF)).db(0xEE)          # clear the flip-flop (any out)
+    a.db(0xBA).bytes(_w(_DMA1_MODE)).db(0xB0, _DMA1_MODE_AUTO).db(0xEE)   # mode
+    a.db(0x58)                                       # pop ax (offset)
+    a.db(0xBA).bytes(_w(_DMA1_ADDR)).db(0xEE).db(0x88, 0xE0).db(0xEE)     # addr lo,hi
+    a.db(0x89, 0xF0).db(0xBA).bytes(_w(_DMA1_PAGE)).db(0xEE)   # mov ax,si (al=page); out page
+    a.db(0xB8).bytes(_w(_SB_DMA_BUF - 1)).db(0xBA).bytes(_w(_DMA1_COUNT))  # count=size-1
+    a.db(0xEE).db(0x88, 0xE0).db(0xEE)               # count lo, hi
+    a.db(0xBA).bytes(_w(_DMA1_MASK)).db(0xB0, 0x01).db(0xEE)   # unmask channel 1
+    # DSP: sample rate (time constant), a large block size (so its IRQ -- which
+    # we leave masked and never service -- is rare), then start auto-init output
+    a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
+    _emit_sb_write(a, 0x40)                          # set time constant
+    _emit_sb_write(a, _sb_time_constant(fs))
+    _emit_sb_write(a, 0x48)                          # set DMA block size
+    _emit_sb_write(a, 0xFE)                          # low  (0x7FFE = ~32k samples)
+    _emit_sb_write(a, 0x7F)                          # high
+    _emit_sb_write(a, 0x1C)                          # start auto-init 8-bit DMA output
+
+
+def _emit_sb_dma_stop(a: "_Asm", sb_port: int) -> None:
+    """Exit auto-init playback and mask the DMA channel (teardown)."""
+    a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
+    _emit_sb_write(a, 0xDA)                          # exit auto-init DMA
+    a.db(0xBA).bytes(_w(_DMA1_MASK)).db(0xB0, 0x05).db(0xEE)   # mask channel 1
+
+
 def _emit_opl_write(a: "_Asm", reg: int, val: int) -> None:
     """Write one OPL2 register. The chip needs a settling delay after the
     address and after the data; re-reading the status port the prescribed
@@ -2540,12 +2598,13 @@ def _emit_sb_synth_out(a: "_Asm", sb_port: int, fm: bool = False,
     a.label("sb_nhi")
     a.db(0x8A, 0x04).db(0x98).db(0x01, 0xC3)         # mov al,[si]; cbw; add bx,ax
     a.label("sb_nmute")
-    # sample = mix + 0x80 (signed level -> 0..255); write cmd 0x10 then the sample
+    # sample = mix + 0x80 (signed level -> 0..255). No port I/O: just drop the
+    # byte into the little auto-init DMA buffer the 8237 streams to the DSP. The
+    # buffer is a handful of bytes the DMA loops over, so filling every slot each
+    # tick keeps whatever the DMA is fetching current -- see _emit_sb_dma_start.
     a.db(0x88, 0xD8).db(0x04, 0x80).db(0x88, 0xC4)   # al=bl; add al,0x80; ah=al
-    a.db(0xBA).bytes(_w(sb_port + 0x0C))             # mov dx, base+0xC
-    _emit_sb_write(a, 0x10)                          # DSP cmd 0x10 (direct DAC)
-    _emit_sb_poll(a)                                 # bounded: never hangs the ISR
-    a.db(0x88, 0xE0).db(0xEE)                        # al=ah (the sample); out dx,al
+    for i in range(_SB_DMA_BUF):
+        a.db(0xA2).abs16("dmabuf", i)                # mov [dmabuf+i], al
     if capture:
         # log the ACTUAL 8-bit output into a 256-byte ring, so the scope can
         # draw the real mixed waveform instead of a synthetic reconstruction
@@ -2637,6 +2696,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         _emit_sb_init(a, sb_port)
         if fm:                                       # ...and voice the OPL2
             _emit_opl_init(a, wave)
+        else:                                        # DAC: hand the samples to DMA
+            _emit_sb_dma_start(a, sb_port, _PIT_HZ / divider)
     else:
         a.db(0xE4, 0x61).db(0xA2).abs16("old61")     # in al,0x61; save
         if mcs:
@@ -2680,6 +2741,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     if sb:                                            # SoundBlaster speaker off (cmd 0xD3)
         if fm:
             _emit_opl_keyoff(a)                       # silence the FM channels
+        else:
+            _emit_sb_dma_stop(a, sb_port)             # halt the DMA stream first
         a.db(0xBA).bytes(_w(sb_port + 0x0C))
         _emit_sb_write(a, 0xD3)
     else:
@@ -2832,6 +2895,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.label("viz"); a.db(0x00, 0x00, 0x00, 0x00)     # per-voice scope period (for the scopes)
     a.label("strike"); a.db(0x00, 0x00, 0x00, 0x00)  # per-voice note-on latch (VU)
     a.label("kbctr"); a.db(0x01, 0x00)               # countdown to the next keyboard poll
+    if sb and not fm:                                # the auto-init DMA loop buffer
+        a.label("dmabuf"); a.bytes(bytes([0x80]) * _SB_DMA_BUF)   # start at silence
     if real_scope:                                   # the real-output ring for the scope
         a.label("wavehead"); a.db(0x00)
         a.label("wavebuf"); a.bytes(bytes(256))
