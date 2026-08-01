@@ -36,6 +36,7 @@ TARGETS = (
     ("PC Speaker 1-voice .COM", "1voice", "1voice", ".com"),
     ("PC Speaker 4-voice .COM", "4voice", "4voice", ".com"),
     ("PC Speaker 4-voice (MCS drive) .COM", "4voice", "4voice", ".com"),
+    ("PC Speaker 4-voice (MCS foreground) .COM", "4voice", "4voice", ".com"),
     ("SoundBlaster .COM (DAC)", "sb", "4voice", ".com"),
     ("SoundBlaster .COM (FM + DAC)", "sb", "4voice", ".com"),
     ("WAV (universal render)", None, None, ".wav"),
@@ -543,6 +544,11 @@ class ExportDialog(tk.Toplevel):
         if com_mode == "4voice":
             kwargs["mix_rate"] = int("".join(c for c in self.mix.get()
                                              if c.isdigit()) or "16000")
+            if "foreground" in label:
+                # the MCS-style foreground engine is audio-only (no scope) and
+                # brings its own timer-2 drive; it wants a clean kwargs set
+                return build_com(self._reduced(), com_mode, byte0,
+                                 mix_rate=kwargs["mix_rate"], foreground=True)
             kwargs["mcs"] = "MCS drive" in label
             kwargs["sb"] = label.startswith("SoundBlaster")
             kwargs["sb_fm"] = "FM" in label          # tones on the OPL2

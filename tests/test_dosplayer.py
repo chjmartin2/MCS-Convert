@@ -561,3 +561,50 @@ def test_scope_frame_rate_is_capped_per_mode():
     # the helper itself
     assert D._draw_skip_for("text1") == 6 and D._draw_skip_for("vga") == 4
     assert D._draw_skip_for("static") == 1            # the poster never redraws
+
+
+def test_foreground_engine_is_a_self_modifying_mcs_style_loop():
+    # The MCS-style foreground engine runs the mixer as a tight foreground loop
+    # (register accumulators, self-modified increments, timer-2 one-shot drive)
+    # with only a per-SUB-TICK PIT ISR -- no per-sample interrupt overhead. That
+    # is what lets it clear 4 kHz on a 4.77 MHz PC where the ISR engine cannot.
+    song = _song([(0, 4, 72), (4, 4, 76)])
+    fg = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=16000)
+
+    # the sample loop uses REGISTER accumulators with self-modified increments:
+    # sub bp,imm / sub di,imm / sub si,imm / sub bx,imm (opcode 81 /5 = ED,EF,EE,EB)
+    for modrm in (0xED, 0xEF, 0xEE, 0xEB):
+        assert bytes([0x81, modrm]) in fg
+    # timer-2 one-shot drive (mode 1 = 0xB2 to port 0x43), not a per-sample DAC
+    assert b"\xB0\xB2\xE6\x43" in fg                   # mov al,0xB2; out 0x43
+    # the loop's only per-sample output is the speaker gate (out 0x61), twice
+    assert fg.count(b"\xE6\x61") >= 2
+    # it hooks BOTH the timer (INT8 vector at 0:0x20) and the keyboard (INT9 at
+    # 0:0x24); the keyboard ISR is how a key quits the foreground loop
+    assert b"\x26\xC7\x06\x20\x00" in fg              # mov word es:[0x20], tempo-isr
+    assert b"\x26\xC7\x06\x24\x00" in fg              # mov word es:[0x24], kbd-isr
+    # a key quits by NOPping the loop's back-jump (mov word[fgback],0x9090)
+    assert b"\x90\x90" in fg
+
+    # foreground is 4-voice audio-only: it rejects scopes and the other drives
+    with pytest.raises(ValueError):
+        D.build_com(song, "tandy", 0x80, foreground=True)
+    with pytest.raises(ValueError):
+        D.build_com(song, "4voice", 0x80, foreground=True, text_scope=5)
+    with pytest.raises(ValueError):
+        D.build_com(song, "4voice", 0x80, foreground=True, sb=True)
+    with pytest.raises(ValueError):
+        D.build_com(song, "4voice", 0x80, foreground=True, mcs=True)
+
+
+def test_foreground_tempo_is_pit_clocked_and_pitch_follows_mix_rate():
+    # Tempo is exact (a PIT ISR fires per sub-tick regardless of loop speed); pitch
+    # is set by the loop's own speed, so the self-modified increments scale with
+    # --mix-rate. Different target Fs -> different baked increments -> different COM.
+    song = _song([(0, 8, 69)])                        # A4 = 440 Hz
+    slow = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=8000)
+    fast = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=24000)
+    assert slow != fast
+    # a faster tempo byte shortens the sub-tick period, changing the PIT divider
+    fastbpm = D.build_com(song, "4voice", 0x80 - 8, foreground=True, mix_rate=8000)
+    assert fastbpm != slow

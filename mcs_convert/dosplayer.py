@@ -65,6 +65,8 @@ _SPK4_FS = _PIT_HZ / _SPK4_DIV
 #   carrier on a fast CPU / DOSBox cycles=max, where the PWM carrier is inaudible
 #   and only the audio band survives -- the highest quality the mixer can reach.
 _SPK4_DIV_MIN, _SPK4_DIV_MAX = 25, 1200
+_FG_FS = 16000                   # default target Fs for the foreground engine
+#                                  (its true rate = loop speed; tune --mix-rate to it)
 _SPK4_TONES = 3                  # square-wave voices
 _SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
 _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
@@ -2914,6 +2916,143 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     return a.resolve()
 
 
+# ---------------------------------------------------------------------------
+# The FOREGROUND engine -- MCS's own methodology, for real-XT efficiency.
+#
+# The ISR-driven _assemble_spk4 pays ~170 cycles of interrupt entry/exit
+# (push/pop/iret + PIT re-arm) on EVERY sample before it synthesizes anything,
+# which is why it can't clear ~4 kHz on a 4.77 MHz 8088. The original Music
+# Construction Set runs the mixer as a tight FOREGROUND loop instead: four phase
+# accumulators live in registers, their increments are self-modified straight
+# into the `sub` instructions, and the only per-sample I/O is the timer-2 one-
+# shot gate. A lightweight PIT ISR fires just once per SUB-TICK (a few hundred
+# Hz) to patch the next note's increments into the running loop -- so the sample
+# path carries no interrupt overhead at all. That is the whole ~5x speedup.
+#
+# Pitch is set by the loop's own speed (Fs = however fast the machine spins it),
+# so the increments are computed for a target `fs`; on a given machine you tune
+# --mix-rate until the pitch matches. Tempo is exact regardless (PIT-clocked).
+def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
+                      fs: float) -> bytes:
+    """MCS-style foreground 4-voice player. `subtick_div` is the PIT ch0 divider
+    for the sub-tick tempo clock; `stream` is the same per-sub-tick change stream
+    as _assemble_spk4 (voice|lvl<<4, inc_lo, inc_hi, viz); `fs` is only recorded
+    in a comment. No display -- the CPU lives in the sample loop (pair it with the
+    static poster if you want a picture)."""
+    a = _Asm()
+    # ---- init: hook INT 8 (tempo) + INT 9 (keyboard), arm timer-2 one-shot ----
+    a.db(0xFA)                                        # cli
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
+    a.db(0x26, 0xA1, 0x20, 0x00).db(0xA3).abs16("old_off")   # save INT8 vector
+    a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
+    a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("tisr")  # [es:0x20] = tempo ISR
+    a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
+    a.db(0x26, 0xA1, 0x24, 0x00).db(0xA3).abs16("old9_off")  # save INT9 vector
+    a.db(0x26, 0xA1, 0x26, 0x00).db(0xA3).abs16("old9_seg")
+    a.db(0x26, 0xC7, 0x06, 0x24, 0x00).abs16("kisr")  # [es:0x24] = keyboard ISR
+    a.db(0x26, 0x8C, 0x0E, 0x26, 0x00)               # [es:0x26] = cs
+    # timer 2 = retriggerable one-shot (mode 1); speaker DATA on (bit1), gate low
+    # (bit0=0). Each gate rising edge fires a fixed-width pulse on OUT2 -- MCS's
+    # pulse-density DAC. base61 = data on, gate low.
+    a.db(0xE4, 0x61).db(0xA2).abs16("old61")         # in al,0x61; save
+    a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # and 0xFC; or 0x02
+    a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)              # mov al,0xB2; out 0x43 (ch2 mode 1)
+    a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
+    a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
+    # stream pointer + remaining sub-ticks
+    a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
+    a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
+    # PIT ch0 -> the SUB-TICK tempo rate (mode 3)
+    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
+    a.db(0xB8).bytes(_w(subtick_div)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
+    a.db(0xFB)                                        # sti
+    # ---- the tight sample loop ------------------------------------------------
+    # accumulators: bp/di/si = tone voices, bx = noise clock; dl = base61.
+    a.db(0x31, 0xED).db(0x31, 0xFF)                  # xor bp,bp; xor di,di
+    a.db(0x31, 0xF6).db(0x31, 0xDB)                  # xor si,si; xor bx,bx
+    a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # al=base61; mov dl,al
+    a.label("fgsamp")
+    a.db(0x88, 0xD0).db(0xE6, _SPEAKER)              # mov al,dl; out 0x61,al (gate LOW)
+    a.db(0x30, 0xE4)                                 # xor ah,ah (overflow collector)
+    a.db(0x81, 0xED).label("inc0"); a.bytes(_w(0))   # sub bp, <inc0>  (self-modified)
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    a.db(0x81, 0xEF).label("inc1"); a.bytes(_w(0))   # sub di, <inc1>
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    a.db(0x81, 0xEE).label("inc2"); a.bytes(_w(0))   # sub si, <inc2>
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    # noise voice: bx accumulates; on overflow clock the LFSR (in memory) and mix
+    # its output bit into the pulse decision
+    a.db(0x81, 0xEB).label("ninc"); a.bytes(_w(0))   # sub bx, <ninc>
+    a.db(0x73).rel8("fgnonoise")                     # jnc: no clock this sample
+    a.db(0x8B, 0x0E).abs16("nlfsr").db(0xD1, 0xE9)   # mov cx,[nlfsr]; shr cx,1
+    a.db(0x73).rel8("fgnotap").db(0x81, 0xF1).bytes(_w(_SPK4_LFSR))   # jnc; xor cx,taps
+    a.label("fgnotap")
+    a.db(0x89, 0x0E).abs16("nlfsr")                  # mov [nlfsr],cx
+    a.db(0x80, 0xE1, 0x01).db(0x08, 0xCC)            # and cl,1; or ah,cl
+    a.label("fgnonoise")
+    # pulse if ANY voice overflowed: ah!=0 -> gate rising edge (fires the one-shot)
+    a.db(0xF6, 0xDC)                                 # neg ah   (CF = ah != 0)
+    a.db(0x18, 0xC0).db(0x24, 0x01)                  # sbb al,al; and al,1 (al = pulse bit)
+    a.db(0x08, 0xD0).db(0xE6, _SPEAKER)              # or al,dl; out 0x61,al (gate = pulse)
+    a.label("fgback")
+    a.db(0xEB).rel8("fgsamp")                        # jmp short fgsamp (NOP'd out to quit)
+    # ---- teardown (fallen through here when the keyboard ISR NOPs fgback) ------
+    a.db(0xFA)                                        # cli
+    a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61 (speaker off)
+    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
+    a.db(0x30, 0xC0).db(0xE6, _PIT_CH0).db(0xE6, _PIT_CH0)   # divisor 0 -> 18.2 Hz
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # es=0
+    a.db(0xA1).abs16("old_off").db(0x26, 0xA3, 0x20, 0x00)   # restore INT8
+    a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)
+    a.db(0xA1).abs16("old9_off").db(0x26, 0xA3, 0x24, 0x00)  # restore INT9
+    a.db(0xA1).abs16("old9_seg").db(0x26, 0xA3, 0x26, 0x00)
+    a.db(0xFB)                                        # sti
+    a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
+    # ---- tempo ISR (INT 8): patch the next sub-tick's increments, auto-repeat --
+    a.label("tisr")
+    a.db(0x50, 0x53, 0x51, 0x56, 0x57)               # push ax,bx,cx,si,di (ds=cs)
+    a.db(0x8B, 0x36).abs16("streamptr")              # mov si,[streamptr]
+    a.db(0x8A, 0x0C).db(0x30, 0xED).db(0x46)         # mov cl,[si]; xor ch,ch; inc si
+    a.db(0xE3).rel8("tskip")                         # jcxz tskip (no changes)
+    a.label("tevl")
+    a.db(0x8A, 0x04).db(0x24, 0x0F)                  # mov al,[si]; and al,0x0F (voice)
+    a.db(0x88, 0xC3).db(0x30, 0xFF).db(0xD1, 0xE3)   # mov bl,al; xor bh,bh; shl bx,1
+    a.db(0x8B, 0x44, 0x01)                           # mov ax,[si+1] (increment)
+    a.db(0x8B, 0xBF).abs16("incaddr")                # mov di,[bx+incaddr]
+    a.db(0x89, 0x05)                                 # mov [di],ax  (self-modify the loop)
+    a.db(0x83, 0xC6, 0x04)                           # add si,4 (next change record)
+    a.db(0xE2).rel8("tevl")                          # loop tevl
+    a.label("tskip")
+    a.db(0x89, 0x36).abs16("streamptr")              # mov [streamptr],si
+    a.db(0xFF, 0x0E).abs16("ticksleft")              # dec word[ticksleft]
+    a.db(0x75).rel8("tdone")                         # jnz tdone (not end of song)
+    a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")      # rewind to the top
+    a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))
+    a.label("tdone")
+    a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
+    a.db(0x5F, 0x5E, 0x59, 0x5B, 0x58).db(0xCF)      # pop di,si,cx,bx,ax; iret
+    # ---- keyboard ISR (INT 9): any key quits by NOPping the loop's back-jump ---
+    a.label("kisr")
+    a.db(0x50).db(0xE4, 0x60)                        # push ax; in al,0x60 (ack scancode)
+    a.db(0xC7, 0x06).abs16("fgback").db(0x90, 0x90)  # mov word[fgback],9090h (NOP NOP)
+    a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
+    a.db(0x58).db(0xCF)                              # pop ax; iret
+    # ---- variables + data -----------------------------------------------------
+    a.label("old_off"); a.db(0x00, 0x00)
+    a.label("old_seg"); a.db(0x00, 0x00)
+    a.label("old9_off"); a.db(0x00, 0x00)
+    a.label("old9_seg"); a.db(0x00, 0x00)
+    a.label("old61"); a.db(0x00)
+    a.label("base61"); a.db(0x00)
+    a.label("streamptr"); a.db(0x00, 0x00)
+    a.label("ticksleft"); a.db(0x00, 0x00)
+    a.label("nlfsr"); a.bytes(_w(_NOISE_SEED))       # noise LFSR state (nonzero)
+    a.label("incaddr")                               # voice -> address of its self-mod inc
+    a.abs16("inc0"); a.abs16("inc1"); a.abs16("inc2"); a.abs16("ninc")
+    a.label("stream"); a.bytes(stream)
+    return a.resolve()
+
+
 def _vis_for(scope: bool, text_scope) -> str:
     """The vis string a `scope`/`text_scope` request selects: "" / "graphics" /
     "text1".."text5"."""
@@ -2939,7 +3078,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False, mix_rate=None, draw_skip=None,
               mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT,
               sb_wave: str = None, spk_wave: str = None,
-              sb_fm: bool = False, fps=None) -> bytes:
+              sb_fm: bool = False, fps=None, foreground: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
@@ -2967,9 +3106,29 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError("--sb-fm needs --sb (it adds the OPL2 to the SB output)")
     if spk_wave and (sb or mode != "4voice"):
         raise ValueError("spk_wave (PWM waveform modeling) is 4-voice speaker only")
+    if foreground and mode != "4voice":
+        raise ValueError("the foreground (MCS-style) engine is 4-voice only")
+    if foreground and (sb or mcs or spk_wave or scope or text_scope):
+        raise ValueError("the foreground engine is audio-only (no scope) and has "
+                         "its own MCS-style timer-2 drive: drop --sb/--mcs/"
+                         "--spk-wave and the scopes")
     def _skip(vis):                                  # explicit draw_skip wins
         return (max(1, min(255, int(draw_skip))) if draw_skip
                 else _draw_skip_for(vis, fps))
+    if mode == "4voice" and foreground:              # MCS-style foreground engine
+        fs = float(mix_rate) if mix_rate else _FG_FS
+        stream, total = _build_spk4_stream(song, fs)
+        if total <= 1:
+            raise ValueError("nothing to play (no notes)")
+        if total > 65535:
+            raise ValueError("song too long for the 4-voice player (sub-tick "
+                             "count exceeds 16 bits)")
+        subtick_s = tick_seconds_for(tempo_byte0) / _SUBTICKS
+        subtick_div = max(1, min(65535, round(_PIT_HZ * subtick_s)))
+        com = _assemble_spk4_fg(subtick_div, total, stream, fs)
+        if len(com) > 0xFF00:
+            raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
+        return com
     if mode == "4voice":                             # software-mixed PC speaker
         if scope:
             raise ValueError("the graphics scope is Tandy-only; use a text scope "

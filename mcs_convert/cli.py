@@ -92,7 +92,7 @@ def _cmd_convert(args) -> int:
                              draw_skip=args.draw_skip, fps=args.fps, mcs=args.mcs,
                              sb=args.sb, sb_port=args.sb_port,
                              sb_wave=args.sb_wave, spk_wave=args.spk_wave,
-                             sb_fm=args.sb_fm)
+                             sb_fm=args.sb_fm, foreground=args.foreground)
         else:                                        # the default .MCS song file
             # The universal Song may carry noise tracks / waveforms / effects MCS
             # can't voice — retrack() reduces to 4 square voices + drum clicks.
@@ -206,6 +206,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="4voice .COM only: drive the speaker the original Music "
                              "Construction Set way (timer-2 one-shot pulse-density "
                              "DAC) instead of the direct data-bit level")
+    p_conv.add_argument("--foreground", dest="foreground", action="store_true",
+                        help="4voice .COM only: run the mixer as an MCS-style "
+                             "FOREGROUND loop (register accumulators, self-modified "
+                             "increments, timer-2 one-shot drive) instead of a "
+                             "per-sample timer ISR -- ~5x less CPU, so it clears "
+                             "4 kHz on a real 4.77 MHz PC. Audio-only (no scope); "
+                             "tune --mix-rate to your machine so the pitch is right")
     p_conv.add_argument("--sb", dest="sb", action="store_true",
                         help="4voice .COM only: output through a SoundBlaster (real "
                              "8-bit DAC, full-amplitude mix -- far closer to the NES/"
