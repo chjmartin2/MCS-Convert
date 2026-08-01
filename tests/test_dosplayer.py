@@ -579,11 +579,13 @@ def test_foreground_engine_is_a_self_modifying_mcs_style_loop():
     assert b"\xB0\xB2\xE6\x43" in fg                   # mov al,0xB2; out 0x43
     # the loop's only per-sample output is the speaker gate (out 0x61), twice
     assert fg.count(b"\xE6\x61") >= 2
-    # it hooks BOTH the timer (INT8 vector at 0:0x20) and the keyboard (INT9 at
-    # 0:0x24); the keyboard ISR is how a key quits the foreground loop
+    # it hooks the timer (INT8 vector at 0:0x20) for the sub-tick tempo clock but
+    # NOT the keyboard -- BIOS keeps INT9, so the launch key's release can't quit
     assert b"\x26\xC7\x06\x20\x00" in fg              # mov word es:[0x20], tempo-isr
-    assert b"\x26\xC7\x06\x24\x00" in fg              # mov word es:[0x24], kbd-isr
-    # a key quits by NOPping the loop's back-jump (mov word[fgback],0x9090)
+    assert b"\x26\xC7\x06\x24\x00" not in fg          # never hooks INT9 (0:0x24)
+    # instead the tempo ISR watches the BIOS keyboard buffer (head at 0:0x41A)
+    assert b"\x26\xA1\x1A\x04" in fg                  # mov ax, es:[0x41A]
+    # ...and a waiting key quits by NOPping the loop's back-jump (word 0x9090)
     assert b"\x90\x90" in fg
 
     # foreground is 4-voice audio-only: it rejects scopes and the other drives

@@ -2940,17 +2940,16 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     in a comment. No display -- the CPU lives in the sample loop (pair it with the
     static poster if you want a picture)."""
     a = _Asm()
-    # ---- init: hook INT 8 (tempo) + INT 9 (keyboard), arm timer-2 one-shot ----
+    # ---- init: hook INT 8 (the sub-tick tempo clock), arm timer-2 one-shot -----
+    # We do NOT hook the keyboard -- the BIOS INT 9 keeps working, so it acks the
+    # controller and fills its buffer correctly (no make/break/typematic bugs).
+    # The tempo ISR just watches the BIOS buffer and quits when a key lands there.
     a.db(0xFA)                                        # cli
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
     a.db(0x26, 0xA1, 0x20, 0x00).db(0xA3).abs16("old_off")   # save INT8 vector
     a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
     a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("tisr")  # [es:0x20] = tempo ISR
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
-    a.db(0x26, 0xA1, 0x24, 0x00).db(0xA3).abs16("old9_off")  # save INT9 vector
-    a.db(0x26, 0xA1, 0x26, 0x00).db(0xA3).abs16("old9_seg")
-    a.db(0x26, 0xC7, 0x06, 0x24, 0x00).abs16("kisr")  # [es:0x24] = keyboard ISR
-    a.db(0x26, 0x8C, 0x0E, 0x26, 0x00)               # [es:0x26] = cs
     # timer 2 = retriggerable one-shot (mode 1); speaker DATA on (bit1), gate low
     # (bit0=0). Each gate rising edge fires a fixed-width pulse on OUT2 -- MCS's
     # pulse-density DAC. base61 = data on, gate low.
@@ -2996,7 +2995,7 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0x08, 0xD0).db(0xE6, _SPEAKER)              # or al,dl; out 0x61,al (gate = pulse)
     a.label("fgback")
     a.db(0xEB).rel8("fgsamp")                        # jmp short fgsamp (NOP'd out to quit)
-    # ---- teardown (fallen through here when the keyboard ISR NOPs fgback) ------
+    # ---- teardown (fallen through here once the tempo ISR NOPs fgback) ---------
     a.db(0xFA)                                        # cli
     a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61 (speaker off)
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
@@ -3004,8 +3003,7 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # es=0
     a.db(0xA1).abs16("old_off").db(0x26, 0xA3, 0x20, 0x00)   # restore INT8
     a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)
-    a.db(0xA1).abs16("old9_off").db(0x26, 0xA3, 0x24, 0x00)  # restore INT9
-    a.db(0xA1).abs16("old9_seg").db(0x26, 0xA3, 0x26, 0x00)
+    a.db(0x26, 0xA1, 0x1C, 0x04).db(0x26, 0xA3, 0x1A, 0x04)  # flush key (head=tail)
     a.db(0xFB)                                        # sti
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
     # ---- tempo ISR (INT 8): patch the next sub-tick's increments, auto-repeat --
@@ -3029,19 +3027,23 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")      # rewind to the top
     a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))
     a.label("tdone")
+    # quit when a key is waiting in the BIOS buffer (head != tail). Letting BIOS
+    # own the keyboard sidesteps every make/break/ack pitfall of a custom INT 9
+    # -- in particular the RELEASE of the key that launched the .COM no longer
+    # trips an instant exit (that was the "pfft and quit" bug).
+    a.db(0x06)                                       # push es
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; mov es,ax
+    a.db(0x26, 0xA1, 0x1A, 0x04)                     # mov ax, es:[0x41A] (buffer head)
+    a.db(0x26, 0x3B, 0x06, 0x1C, 0x04)               # cmp ax, es:[0x41C] (buffer tail)
+    a.db(0x07)                                       # pop es
+    a.db(0x74).rel8("tnokey")                        # je: buffer empty -> keep playing
+    a.db(0xC7, 0x06).abs16("fgback").db(0x90, 0x90)  # NOP the loop back-jump -> quit
+    a.label("tnokey")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
     a.db(0x5F, 0x5E, 0x59, 0x5B, 0x58).db(0xCF)      # pop di,si,cx,bx,ax; iret
-    # ---- keyboard ISR (INT 9): any key quits by NOPping the loop's back-jump ---
-    a.label("kisr")
-    a.db(0x50).db(0xE4, 0x60)                        # push ax; in al,0x60 (ack scancode)
-    a.db(0xC7, 0x06).abs16("fgback").db(0x90, 0x90)  # mov word[fgback],9090h (NOP NOP)
-    a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
-    a.db(0x58).db(0xCF)                              # pop ax; iret
     # ---- variables + data -----------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
-    a.label("old9_off"); a.db(0x00, 0x00)
-    a.label("old9_seg"); a.db(0x00, 0x00)
     a.label("old61"); a.db(0x00)
     a.label("base61"); a.db(0x00)
     a.label("streamptr"); a.db(0x00, 0x00)
