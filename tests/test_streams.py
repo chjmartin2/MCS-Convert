@@ -82,14 +82,54 @@ def test_tandy_stream_uses_real_attenuation_for_volume():
     assert (att_writes[0] & 0x0F) == 0                # full volume first
 
 
-def test_perf_chunks_compile_for_all_three_targets():
+def test_perf_chunks_compile_for_all_targets():
     s = _rct(r0c0=_note(60), r0c3=dict(note=R.midi_to_note(84)))
     chunks = perf_chunks(s)
-    assert set(chunks) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE}
+    assert set(chunks) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE,
+                           R.PERF_SBFM}
     for target, payload in chunks.items():
         p = R.parse_perf(payload)
         assert p["target"] == target and p["total_subs"] >= 16
         assert len(p["stream"]) > 0
+
+
+def test_sbfm_stream_carries_opl_words_and_rhythm_strikes():
+    from mcs_convert.streams import sbfm_stream
+    from mcs_convert.effects import flatten
+    from mcs_convert import dosplayer as D
+    s = _rct(r0c0=_note(69), r0c3=dict(note=R.midi_to_note(84)),
+             r2c0=dict(note=R.NOTE_OFF))
+    stream, total = sbfm_stream(flatten(s))
+    assert total == 17                                # 16 subs + all-off tail
+    # walk the records: [n][voice|lvl<<4, word_lo, word_hi, viz]*
+    i = subs = 0
+    events = []
+    while i < len(stream):
+        n = stream[i]; i += 1
+        for _ in range(n):
+            events.append((stream[i] & 0x0F,
+                           stream[i + 1] | (stream[i + 2] << 8)))
+            i += 4
+        subs += 1
+    assert i == len(stream) and subs == total
+    # sub-tick 0: an A4 note word on voice 0 + rhythm clear-then-strike on 3
+    a4 = D._opl_note_word(440.0)
+    assert (0, a4) in events
+    assert (3, D._OPL_RHYTHM) in events               # re-arm (clear)
+    assert (3, D._OPL_RHYTHM | D._OPL_HH) in events   # bright hit -> hi-hat
+    # the note-off at row 2 emits a key-off (word 0)
+    assert (0, 0) in events
+    # held notes emit NOTHING between changes (the OPL holds them): far fewer
+    # events than sub-ticks x voices
+    assert len(events) < total * 2
+
+
+def test_rct_build_com_sb_fm():
+    from mcs_convert.streams import build_com as rct_build_com
+    s = _rct(r0c0=_note(60), r0c3=dict(note=R.midi_to_note(84)))
+    com = rct_build_com(s, "4voice", sb_fm=True, text_scope=5)
+    assert com[:2] == b"\xB8\x03" or com[0] == 0xFA  # a real player
+    assert b"\xBA\x88\x03" in com                    # mov dx,0x388 (OPL port)
 
 
 def test_build_com_from_rct_all_modes():

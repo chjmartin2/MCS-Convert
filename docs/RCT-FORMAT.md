@@ -99,7 +99,7 @@ select (`O`) which persists on the channel until changed, and speed (`F`).
 ### `PERF` — one precompiled performance stream
 | size | field |
 |-----:|-------|
-| 1 | target: 1 tandy, 2 1voice, 3 4voice |
+| 1 | target: 1 tandy, 2 1voice, 3 4voice, 4 sbfm (OPL2 register stream) |
 | 1 | stream format version (1) |
 | 2 | PIT divider (ISR rate; for 4voice also the reference mixing rate) |
 | 2 | samples per sub-tick |
@@ -115,8 +115,15 @@ Stream formats are exactly what the proven `.COM` engines consume:
   (port, value) player. Viz records ride along as pseudo-ports 0xF0–0xF3.
 - **4voice**: per sub-tick `[nchanges] [voice|level<<4, inc_lo, inc_hi, viz]×n`
   — phase-accumulator increments at the reference rate. The same stream drives
-  the ISR engine (fixed rate) and the calibrated foreground engine (increments
-  rescaled to measured loop speed at startup).
+  the ISR engine (fixed rate), the calibrated foreground engine (increments
+  rescaled to measured loop speed at startup), **and the SoundBlaster DAC
+  engine** (the level nibble becomes real amplitude through its wavetable
+  bank) — which is why the DAC has no PERF id of its own.
+- **sbfm** (id 4): same record shape, but the word is a **packed OPL2 note
+  word** on voices 0–2 (0 = key off) and a **0xBD rhythm register value** on
+  voice 3 (clear-then-set strikes the drums). One record set per sub-tick;
+  the OPL holds notes in hardware, so held notes emit nothing and slides are
+  continuous retunes.
 
 All effects are already baked into these streams at sub-tick resolution when
 the file is saved — an arpeggio is literal per-sub-tick pitch changes, vibrato

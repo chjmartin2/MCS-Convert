@@ -68,7 +68,8 @@ def test_save_bakes_perf_and_reloads(app, tmp_path):
     app._do_save(p)
     assert os.path.exists(p)
     back = R.load(p)
-    assert set(back.perf) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE}
+    assert set(back.perf) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE,
+                              R.PERF_SBFM}
     app.open_file(p)                                  # reload round-trip
     assert app.pattern().cell(0, 0).note == R.midi_to_note(60)
 

@@ -33,7 +33,13 @@ Embedded engine builds:
     1  4voice ISR + text5 combined monitor      2  4voice ISR + VGA scopes
     3  4voice ISR + VU meters                   4  Tandy + text3 scopes
     5  Tandy + VU meters                        6  1-voice + text2 scope
-    7  1-voice + VU meters
+    7  1-voice + VU meters                      8  SoundBlaster DAC + real VGA scope
+    9  SoundBlaster OPL2 FM + text5 monitor
+
+The SB DAC engine (/S) plays the 4voice PERF stream through the DSP (volume
+levels become real amplitude via the wavetable bank); the FM engine (/O)
+plays its own OPL2 register stream (PERF id 4). Both expect the card at
+0x220 and fail safely (bounded DSP polls) when it is absent.
 """
 
 from __future__ import annotations
@@ -48,19 +54,21 @@ _CAL_THRESH = 6000               # PIT counts for 2048 iterations: above = XT-sl
 _MAX_FILES = 64                  # browser capacity (13 bytes each)
 _LIST_ROWS = 18                  # browser rows on screen
 
-#: (mode, vis, foreground) for each embedded build
-BUILDS = (("4voice", "", True),          # 0 FG
-          ("4voice", "text5", False),    # 1 T5
-          ("4voice", "vga", False),      # 2 VGA
-          ("4voice", "vu", False),       # 3 VU4
-          ("tandy", "text3", False),     # 4 TAN
-          ("tandy", "vu", False),        # 5 TANVU
-          ("1voice", "text2", False),    # 6 PC1
-          ("1voice", "vu", False))       # 7 PC1VU
+#: (mode, vis, foreground, sb, fm) for each embedded build
+BUILDS = (("4voice", "", True, False, False),       # 0 FG
+          ("4voice", "text5", False, False, False),  # 1 T5
+          ("4voice", "vga", False, False, False),    # 2 VGA
+          ("4voice", "vu", False, False, False),     # 3 VU4
+          ("tandy", "text3", False, False, False),   # 4 TAN
+          ("tandy", "vu", False, False, False),      # 5 TANVU
+          ("1voice", "text2", False, False, False),  # 6 PC1
+          ("1voice", "vu", False, False, False),     # 7 PC1VU
+          ("4voice", "vga", False, True, False),     # 8 SBDAC (real scope)
+          ("4voice", "text5", False, True, True))    # 9 SBFM
 
 
-def _assemble_build(mode: str, vis: str, fg: bool, org: int,
-                    stream_at: int, capture: dict) -> bytes:
+def _assemble_build(mode: str, vis: str, fg: bool, sb: bool, fm: bool,
+                    org: int, stream_at: int, capture: dict) -> bytes:
     """One engine body at `org` reading the shared heap; label map captured."""
     real = _Asm.resolve
 
@@ -75,8 +83,17 @@ def _assemble_build(mode: str, vis: str, fg: bool, org: int,
             return D._assemble_spk4_fg(1193, 1, b"", D._FG_FS, org=org,
                                        stream_at=stream_at)
         if mode == "4voice":
-            return D._assemble_spk4(100, 160, 1, b"", vis,
-                                    D._draw_skip_for(vis, None), org=org,
+            # SB builds carry a square wavetable bank (the DAC's volume-scaled
+            # oscillator; the FM build only needs the label to exist). The DAC
+            # build's dummy divider is 26 (~45.9 kHz): the DSP TIME CONSTANT is
+            # baked from it at assembly, and the DSP consuming FASTER than the
+            # runtime-patched ISR rate is harmless (it re-reads the loop
+            # buffer), while slower would smear -- so bake it near the ceiling.
+            bank = D._sb_wave_bank("square") if sb else b""
+            div = 26 if (sb and not fm) else 100
+            return D._assemble_spk4(div, 160, 1, b"", vis,
+                                    D._draw_skip_for(vis, None), sb=sb,
+                                    wave_table=bank, fm=fm, org=org,
                                     stream_at=stream_at)
         sil = D._tandy_silence() if mode == "tandy" else D._spk_note_off()
         sil_bytes = bytes([len(sil)]) + b"".join(bytes([p, v]) for p, v in sil)
@@ -92,8 +109,8 @@ def build_rcplay() -> bytes:
     once to fix its own label addresses, then again with the engine-exit
     retarget offsets that depend on them)."""
     sizes = []
-    for mode, vis, fg in BUILDS:
-        sizes.append(len(_assemble_build(mode, vis, fg, 0x100, 0, {})))
+    for mode, vis, fg, sb, fm in BUILDS:
+        sizes.append(len(_assemble_build(mode, vis, fg, sb, fm, 0x100, 0, {})))
     orgs, pos = [], 0x100 + _LOADER_SIZE
     for n in sizes:
         orgs.append(pos)
@@ -104,9 +121,9 @@ def build_rcplay() -> bytes:
         raise ValueError("engine builds leave too little heap for streams")
 
     bodies, labels = [], []
-    for (mode, vis, fg), org in zip(BUILDS, orgs):
+    for (mode, vis, fg, sb, fm), org in zip(BUILDS, orgs):
         cap: dict = {}
-        bodies.append(_assemble_build(mode, vis, fg, org, heap, cap))
+        bodies.append(_assemble_build(mode, vis, fg, sb, fm, org, heap, cap))
         labels.append(cap["labels"])
 
     # the foreground engine quits by NOPping its own back-jump; the browser
@@ -174,7 +191,7 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     """The loader + browser + settings UI. `lp` is the previous pass's label
     map (None on pass A); the engine-exit retargets need it."""
     a = _Asm(0x100)
-    FG, T5, VGA, VU4, TAN, TANVU, PC1, PC1VU = range(8)
+    FG, T5, VGA, VU4, TAN, TANVU, PC1, PC1VU, SBDAC, SBFM = range(10)
     after_play = (lp or {}).get("after_play", 0)
 
     # ---- retarget every engine's DOS exit to after_play ----------------------
@@ -218,6 +235,8 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     _set_if_eq(a, ord("4"), "v_target", 0x03)        # /4 -> 4voice
     a.db(0x24, 0xDF)                                 # and al,0xDF (uppercase)
     _set_if_eq(a, ord("T"), "v_target", 0x01)        # /T -> tandy
+    _set_if_eq(a, ord("S"), "v_target", 0x04)        # /S -> SoundBlaster DAC
+    _set_if_eq(a, ord("O"), "v_target", 0x05)        # /O -> OPL2 FM
     _set_if_eq(a, ord("F"), "v_force", 0x01)         # /F -> foreground
     _set_if_eq(a, ord("X"), "v_force", 0x02)         # /X -> ISR
     a.db(0x3C, 0x56).db(0x75).rel8("argnext")        # 'V' + digit?
@@ -248,11 +267,20 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     # browser reuses it; auto must stay auto across plays)
     a.db(0xA0).abs16("v_target").db(0xA2).abs16("p_target")
     a.db(0x80, 0x3E).abs16("p_target").db(0x00)
-    a.db(0x75).rel8("findperf")                      # explicit choice wins
+    a.db(0x75).rel8("wantperf")                      # explicit choice wins
     a.db(0xC6, 0x06).abs16("p_target").db(0x03)      # default 4voice
     a.db(0xA0).abs16("fhdr", 6)                      # al = target hint
     _set_if_eq(a, 0x02, "p_target", 0x01)            # hint tandy
     _set_if_eq(a, 0x03, "p_target", 0x02)            # hint 1voice
+    _set_if_eq(a, 0x05, "p_target", 0x04)            # hint sb   -> DAC
+    _set_if_eq(a, 0x06, "p_target", 0x05)            # hint sbfm -> FM
+    a.label("wantperf")
+    # the PERF id to search for: the SB DAC (4) eats the 4voice stream (3),
+    # the FM engine (5) has its own stream id (4)
+    a.db(0xA0).abs16("p_target").db(0xA2).abs16("p_want")
+    _set_if_eq(a, 0x04, "p_want", 0x03)
+    a.db(0xA0).abs16("p_target")
+    _set_if_eq(a, 0x05, "p_want", 0x04)
 
     a.label("findperf")
     _read(a, "chdr", 8, "h_e_read", exact_to="h_e_nostream")
@@ -262,7 +290,7 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     a.db(0x75).rel8("skipchunk")
     _read(a, "phdr", 16, "h_e_read")
     a.db(0xA0).abs16("phdr")                         # al = PERF target
-    a.db(0x3A, 0x06).abs16("p_target")               # cmp al,[p_target]
+    a.db(0x3A, 0x06).abs16("p_want")                 # cmp al,[p_want]
     a.db(0x74).rel8("gotperf")
     a.db(0x8B, 0x16).abs16("chdr", 4)                # dx = size low
     a.db(0x83, 0xEA, 0x10)                           # sub dx,16 (header read)
@@ -296,6 +324,10 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     _je_far(a, "go_tandy")
     a.db(0x3C, 0x02)
     _je_far(a, "go_1voice")
+    a.db(0x3C, 0x04)
+    _je_far(a, "go_sbdac")
+    a.db(0x3C, 0x05)
+    _je_far(a, "go_sbfm")
     a.db(0xA0).abs16("v_force")                      # 4voice: /F fg, /X isr
     a.db(0x3C, 0x01)
     _je_far(a, "go_fg")
@@ -333,6 +365,10 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     _emit_patch_isr(a, labels[VGA], orgs[VGA])
     a.label("go_vu4")
     _emit_patch_isr(a, labels[VU4], orgs[VU4])
+    a.label("go_sbdac")                              # SB DAC eats the 4voice stream
+    _emit_patch_isr(a, labels[SBDAC], orgs[SBDAC])
+    a.label("go_sbfm")
+    _emit_patch_isr(a, labels[SBFM], orgs[SBFM])
 
     # ---- after a song: back to the browser, or exit in CLI mode --------------
     a.label("after_play")
@@ -419,8 +455,9 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     _je_far(a, "browser")
     a.db(0x24, 0xDF)
     a.db(0x3C, ord("T")).db(0x75).rel8("s_e")
-    a.db(0xA0).abs16("v_target").db(0xFE, 0xC0)      # target: 0..3 cycle
-    a.db(0x24, 0x03).db(0xA2).abs16("v_target")
+    a.db(0xA0).abs16("v_target").db(0xFE, 0xC0)      # target: 0..5 cycle
+    a.db(0x3C, 0x06).db(0x72, 0x02).db(0xB0, 0x00)   # wrap past OPL-FM
+    a.db(0xA2).abs16("v_target")
     a.db(0xEB).rel8("settings_j")
     a.label("s_e")
     a.db(0x3C, ord("E")).db(0x75).rel8("s_v")
@@ -563,6 +600,7 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     _puts_at(a, "s_n1", 12, 4, 0x08)
     _puts_at(a, "s_n2", 13, 4, 0x08)
     _puts_at(a, "s_n3", 14, 4, 0x08)
+    _puts_at(a, "s_n4", 15, 4, 0x08)
     _puts_at(a, "s_back", 17, 4, 0x08)
     a.db(0xA0).abs16("v_target")
     a.db(0xE8).rel16("vstr_t")
@@ -580,7 +618,7 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     a.db(0xC3)
 
     # ---- error handlers (menu mode: show, wait, back to the browser) ---------
-    for name, msg in (("usage", "usage: RCPLAY [SONG.RCT] [/T|/1|/4] [/F|/X] "
+    for name, msg in (("usage", "usage: RCPLAY [SONG.RCT] [/T|/1|/4|/S|/O] [/F|/X] "
                        "[/V5|/V6|/V8]\r\n(no file: browse this directory)$"),
                       ("e_open", "cannot open file - press a key$"),
                       ("e_fmt", "not an RCT v1 file - press a key$"),
@@ -616,13 +654,15 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     strz("s_lv", "V)  display :")
     strz("s_n1", "target AUTO follows the song's own hint")
     strz("s_n2", "engine applies to the 4-voice target: AUTO measures the CPU")
-    strz("s_n3", "display VU works on every target; TXT5/VGA are 4-voice")
+    strz("s_n3", "display VU works on the speaker targets; SB-DAC has the")
+    strz("s_n4", "real VGA oscilloscope, OPL-FM the text monitor")
     strz("s_back", "T / E / V change   ESC back")
     a.label("patstr")
     a.bytes(b"*.RCT\x00")
     a.label("m_nofiles")
     a.bytes(b"no .RCT files in this directory\r\n$")
-    for label, vals in (("t_tgt", ("AUTO", "TANDY", "1VOICE", "4VOICE")),
+    for label, vals in (("t_tgt", ("AUTO", "TANDY", "1VOICE", "4VOICE",
+                                   "SB-DAC", "OPL-FM")),
                         ("t_eng", ("AUTO", "FGND", "ISR")),
                         ("t_viz", ("DFLT", "TXT5", "VU", "VGA"))):
         a.label(label)
@@ -635,6 +675,7 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     a.label("v_force"); a.db(0)                      # 0 auto / 1 fg / 2 isr
     a.label("v_viz"); a.db(0)                        # 0 default / 5 / 6 / 8
     a.label("p_target"); a.db(0)                     # per-play resolved target
+    a.label("p_want"); a.db(0)                       # PERF id to search for
     a.label("sel"); a.db(0, 0)
     a.label("top"); a.db(0, 0)
     a.label("fcount"); a.db(0, 0)

@@ -30,9 +30,13 @@ MODE_3TONE_NOISE = 1             # three tone + one noise channel
 #: header target hints (what the song was authored for)
 TARGET_HINTS = ("any", "mcs", "tandy", "1voice", "4voice", "sb", "sbfm")
 
-#: PERF chunk targets (DOS playback engines)
-PERF_TANDY, PERF_1VOICE, PERF_4VOICE = 1, 2, 3
-PERF_TARGETS = {PERF_TANDY: "tandy", PERF_1VOICE: "1voice", PERF_4VOICE: "4voice"}
+#: PERF chunk targets (DOS playback engines). The SoundBlaster DAC has no id
+#: of its own: it consumes the 4voice stream (same records, the level nibble
+#: is its per-note volume). SBFM carries packed OPL2 note words instead of
+#: phase increments, at one record set per sub-tick.
+PERF_TANDY, PERF_1VOICE, PERF_4VOICE, PERF_SBFM = 1, 2, 3, 4
+PERF_TARGETS = {PERF_TANDY: "tandy", PERF_1VOICE: "1voice",
+                PERF_4VOICE: "4voice", PERF_SBFM: "sbfm"}
 
 #: instrument waveform ids
 WAVEFORM_IDS = ("square", "pulse12", "pulse25", "pulse50", "pulse75",

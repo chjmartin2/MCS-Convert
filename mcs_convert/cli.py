@@ -108,7 +108,8 @@ def _cmd_convert(args) -> int:
                 data = rct_build_com(rct_song, target, mix_rate=args.mix_rate,
                                      text_scope=text_scope, scope=args.scope,
                                      foreground=args.foreground, sb=args.sb,
-                                     sb_port=args.sb_port, fps=args.fps)
+                                     sb_port=args.sb_port, sb_fm=args.sb_fm,
+                                     fps=args.fps)
             else:
                 from .dosplayer import build_com
                 data = build_com(song, target, byte0, scope=args.scope,

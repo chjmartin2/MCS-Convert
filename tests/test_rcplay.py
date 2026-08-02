@@ -12,24 +12,24 @@ from mcs_convert.streams import perf_chunks
 
 
 def _labels_and_orgs():
-    sizes = [len(RP._assemble_build(m, v, f, 0x100, 0, {})) for m, v, f in RP.BUILDS]
+    sizes = [len(RP._assemble_build(*b, 0x100, 0, {})) for b in RP.BUILDS]
     orgs, pos = [], 0x100 + RP._LOADER_SIZE
     for n in sizes:
         orgs.append(pos)
         pos += n
     heap = (pos + 15) & ~15
     labels = []
-    for (m, v, f), org in zip(RP.BUILDS, orgs):
+    for b, org in zip(RP.BUILDS, orgs):
         cap = {}
-        RP._assemble_build(m, v, f, org, heap, cap)
+        RP._assemble_build(*b, org, heap, cap)
         labels.append(cap["labels"])
     return labels, orgs, heap
 
 
 def test_rcplay_builds_and_is_com_sized():
     com = RP.build_rcplay()
-    assert 10 * 1024 < len(com) < 24 * 1024           # loader + 8 engines
-    assert 0xFFF0 - 0x100 - len(com) > 40 * 1024      # plenty of stream heap
+    assert 20 * 1024 < len(com) < 34 * 1024           # loader + 10 engines
+    assert 0xFFF0 - 0x100 - len(com) > 32 * 1024      # plenty of stream heap
     assert com[0] == 0xC7                             # engine-exit retarget pokes
     assert b"RCPLAY" in com and b"RCT" in com         # UI text present
 
@@ -47,6 +47,10 @@ def test_rcplay_has_the_browser_and_settings_ui():
     assert [b[:2] for b in RP.BUILDS].count(("4voice", "vu")) == 1
     assert ("tandy", "vu") in [b[:2] for b in RP.BUILDS]
     assert ("1voice", "vu") in [b[:2] for b in RP.BUILDS]
+    # SoundBlaster engines: DAC (plays the 4voice stream) + OPL2 FM
+    assert any(b[3] and not b[4] for b in RP.BUILDS)   # sb dac
+    assert any(b[3] and b[4] for b in RP.BUILDS)       # sb fm
+    assert b"SB-DAC" in loader and b"OPL-FM" in loader
 
 
 def test_every_build_reads_the_shared_heap():
@@ -72,7 +76,7 @@ def test_loader_patches_every_engine_immediate():
                 and j + 1 < len(lines) and lines[j + 1].mnemonic == "jmp"
                 and lines[j + 1].op_str == "ax"):
             entries.add(int(ins.op_str.split("0x")[1], 16))
-    for (mode, vis, fg), lab in zip(RP.BUILDS, labels):
+    for (mode, vis, fg, sb, fm), lab in zip(RP.BUILDS, labels):
         assert {lab["imm_total_a"], lab["imm_total_b"], lab["imm_div"]} <= stores
         if fg:
             assert {lab["imm_calM"], lab["imm_calref"]} <= stores
@@ -97,7 +101,8 @@ def test_saved_rct_carries_streams_rcplay_can_pick():
     com = RP.build_rcplay()
     heap_free = 0xFFF0 - 0x100 - len(com)
     back = R.read_rct(data)
-    assert set(back.perf) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE}
+    assert set(back.perf) == {R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE,
+                              R.PERF_SBFM}
     for target, payload in back.perf.items():
         p = R.parse_perf(payload)
         assert p["target"] == target
@@ -156,7 +161,7 @@ def test_loader_file_walk_simulated_on_a_real_rct(tmp_path):
             slen = struct.unpack_from("<I", ph, 12)[0]
             return read(slen)                # the stream RCPLAY loads
 
-    for target in (R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE):
+    for target in (R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE, R.PERF_SBFM):
         got = loader_walk(target)
         want = R.parse_perf(s.perf[target])["stream"]
         assert got == want, f"target {target}: loader walk diverged"
@@ -215,6 +220,10 @@ def test_loader_cmdline_parse_simulated():
             up = al & 0xDF
             if up == ord("T"):
                 target = 1
+            if up == ord("S"):
+                target = 4
+            if up == ord("O"):
+                target = 5
             if up == ord("F"):
                 force = 1
             if up == ord("X"):
@@ -231,6 +240,8 @@ def test_loader_cmdline_parse_simulated():
     assert parse(" SONG.RCT /4 /F") == ("SONG.RCT", 3, 1, 0)
     assert parse(" SONG.RCT /X /V8") == ("SONG.RCT", 0, 2, 8)
     assert parse(" SONG.RCT /t /v6") == ("SONG.RCT", 1, 0, 6)  # lowercase
+    assert parse(" SONG.RCT /S") == ("SONG.RCT", 4, 0, 0)       # SB DAC
+    assert parse(" SONG.RCT /o") == ("SONG.RCT", 5, 0, 0)       # OPL2 FM
     assert parse(" SONG.RCT") == ("SONG.RCT", 0, 0, 0)         # no flags at all
 
 

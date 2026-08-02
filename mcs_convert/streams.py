@@ -23,7 +23,8 @@ from . import dosplayer as D
 from .audio import midi_to_freq
 from .effects import FlatSong, flatten
 from .mcs.reader import tick_seconds_for
-from .rct import (PERF_1VOICE, PERF_4VOICE, PERF_TANDY, RctSong, make_perf)
+from .rct import (PERF_1VOICE, PERF_4VOICE, PERF_SBFM, PERF_TANDY, RctSong,
+                  make_perf)
 
 _ARP_FLOOR = 110.0               # 1-voice arp: octave-up below this (audio.py)
 
@@ -147,6 +148,55 @@ def mono_stream(flat: FlatSong, arp: bool = True,
     return bytes(out), flat.total_subs
 
 
+# --- SoundBlaster OPL2 FM stream ---------------------------------------------
+
+def sbfm_stream(flat: FlatSong) -> Tuple[bytes, int]:
+    """(stream, total_subs) in the FM engine's record format: per sub-tick
+    [nchanges][voice|lvl<<4, word_lo, word_hi, viz]* where voices 0-2 carry
+    packed OPL2 note words (0 = key off) and voice 3 carries 0xBD rhythm
+    register values. The OPL holds notes in hardware, so a record is only
+    emitted when something CHANGES -- but a slide/vibrato changes the note
+    word every sub-tick and becomes a genuine continuous retune (the key bit
+    stays set, so there is no re-attack). Drums strike via clear-then-set on
+    the rhythm bits, exactly like the .COM export path."""
+    rows = _voice_rows(flat)
+    noise = flat.channels[3].kind == "noise"
+    last_word = [0, 0, 0]
+    drum_on = False
+    out = bytearray()
+    for s, row in enumerate(rows):
+        recs = []
+        for v in range(3):
+            pitch, vol, onset, _wave = row[v]
+            word = D._opl_note_word(midi_to_freq(pitch)) if pitch is not None else 0
+            if word != last_word[v] or (onset and pitch is not None):
+                lvl = D._sb_level(round(vol * 127 / 15)) if (pitch is not None
+                                                            and vol) else 0
+                viz = D._viz_period(midi_to_freq(pitch)) if pitch is not None else 0
+                recs.append((v, word, lvl, viz))
+                last_word[v] = word
+        pitch, vol, onset, _wave = row[3]
+        if noise:
+            if pitch is not None and (onset or not drum_on):
+                bit = (D._OPL_HH if pitch >= D._DRUM_BRIGHT_MIDI else D._OPL_BD)
+                recs.append((3, D._OPL_RHYTHM, 0, 0))          # re-arm (clear)
+                recs.append((3, D._OPL_RHYTHM | bit, 0, D._NOISE_VIZ_P))
+                drum_on = True
+            elif pitch is None and drum_on:
+                recs.append((3, D._OPL_RHYTHM, 0, 0))          # release
+                drum_on = False
+        out.append(len(recs))
+        for v, word, lvl, viz in recs:
+            out += bytes([(v & 0x0F) | ((lvl & 0x0F) << 4),
+                          word & 0xFF, (word >> 8) & 0xFF, viz & 0xFF])
+    # trailing all-off: key off the melodic voices, drop the rhythm bits
+    out.append(4)
+    for v in range(3):
+        out += bytes([v, 0, 0, 0])
+    out += bytes([3, D._OPL_RHYTHM, 0, 0])
+    return bytes(out), flat.total_subs + 1
+
+
 # --- Tandy SN76489 stream ----------------------------------------------------
 
 def tandy_stream(flat: FlatSong, viz: bool = True) -> Tuple[bytes, int]:
@@ -223,19 +273,21 @@ def perf_chunks(song: RctSong, mix_rate: Optional[int] = None) -> Dict[int, byte
     s4, t4 = spk4_stream(flat, fs)                    # (has its own all-off tail)
     s1, t1 = mono_stream(flat, arp=True)
     st, tt = tandy_stream(flat)
+    sf, tf = sbfm_stream(flat)                        # (all-off tail too)
     return {
         PERF_4VOICE: make_perf(PERF_4VOICE, div4, samps, t4, s4),
         PERF_1VOICE: make_perf(PERF_1VOICE, sdiv, 1, t1 + 1,
                                s1 + _sil(D._spk_note_off())),
         PERF_TANDY: make_perf(PERF_TANDY, sdiv, 1, tt + 1,
                               st + _sil(D._tandy_silence())),
+        PERF_SBFM: make_perf(PERF_SBFM, sdiv, 1, tf, sf),
     }
 
 
 def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
               text_scope: int = 0, scope: bool = False,
               foreground: bool = False, sb: bool = False,
-              sb_port: int = 0x220, fps=None) -> bytes:
+              sb_port: int = 0x220, sb_fm: bool = False, fps=None) -> bytes:
     """RctSong -> standalone .COM via the proven engines, at full effect
     fidelity (streams compiled straight from the flattened arrays)."""
     flat = flatten(song)
@@ -244,6 +296,19 @@ def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
     vis = D._vis_for(scope, text_scope)
     skip = D._draw_skip_for(vis, fps)
 
+    if sb_fm:
+        # everything sounds on the OPL2 (percussion on its rhythm section);
+        # the ISR runs once per sub-tick and just writes register changes
+        stream, total = sbfm_stream(flat)
+        waves = [w for ch in flat.channels for w in ch.wave
+                 if w and ch.kind == "tone"]
+        wf = max(set(waves), key=waves.count) if waves else "square"
+        com = D._assemble_spk4(_subtick_divider(tempo), 1, total, stream, vis,
+                               skip, b"", False, True, sb_port,
+                               D._sb_wave_bank(wf), wf, True)
+        if len(com) > 0xFF00:
+            raise ValueError(f".COM is {len(com)} bytes — too big for one segment")
+        return com
     if mode == "4voice":
         if foreground:
             fs_fg = float(mix_rate) if mix_rate else D._FG_FS
