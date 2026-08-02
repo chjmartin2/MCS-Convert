@@ -364,13 +364,16 @@ class ExportDialog(tk.Toplevel):
 
     def _reduced(self) -> Song:
         """The song as the selected target will hear it (drums included)."""
-        _, rt, _, _ = self._spec()
+        label, rt, _, _ = self._spec()
         if rt is None:                        # WAV: the universal song itself
             return self.song
         percussion, drum_sound = self._drum_opts()
+        # the arpeggiated 1-voice .COM keeps the full 4-voice chord (build_com's
+        # arp cycles it onto the one speaker); a plain mcs target uses the picker
+        voices = (4 if "arpeggiated" in label
+                  else self._voice_count() if rt == "mcs" else None)
         out = retrack(self.song, rt, drum_sound=drum_sound,
-                      percussion=percussion,
-                      voices=(self._voice_count() if rt == "mcs" else None),
+                      percussion=percussion, voices=voices,
                       drop_noise=self.drop_noise.get())
         wave = self.wave.get()
         if wave != "native":                  # user forced a waveform
@@ -528,16 +531,19 @@ class ExportDialog(tk.Toplevel):
         from ..mcs.encode import encode_song
         bar_ticks = self._meters[self.meter.get()]
         percussion, drum_sound = self._drum_opts()
-        # the arpeggiated .MCS is deliberately a SINGLE voice (it fakes the chord
-        # by cycling notes on the 32nd grid); otherwise honour the voice selector
-        nv = 1 if arp else self._voice_count()
+        # arp: KEEP the 4-voice chord in the retrack so the arpeggiator has notes
+        # to cycle -- the encode then collapses those voices into ONE arpeggiated
+        # line. (Retracking to 1 first would leave only the top note = no arp.)
+        # Plain MCS uses the chosen voice count for both.
+        retrack_nv = 4 if arp else self._voice_count()
+        encode_nv = 1 if arp else self._voice_count()
         return encode_song(retrack(self.song, "mcs", drum_sound=drum_sound,
-                                   percussion=percussion, voices=nv,
+                                   percussion=percussion, voices=retrack_nv,
                                    drop_noise=self.drop_noise.get()),
                            tempo_byte0=self._byte0(), cap=True,
                            fit_meter=bar_ticks is None,
-                           bar_ticks=bar_ticks or 32, balance=True, voices=nv,
-                           arp=arp)
+                           bar_ticks=bar_ticks or 32, balance=True,
+                           voices=encode_nv, arp=arp)
 
     def _build(self, label: str, rt, com_mode) -> bytes:
         byte0 = self._byte0()
