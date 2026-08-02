@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-from ..audio import _note_events
+from ..audio import _note_events, arp_pick_array, rle_events
 from ..model import Song
 from .writer import build_file, make_entry
 
@@ -389,7 +389,7 @@ def _staff_for(events, total, bar_ticks, treble, cap, v_base=None,
 def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
                 split: int = 67, cap: bool = False,
                 fit_meter: bool = False, balance: bool = False,
-                voices: int = 6) -> bytes:
+                voices: int = 6, arp: bool = False) -> bytes:
     """Song (32nd-note ticks) -> .MCS bytes on a two-staff grand staff — the
     layout real MCS renders (a top and a bottom staff). Both staves' clefs are
     free, so they need not be treble-over-bass.
@@ -401,7 +401,11 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
 
     `voices` targets an output chip's polyphony: 1 collapses to a single melodic
     line (PC-speaker 1-voice), 3 suits a Tandy/PCjr (3 tones), 4 the PC-speaker
-    4-voice multiplex. Our chiptune sources are already <=3 voices.
+    4-voice multiplex. Our chiptune sources are already <=3 voices. With
+    `voices=1` and `arp=True`, the single line ARPEGGIATES the chord (cycles
+    every sounding note on the 32nd-note grid, octave-up below ~110 Hz) instead
+    of just keeping the top note -- the same 1-voice line the .COM plays, at the
+    coarser resolution MCS can express.
 
     A measure holds a fixed 24 horizontal POSITIONS (onsets), not a fixed entry
     count — chords stack on one slot for free. `cap=True` drops onsets past the
@@ -412,7 +416,8 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         # A sparse song (a Zelda theme) lands here — 2/4 pitch-split, untouched.
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=False, voices=voices)
+                               split=split, cap=cap, balance=False, voices=voices,
+                               arp=arp)
             if encode_song.last_dropped == 0:
                 return data
         # Phase 2: nothing fits naturally (a dense song like Dr. Wily) — allow
@@ -420,7 +425,8 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
         best = None
         for bt in _FIT_METERS:
             data = encode_song(song, bar_ticks=bt, tempo_byte0=tempo_byte0,
-                               split=split, cap=cap, balance=balance, voices=voices)
+                               split=split, cap=cap, balance=balance, voices=voices,
+                               arp=arp)
             dropped = encode_song.last_dropped
             if best is None or dropped < best[1]:
                 best = (data, dropped)
@@ -432,7 +438,9 @@ def encode_song(song: Song, *, bar_ticks: int = 32, tempo_byte0: int = 0x80,
               for s, d, m in _note_events([n for n in tr.notes if not n.percussive])
               if d > 0]
     if voices <= 1:
-        events = _monophonic(events)
+        # arp: cycle the chord into a single line (octave-up bass); else keep the
+        # top note. arp works on the same 32nd-tick events -> merged held notes.
+        events = rle_events(arp_pick_array(events)) if arp else _monophonic(events)
     # The 4-voice (PC-speaker) target spends its 4th voice on percussion: ONE drum
     # click per hit tick — a single channel. A click on
     # a tick a melody note already occupies joins that slot for free; a new-tick

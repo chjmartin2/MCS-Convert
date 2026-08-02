@@ -25,7 +25,8 @@ from __future__ import annotations
 import struct
 from typing import Dict, List, Tuple
 
-from .audio import _allocate_voices, _note_events, midi_to_freq
+from .audio import (_allocate_voices, _note_events, arp_pick_array,
+                    midi_to_freq)
 from .mcs.reader import tick_seconds_for
 from .model import Song
 
@@ -392,14 +393,42 @@ def _tandy_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, 
     return by
 
 
-def _mono_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, int]]]:
-    """Per-sub-tick writes for the single PC-speaker voice: play the highest
-    voice (channel 0), articulated so repeated notes re-attack. With `scope`,
-    also emit viz records so the one voice can drive a display -- without them
-    every scope on this target would just flatline."""
+def _mono_stream(song: Song, scope: bool = False,
+                 arp: bool = False) -> Dict[int, List[Tuple[int, int]]]:
+    """Per-sub-tick writes for the single PC-speaker voice.
+
+    Default: play the highest voice (channel 0), articulated so repeated notes
+    re-attack -- the other voices are dropped.
+
+    With `arp`: the one voice ARPEGGIATES every sounding note (the 8-bit way to
+    fake a chord). At each sub-tick it steps through the current chord (see
+    audio.arp_pick_array -- octave-up below ~110 Hz, continuous index); a held
+    single note stays sustained, a chord shimmers. That is a strict improvement
+    over throwing two thirds of the notes away.
+
+    With `scope`, also emit viz records so the one voice can drive a display."""
     per_track, _ = _split_notes(song)
-    voice = _allocate_voices(per_track, n=3)[0]     # channel 0 = the top line
     by: Dict[int, List[Tuple[int, int]]] = {}
+    if arp:
+        # all tone events -> sub-tick slices -> one pick per sub-tick
+        tone = [e for voice in per_track for e in voice]
+        sub = [(s * _SUBTICKS, d * _SUBTICKS, m) for s, d, m in tone]
+        prev = None
+        for s, m in enumerate(arp_pick_array(sub)):
+            if m == prev:
+                continue                             # held: no re-attack
+            if m is None:
+                by.setdefault(s, []).extend(_spk_note_off())
+                if scope:
+                    by.setdefault(s, []).append((_VIZ_PORT, 0))
+            else:
+                freq = midi_to_freq(m)
+                by.setdefault(s, []).extend(_spk_note_on(freq))
+                if scope:
+                    by.setdefault(s, []).append((_VIZ_PORT, _viz_period(freq)))
+            prev = m
+        return by
+    voice = _allocate_voices(per_track, n=3)[0]     # channel 0 = the top line
     for start, dur, midi in voice:
         on = start * _SUBTICKS
         off = _artic_off(on, dur)
@@ -412,10 +441,11 @@ def _mono_stream(song: Song, scope: bool = False) -> Dict[int, List[Tuple[int, i
     return by
 
 
-def _build_stream(song: Song, mode: str, scope: bool = False) -> Tuple[bytes, int]:
+def _build_stream(song: Song, mode: str, scope: bool = False,
+                  arp: bool = False) -> Tuple[bytes, int]:
     """(stream bytes, total_subticks). One record per sub-tick: [n][port,val]*."""
     by = (_tandy_stream(song, scope) if mode == "tandy"
-          else _mono_stream(song, scope))
+          else _mono_stream(song, scope, arp))
     ticks = max((n.end_tick for t in song.tracks for n in t.notes), default=0)
     total = ticks * _SUBTICKS
     out = bytearray()
@@ -3116,7 +3146,8 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
               text_scope: bool = False, mix_rate=None, draw_skip=None,
               mcs: bool = False, sb: bool = False, sb_port: int = _SB_PORT,
               sb_wave: str = None, spk_wave: str = None,
-              sb_fm: bool = False, fps=None, foreground: bool = False) -> bytes:
+              sb_fm: bool = False, fps=None, foreground: bool = False,
+              arp: bool = False) -> bytes:
     """Assemble a `.COM` that plays `song` in the given mode at the MCS tempo.
     `scope` adds the mode-9 graphics oscilloscopes (Tandy only); `text_scope` adds
     an 80x25 text-mode scope -- 1 = block bars, 2 = box-drawing line trace, 3 =
@@ -3150,6 +3181,9 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
         raise ValueError("the foreground engine is audio-only (no scope) and has "
                          "its own MCS-style timer-2 drive: drop --sb/--mcs/"
                          "--spk-wave and the scopes")
+    if arp and mode != "1voice":
+        raise ValueError("chord arpeggiation is a 1-voice PC-speaker feature "
+                         "(the other targets have real voices); use --1voice")
     def _skip(vis):                                  # explicit draw_skip wins
         return (max(1, min(255, int(draw_skip))) if draw_skip
                 else _draw_skip_for(vis, fps))
@@ -3223,7 +3257,7 @@ def build_com(song: Song, mode: str, tempo_byte0: int, scope: bool = False,
     if vis == "graphics" and mode != "tandy":
         raise ValueError("the mode-9 graphics scope is Tandy hardware only; "
                          "use --scope-vga (mode 13h) anywhere else")
-    stream, total = _build_stream(song, mode, bool(vis))
+    stream, total = _build_stream(song, mode, bool(vis), arp)
     if total == 0:
         raise ValueError("nothing to play (no notes)")
     # Timer fires once per SUB-tick (the stream's resolution). Should always fit

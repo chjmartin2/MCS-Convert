@@ -32,8 +32,12 @@ _ACCENT = "#7fd17f"
 #: (label, retrack target, build_com mode or None, extension)
 TARGETS = (
     (".MCS song (Music Construction Set)", "mcs", None, ".mcs"),
+    (".MCS song (1-voice arpeggiated)", "mcs", None, ".mcs"),
     ("Tandy 1000 / PCjr .COM", "tandy", "tandy", ".com"),
     ("PC Speaker 1-voice .COM", "1voice", "1voice", ".com"),
+    # arp keeps the chord (retrack via "mcs", not "1voice" which drops to the top
+    # line) and lets build_com's 1-voice arp cycle it
+    ("PC Speaker 1-voice (arpeggiated) .COM", "mcs", "1voice", ".com"),
     ("PC Speaker 4-voice .COM", "4voice", "4voice", ".com"),
     ("PC Speaker 4-voice (MCS drive) .COM", "4voice", "4voice", ".com"),
     ("PC Speaker 4-voice (MCS foreground) .COM", "4voice", "4voice", ".com"),
@@ -514,22 +518,25 @@ class ExportDialog(tk.Toplevel):
         self.status.configure(text=f"Exported {len(data)} bytes → "
                                    f"{os.path.basename(out)}")
 
-    def _build_mcs(self) -> bytes:
+    def _build_mcs(self, arp: bool = False) -> bytes:
         from ..mcs.encode import encode_song
         bar_ticks = self._meters[self.meter.get()]
         percussion, drum_sound = self._drum_opts()
-        nv = self._voice_count()
+        # the arpeggiated .MCS is deliberately a SINGLE voice (it fakes the chord
+        # by cycling notes on the 32nd grid); otherwise honour the voice selector
+        nv = 1 if arp else self._voice_count()
         return encode_song(retrack(self.song, "mcs", drum_sound=drum_sound,
                                    percussion=percussion, voices=nv,
                                    drop_noise=self.drop_noise.get()),
                            tempo_byte0=self._byte0(), cap=True,
                            fit_meter=bar_ticks is None,
-                           bar_ticks=bar_ticks or 32, balance=True, voices=nv)
+                           bar_ticks=bar_ticks or 32, balance=True, voices=nv,
+                           arp=arp)
 
     def _build(self, label: str, rt, com_mode) -> bytes:
         byte0 = self._byte0()
         if label.startswith(".MCS"):
-            return self._build_mcs()
+            return self._build_mcs(arp="arpeggiated" in label)
         if label.startswith("WAV"):
             master, _, sr = render_song(self.song,
                                         step_seconds=self._step_seconds(),
@@ -541,6 +548,8 @@ class ExportDialog(tk.Toplevel):
             scope=(scope == "graphics (Tandy)" and com_mode == "tandy"),
             text_scope=_SCOPE_TS.get(scope, 0),
             fps=None)                            # per-mode default (10 text/15 gfx)
+        if com_mode == "1voice" and "arpeggiated" in label:
+            kwargs["arp"] = True                 # cycle chords on the one voice
         if com_mode == "4voice":
             kwargs["mix_rate"] = int("".join(c for c in self.mix.get()
                                              if c.isdigit()) or "16000")

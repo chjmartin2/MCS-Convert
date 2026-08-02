@@ -86,18 +86,28 @@ def _cmd_convert(args) -> int:
                 raise ValueError("--mcs only applies to --4voice")
             if args.sb and target != "4voice":
                 raise ValueError("--sb (SoundBlaster) only applies to --4voice")
+            if args.arp and target != "1voice":
+                raise ValueError("--arp is a 1-voice feature; use --1voice (or "
+                                 "drop the .COM target for a 1-voice arp .MCS)")
             from .dosplayer import build_com
             data = build_com(song, target, byte0, scope=args.scope,
                              text_scope=text_scope, mix_rate=args.mix_rate,
                              draw_skip=args.draw_skip, fps=args.fps, mcs=args.mcs,
                              sb=args.sb, sb_port=args.sb_port,
                              sb_wave=args.sb_wave, spk_wave=args.spk_wave,
-                             sb_fm=args.sb_fm, foreground=args.foreground)
+                             sb_fm=args.sb_fm, foreground=args.foreground,
+                             arp=args.arp)
         else:                                        # the default .MCS song file
             # The universal Song may carry noise tracks / waveforms / effects MCS
             # can't voice — retrack() reduces to 4 square voices + drum clicks.
             from .retrack import retrack
-            data = encode_song(retrack(song, "mcs"), tempo_byte0=byte0, cap=True)
+            if args.arp:
+                # a 1-voice arp .MCS: the same single arpeggiated line the beeper
+                # .COM plays, quantized to the 32nd-note grid MCS can express
+                data = encode_song(retrack(song, "mcs"), tempo_byte0=byte0,
+                                   cap=True, voices=1, arp=True)
+            else:
+                data = encode_song(retrack(song, "mcs"), tempo_byte0=byte0, cap=True)
     except NotImplementedError as exc:
         print(f"not yet implemented: {exc}", file=sys.stderr)
         return 2
@@ -171,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--4voice", dest="4voice", action="store_true",
                         help="output a 4-voice PC-speaker .COM (software 1-bit "
                              "mixing; currently 3 tone voices, noise voice next)")
+    p_conv.add_argument("--arp", dest="arp", action="store_true",
+                        help="1-voice output only: ARPEGGIATE chords -- the one "
+                             "voice cycles every sounding note (octave-up below "
+                             "~110 Hz) to fake polyphony, instead of keeping just "
+                             "the top line. With --1voice it uses fast sub-tick "
+                             "clicks; on a plain .MCS file it uses the 32nd-note "
+                             "grid MCS can express")
     p_conv.add_argument("--scope", action="store_true",
                         help="Tandy .COM only: draw a 320x200 graphics "
                              "oscilloscope (4 channels + master) while playing")

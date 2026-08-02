@@ -23,6 +23,65 @@ def midi_to_freq(midi: int) -> float:
     return 440.0 * 2.0 ** ((midi - 69) / 12.0)
 
 
+#: Below this pitch a note is octaved up before it enters a 1-voice arpeggio, so
+#: every arp slice still gets ~1.5-2 full cycles and reads as a pitch (a ~40 Hz
+#: bass note in a 16 ms sub-tick slice would be under one cycle -- just a click).
+#: ~110 Hz is A2, and conveniently the SN76489 floor the Tandy encoder uses too.
+ARP_FLOOR_HZ = 110.0
+
+
+def octave_up_to_floor(midi: int, floor_hz: float = ARP_FLOOR_HZ) -> int:
+    """Raise `midi` by whole octaves until it is at/above `floor_hz` (same pitch
+    class, an octave or two higher). Converges -- each octave doubles the freq."""
+    while midi < 120 and midi_to_freq(midi) < floor_hz:
+        midi += 12
+    return midi
+
+
+def arp_pick_array(events: List[Tuple[int, int, int]],
+                   floor_hz: float = ARP_FLOOR_HZ) -> List[int]:
+    """Collapse overlapping (start, dur, midi) events to ONE monophonic line by
+    ARPEGGIATION -- the 8-bit trick for faking chords on a single voice.
+
+    Returns one entry per time SLICE (whatever unit the events' start/dur use --
+    sub-ticks for the DOS speaker, 32nd-note ticks for MCS): the midi note that
+    slice should sound, or None for a rest. At each slice every sounding pitch is
+    octaved up to the floor, and a CONTINUOUSLY advancing index picks one of them
+    (so a 3-note chord cycles low-mid-high-low..., and each note gets even time).
+    A lone sustained note picks the same value every slice -- caller run-length-
+    merges those (see `rle_events`) so it stays one held note, not a re-attack."""
+    if not events:
+        return []
+    up = [(s, d, octave_up_to_floor(m, floor_hz)) for s, d, m in events]
+    end = max(s + d for s, d, _ in up)
+    picks: List[int] = [None] * end
+    idx = 0
+    for t in range(end):
+        sounding = sorted({m for s, d, m in up if s <= t < s + d})
+        if sounding:
+            picks[t] = sounding[idx % len(sounding)]
+            idx += 1
+    return picks
+
+
+def rle_events(picks: List[int]) -> List[Tuple[int, int, int]]:
+    """Run-length-merge a per-slice pick array (from `arp_pick_array`) back into
+    (start, dur, midi) note events: identical consecutive picks become one held
+    note, None runs are the rests between."""
+    out: List[Tuple[int, int, int]] = []
+    i, n = 0, len(picks)
+    while i < n:
+        if picks[i] is None:
+            i += 1
+            continue
+        j = i
+        while j < n and picks[j] == picks[i]:
+            j += 1
+        out.append((i, j - i, picks[i]))
+        i = j
+    return out
+
+
 def _note_events(notes: List[NoteEvent]) -> List[Tuple[int, int, int]]:
     """(start_tick, duration_ticks, midi) for sounding notes, with tied same-pitch chains
     merged into ONE event. A tie means "don't re-attack": rendered as two notes, the
