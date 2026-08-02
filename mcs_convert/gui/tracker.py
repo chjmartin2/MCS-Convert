@@ -22,6 +22,7 @@ settings, import (NSF/PT3/MCS/RCT), export (.RCT/.MCS/.COM/WAV/RCPLAY.COM).
 
 from __future__ import annotations
 
+import copy
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -71,6 +72,11 @@ class TrackerApp:
         self._playing = False
         self._play_subs = 0
         self._play_follow = None
+        self._flat = None            # FlatSong of the playing render (posmap)
+        self._seek_base = 0.0        # seconds skipped when playing from a row
+        self._undo: list = []        # (deepcopy(song), cur_pat, row) snapshots
+        self._redo: list = []
+        self.mute = [False] * 4
         self._build_ui()
         self._bind_keys()
         if path:
@@ -121,7 +127,6 @@ class TrackerApp:
         top = tk.Frame(root, bg=BG)
         top.pack(fill="x", padx=6, pady=(6, 2))
         self.v_title = tk.StringVar(value=self.song.title)
-        self.v_tempo = tk.IntVar(value=self.song.tempo_byte0)
         self.v_speed = tk.IntVar(value=self.song.speed)
         self.v_mode = tk.StringVar(value="3 tone + noise")
         self.v_status = tk.StringVar(value="ready")
@@ -132,11 +137,15 @@ class TrackerApp:
         lab("Title").pack(side="left")
         tk.Entry(top, textvariable=self.v_title, width=18, bg=BG2, fg=FG,
                  insertbackground=FG, font=FONT).pack(side="left", padx=(2, 10))
-        lab("Tempo").pack(side="left")
-        tk.Spinbox(top, from_=0x77, to=0x92, increment=3,
-                   textvariable=self.v_tempo, width=5, bg=BG2, fg=FG,
-                   font=FONT, command=self._settings_changed
-                   ).pack(side="left", padx=(2, 10))
+        lab("BPM").pack(side="left")
+        self.v_bpm = tk.StringVar(value=f"{self.song.bpm:.1f}")
+        bpm_box = tk.Entry(top, textvariable=self.v_bpm, width=6, bg=BG2,
+                           fg=FG, insertbackground=FG, font=FONT)
+        bpm_box.pack(side="left", padx=(2, 2))
+        bpm_box.bind("<Return>", lambda e: self._bpm_changed())
+        bpm_box.bind("<FocusOut>", lambda e: self._bpm_changed())
+        self.l_snap = tk.Label(top, text="", bg=BG, fg=DIM, font=FONT)
+        self.l_snap.pack(side="left", padx=(0, 10))
         lab("Speed").pack(side="left")
         tk.Spinbox(top, from_=1, to=32, textvariable=self.v_speed, width=3,
                    bg=BG2, fg=FG, font=FONT, command=self._settings_changed
@@ -154,6 +163,17 @@ class TrackerApp:
         mode.bind("<<ComboboxSelected>>", lambda e: self._settings_changed())
         self.l_oct = tk.Label(top, text="oct 4  step 1", bg=BG, fg=ACC, font=FONTB)
         self.l_oct.pack(side="right")
+        self.v_follow = tk.BooleanVar(value=True)
+        tk.Checkbutton(top, text="follow", variable=self.v_follow, bg=BG,
+                       fg=FG, selectcolor=BG2, activebackground=BG,
+                       font=FONT).pack(side="right", padx=(0, 8))
+        self.v_vol = tk.DoubleVar(value=80.0)
+        tk.Scale(top, from_=0, to=100, orient="horizontal",
+                 variable=self.v_vol, showvalue=False, length=90, bg=BG,
+                 troughcolor=BG2, highlightthickness=0,
+                 command=lambda v: self.player.set_volume(float(v) / 100.0)
+                 ).pack(side="right", padx=(0, 8))
+        tk.Label(top, text="vol", bg=BG, fg=DIM, font=FONT).pack(side="right")
 
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True, padx=6, pady=2)
@@ -225,10 +245,45 @@ class TrackerApp:
         r.bind("<minus>", lambda e: self.set_step(self.step - 1))
         r.bind("<equal>", lambda e: self.set_step(self.step + 1))
         r.bind("<space>", self._space)
+        r.bind("<Control-z>", lambda e: self.undo())
+        r.bind("<Control-y>", lambda e: self.redo())
+        r.bind("<F7>", lambda e: self.v_follow.set(not self.v_follow.get()))
+        r.bind("<F9>", lambda e: self.play_from_row())
         r.bind("<Control-n>", lambda e: self.new_song())
         r.bind("<Control-o>", lambda e: self.open_dialog())
         r.bind("<Control-s>", lambda e: self.save())
         r.bind("<Key>", self._key)
+
+    # ---- undo ----------------------------------------------------------------
+
+    def _checkpoint(self):
+        """Push an undo snapshot BEFORE a mutation (multi-level, capped)."""
+        self._undo.append((copy.deepcopy(self.song), self.cur_pat, self.row))
+        if len(self._undo) > 100:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def undo(self):
+        if not self._undo:
+            return
+        self._redo.append((copy.deepcopy(self.song), self.cur_pat, self.row))
+        self.song, self.cur_pat, self.row = self._undo.pop()
+        self._after_history_restore()
+
+    def redo(self):
+        if not self._redo:
+            return
+        self._undo.append((copy.deepcopy(self.song), self.cur_pat, self.row))
+        self.song, self.cur_pat, self.row = self._redo.pop()
+        self._after_history_restore()
+
+    def _after_history_restore(self):
+        if self.cur_pat not in self.song.patterns:
+            self.cur_pat = self.song.order[0] if self.song.order else 0
+        self.row = min(self.row, self.pattern().rows - 1)
+        self.chan = min(self.chan, 3)
+        self._sync_settings()
+        self.refresh()
 
     # ---- model helpers -------------------------------------------------------
 
@@ -239,6 +294,7 @@ class TrackerApp:
         return self.pattern().cell(self.row, self.chan)
 
     def _rows_changed(self):
+        self._checkpoint()
         """Resize the CURRENT pattern (cells beyond the new length are kept in
         memory only until save, like most trackers)."""
         pat = self.pattern()
@@ -250,11 +306,22 @@ class TrackerApp:
         self.refresh()
 
     def _settings_changed(self):
+        self._checkpoint()
         self.song.title = self.v_title.get()[:32]
-        self.song.tempo_byte0 = int(self.v_tempo.get())
         self.song.speed = max(1, min(32, int(self.v_speed.get())))
         self.song.channel_mode = (R.MODE_4TONE if self.v_mode.get() == "4 tone"
                                   else R.MODE_3TONE_NOISE)
+        self.refresh()
+
+    def _bpm_changed(self):
+        try:
+            bpm = float(self.v_bpm.get())
+        except ValueError:
+            self.v_bpm.set(f"{self.song.bpm:.1f}")
+            return
+        self._checkpoint()
+        self.song.set_bpm(bpm)                       # arbitrary; MCS byte snaps
+        self.v_bpm.set(f"{self.song.bpm:.1f}")
         self.refresh()
 
     # ---- navigation ----------------------------------------------------------
@@ -298,9 +365,18 @@ class TrackerApp:
     def _click(self, e):
         self.canvas.focus_set()
         self.root.focus_set()                        # leave any Entry widget
+        col = (e.x - 40) // self.chan_w
+        if e.y < 24:                                 # header: mute / solo
+            if 0 <= col < 4:
+                if e.state & 0x4:                    # Ctrl+click = solo
+                    solo = [c != col for c in range(4)]
+                    self.mute = ([False] * 4 if self.mute == solo else solo)
+                else:
+                    self.mute[col] = not self.mute[col]
+                self.refresh()
+            return
         # canvas cell geometry mirrors _draw
         row = (e.y - 24) // 18 + self.top_row
-        col = (e.x - 40) // self.chan_w
         if 0 <= col < 4 and 0 <= row < self.pattern().rows:
             self.row, self.chan = row, col
             self.refresh()
@@ -320,6 +396,8 @@ class TrackerApp:
             return None
         ks = e.keysym.lower()
         if self.field == 0:                          # note column
+            if ks in _PIANO or ks in ("a", "grave"):
+                self._checkpoint()
             if ks in ("a", "grave"):
                 self.cell().note = R.NOTE_OFF
                 return self._advance()
@@ -334,6 +412,7 @@ class TrackerApp:
         ch = e.char.lower()
         if not ch:
             return None
+        self._checkpoint()
         c = self.cell()
         if self.field == 3:                          # effect LETTER column
             up = ch.upper()
@@ -369,6 +448,7 @@ class TrackerApp:
     def clear_cell(self):
         if self._typing_elsewhere():
             return None
+        self._checkpoint()
         pat = self.pattern()
         pat.cells[self.row][self.chan] = R.RctCell()
         self._advance()
@@ -384,6 +464,7 @@ class TrackerApp:
             self.refresh()
 
     def order_add(self):
+        self._checkpoint()
         new = max(self.song.patterns) + 1 if len(self.song.patterns) < 256 else None
         if new is None:
             return
@@ -393,6 +474,7 @@ class TrackerApp:
         self.refresh()
 
     def order_del(self):
+        self._checkpoint()
         if len(self.song.order) > 1:
             sel = self.orderbox.curselection()
             i = sel[0] if sel else len(self.song.order) - 1
@@ -426,6 +508,7 @@ class TrackerApp:
     # ---- instruments / ornaments --------------------------------------------
 
     def add_instrument(self):
+        self._checkpoint()
         free = [i for i in range(1, 16) if i not in self.song.instruments]
         if free:
             self.song.instruments[free[0]] = R.RctInstrument()
@@ -494,7 +577,12 @@ class TrackerApp:
 
     def _render(self, song: R.RctSong):
         flat = flatten(song)
-        master, _ = render_flat(flat, sr=44100)
+        for c, m in enumerate(self.mute):            # muted channels go silent
+            if m:
+                n = flat.total_subs
+                flat.channels[c].pitch = [None] * n
+        master, voices = render_flat(flat, sr=44100)
+        self._voices = voices                        # for the viz windows
         return master, flat
 
     def play_song(self):
@@ -506,6 +594,9 @@ class TrackerApp:
             return
         self._play_total = flat.total_subs
         self._sub_s = flat.subtick_seconds
+        self._flat = flat
+        self._seek_base = 0.0
+        self._master = master
         self.player.play(pcm16(master), 44100)
         self._playing = True
         self._follow()
@@ -526,19 +617,56 @@ class TrackerApp:
             return
         self._play_total = flat.total_subs
         self._sub_s = flat.subtick_seconds
+        self._flat = None                            # pattern solo: no follow map
+        self._seek_base = 0.0
         self.player.play(pcm16(master), 44100)
+        self._playing = True
+        self._follow()
+
+    def play_from_row(self):
+        """F9: start song playback at the cursor's row (first occurrence of
+        the current pattern+row in the order walk)."""
+        self.stop()
+        try:
+            master, flat = self._render(self.song)
+        except Exception as exc:
+            messagebox.showerror("Play", str(exc))
+            return
+        start_sub = 0
+        for s, (_op, pat, row) in enumerate(flat.posmap):
+            if pat == self.cur_pat and row == self.row:
+                start_sub = s
+                break
+        self._play_total = flat.total_subs
+        self._sub_s = flat.subtick_seconds
+        self._flat = flat
+        self._master = master
+        self._seek_base = start_sub * flat.subtick_seconds
+        off = int(self._seek_base * 44100)
+        self.player.play(pcm16(master[off:]), 44100)
         self._playing = True
         self._follow()
 
     def _follow(self):
         if not self._playing:
             return
-        pos = self.player.position_seconds()
+        pos = self.player.position_seconds() + self._seek_base
         sub = int(pos / self._sub_s) if self._sub_s else 0
         self._play_subs = sub
         if sub >= self._play_total:
             self.stop()
             return
+        # FOLLOW: the pattern view rolls forward with playback (the posmap
+        # already accounts for speed changes and pattern breaks)
+        if (self.v_follow.get() and self._flat is not None
+                and sub < len(self._flat.posmap)):
+            op, pat, row = self._flat.posmap[sub]
+            if pat != self.cur_pat or row != self.row:
+                self.cur_pat, self.row = pat, row
+                self.orderbox.selection_clear(0, "end")
+                if op < len(self.song.order):
+                    self.orderbox.selection_set(op)
+                self.v_rows.set(self.pattern().rows)
         self.refresh()
         self._play_follow = self.root.after(50, self._follow)
 
@@ -706,7 +834,7 @@ class TrackerApp:
     def _sync_settings(self):
         self.v_title.set(self.song.title)
         self.v_rows.set(self.pattern().rows)
-        self.v_tempo.set(self.song.tempo_byte0)
+        self.v_bpm.set(f"{self.song.bpm:.1f}")
         self.v_speed.set(self.song.speed)
         self.v_mode.set("4 tone" if self.song.channel_mode == R.MODE_4TONE
                         else "3 tone + noise")
@@ -719,6 +847,9 @@ class TrackerApp:
     def refresh(self):
         self.l_oct.config(text=f"oct {self.octave}  step {self.step}"
                           + ("  ▶" if self._playing else ""))
+        self.l_snap.config(
+            text=f"→ MCS {self.song.tempo_byte0:#04x}"
+                 if self.song.subtick_us else "(MCS grid)")
         # order list
         self.orderbox.delete(0, "end")
         for i, pnum in enumerate(self.song.order):
@@ -746,23 +877,20 @@ class TrackerApp:
         names = (["CH1", "CH2", "CH3",
                   "NSE" if self.song.channel_mode == R.MODE_3TONE_NOISE else "CH4"])
         for c, name in enumerate(names):
+            label = f"[{name}]" if self.mute[c] else name
             cv.create_text(40 + c * self.chan_w + self.chan_w // 2, 12,
-                           text=name, fill=CHCOL[c], font=FONTB)
+                           text=label, fill=DIM if self.mute[c] else CHCOL[c],
+                           font=FONTB)
         play_row = None
-        if self._playing:
-            # highlight the playing row inside the current pattern chain
-            sub = self._play_subs
-            offset = 0
-            for pnum in self.song.order:
-                p = self.song.patterns.get(pnum)
-                if p is None:
-                    continue
-                span = p.rows * self.song.speed
-                if sub < offset + span:
-                    if pnum == self.cur_pat:
-                        play_row = (sub - offset) // self.song.speed
-                    break
-                offset += span
+        if (self._playing and self._flat is not None
+                and self._play_subs < len(self._flat.posmap)):
+            _op, ppat, prow = self._flat.posmap[self._play_subs]
+            if ppat == self.cur_pat:
+                play_row = prow
+        elif self._playing and self._flat is None:
+            play_row = self._play_subs // max(1, self.song.speed)
+            if play_row >= pat.rows:
+                play_row = None
         for i in range(vis_rows):
             row = self.top_row + i
             if row >= pat.rows:

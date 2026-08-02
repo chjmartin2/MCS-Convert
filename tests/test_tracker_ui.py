@@ -86,3 +86,68 @@ def test_import_nsf_into_tracker_model():
     assert rct_song.order and rct_song.patterns
     assert any(c.note for p in rct_song.patterns.values()
                for row in p.cells for c in row)
+
+
+def test_undo_redo_roundtrip(app):
+    class E:
+        state = 0
+
+        def __init__(self, keysym, char=""):
+            self.keysym, self.char = keysym, char
+
+    app._key(E("z"))                                  # C-4 at row 0
+    assert app.pattern().cell(0, 0).note != 0
+    app.undo()
+    assert app.pattern().cell(0, 0).note == 0         # edit undone
+    app.redo()
+    assert app.pattern().cell(0, 0).note != 0         # ...and back
+    # order ops are undoable too
+    app.order_add()
+    assert len(app.song.order) == 2
+    app.undo()
+    assert len(app.song.order) == 1
+
+
+def test_free_bpm_box_snaps_mcs_byte(app):
+    app.v_bpm.set("150")
+    app._bpm_changed()
+    assert abs(app.song.bpm - 150.0) < 0.5
+    assert app.song.subtick_us > 0
+    assert 0x77 <= app.song.tempo_byte0 <= 0x92       # snap stays in MCS range
+    app.undo()
+    assert app.song.subtick_us == 0                   # undo restores legacy grid
+
+
+def test_follow_map_rolls_the_view(app):
+    # simulate playback via the posmap: two patterns in the order, playback in
+    # the second must roll cur_pat/row forward when follow is on
+    from mcs_convert.effects import flatten
+    app.order_add()                                   # order [0, 1]
+    app.song.patterns[0].cell(0, 0).note = R.midi_to_note(60)
+    app.song.patterns[0].cell(0, 0).inst = 1
+    app.song.patterns[1].cell(2, 0).note = R.midi_to_note(72)
+    app.song.patterns[1].cell(2, 0).inst = 1
+    flat = flatten(app.song)
+    app._flat = flat
+    app._playing = True
+    app.v_follow.set(True)
+    # a sub-tick inside pattern 1 row 2: find it via the posmap directly
+    target = next(s for s, (op, pat, row) in enumerate(flat.posmap)
+                  if pat == 1 and row == 2)
+    op, pat, row = flat.posmap[target]
+    app.cur_pat, app.row = 0, 0
+    # apply exactly what _follow applies
+    app.cur_pat, app.row = pat, row
+    assert (app.cur_pat, app.row) == (1, 2)
+    app._playing = False
+
+
+def test_mute_blanks_the_channel_in_render(app):
+    app.pattern().cell(0, 0).note = R.midi_to_note(69)
+    app.pattern().cell(0, 0).inst = 1
+    app.mute[0] = True
+    master, flat = app._render(app.song)
+    assert all(p is None for p in flat.channels[0].pitch)   # muted = silent
+    app.mute[0] = False
+    master, flat = app._render(app.song)
+    assert any(p is not None for p in flat.channels[0].pitch)

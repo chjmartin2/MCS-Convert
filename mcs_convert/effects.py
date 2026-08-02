@@ -61,6 +61,10 @@ class FlatSong:
     channels: List[FlatChannel]
     tempo_byte0: int
     subtick_s: float = 0.0       # exact period (free BPM); 0 = MCS byte grid
+    posmap: List[tuple] = field(default_factory=list)   # per sub-tick:
+    #                              (order_pos, pattern_idx, row) -- what the
+    #                              tracker highlights/follows during playback
+    #                              (speed changes and pattern breaks included)
 
     @property
     def total_subs(self) -> int:
@@ -90,6 +94,7 @@ def flatten(song: RctSong) -> FlatSong:
     chans = [FlatChannel(kind=song.channel_kind(c)) for c in range(4)]
     st = [_ChanState() for _ in range(4)]
     speed = max(1, song.speed)
+    posmap: List[tuple] = []
 
     def inst_of(c: _ChanState):
         return song.instruments.get(c.inst) or next(iter(song.instruments.values()))
@@ -135,6 +140,7 @@ def flatten(song: RctSong) -> FlatSong:
                 row_fx.append((fx, pm, trigger, cell, delay))
             # -- emit `speed` sub-ticks for this row --
             for sub in range(speed):
+                posmap.append((order_pos, song.order[order_pos], row))
                 for c in range(4):
                     fx, pm, trigger, cell, delay = row_fx[c]
                     s = st[c]
@@ -200,7 +206,7 @@ def flatten(song: RctSong) -> FlatSong:
         if brk is not None:
             start_row = brk
     return FlatSong(channels=chans, tempo_byte0=song.tempo_byte0,
-                    subtick_s=song.subtick_seconds)
+                    subtick_s=song.subtick_seconds, posmap=posmap)
 
 
 # --- preview rendering (full effect fidelity) --------------------------------
