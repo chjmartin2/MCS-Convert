@@ -1,0 +1,780 @@
+"""RCTracker — the RetroComputerist Tracker editor.
+
+A classic vertical tracker (FastTracker lineage): patterns as rows scrolling
+down, four channel columns (note / instrument / volume / effect+param per
+cell), keyboard-first entry, an order list, instruments and ornaments, live
+playback rendered through the SAME effects flattener every export uses — what
+you hear here is what DOS plays.
+
+Keys
+----
+  piano        Z S X D C V G B H N J M , (low octave)  Q 2 W 3 E R 5 T 6 Y 7 U (high)
+  A / `        note-off (===)          Del      clear cell
+  0-9 A-F      hex entry in the inst / vol / fx columns
+  arrows/Tab   move   PgUp/PgDn page   Home/End top/bottom
+  F1/F2        octave down/up          step +/- with - / =
+  F5 / F6      play song / pattern     F8  stop
+  Space        toggle edit cursor between note and fx columns
+
+Everything else is menus/panels: order list, instruments, ornaments, song
+settings, import (NSF/PT3/MCS/RCT), export (.RCT/.MCS/.COM/WAV/RCPLAY.COM).
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+from .. import rct as R
+from ..audio import WaveOutPlayer, pcm16
+from ..effects import flatten, render_flat
+
+# ---- theme ------------------------------------------------------------------
+BG = "#101014"
+BG2 = "#16161c"
+FG = "#c8c8d0"
+DIM = "#5a5a68"
+ACC = "#7fd17f"                  # RC green
+CUR = "#2a4a2a"                  # cursor cell
+ROWHL = "#1c2433"                # playing row
+BEAT = "#171d28"                 # every 4th row shade
+CHCOL = ("#e8d44d", "#e07070", "#6f9fe8", "#70d0a0")   # per-channel accents
+FONT = ("Consolas", 11)
+FONTB = ("Consolas", 11, "bold")
+
+#: piano keys -> semitone offsets from the current octave's C
+_PIANO = {"z": 0, "s": 1, "x": 2, "d": 3, "c": 4, "v": 5, "g": 6, "b": 7,
+          "h": 8, "n": 9, "j": 10, "m": 11, "comma": 12,
+          "q": 12, "2": 13, "w": 14, "3": 15, "e": 16, "r": 17, "5": 18,
+          "t": 19, "6": 20, "y": 21, "7": 22, "u": 23}
+
+_FIELDS = 5                      # note / inst / vol / fx letter / param
+_FX_KEYS = {v: i for i, v in enumerate(R.FX_LETTERS)}
+
+
+class TrackerApp:
+    """The RCTracker main window."""
+
+    def __init__(self, root: tk.Tk, path: str = None):
+        self.root = root
+        root.title("RCTracker — RetroComputerist Tracker")
+        root.configure(bg=BG)
+        self.song = R.RctSong()
+        self.path = None
+        self.cur_pat = 0             # pattern being edited
+        self.row = 0
+        self.chan = 0
+        self.field = 0               # 0 note 1 inst 2 vol 3 fx
+        self.octave = 4
+        self.step = 1
+        self.player = WaveOutPlayer()
+        self._playing = False
+        self._play_subs = 0
+        self._play_follow = None
+        self._build_ui()
+        self._bind_keys()
+        if path:
+            self.open_file(path)
+        self.refresh()
+
+    # ---- UI construction ----------------------------------------------------
+
+    def _build_ui(self):
+        root = self.root
+        # menu
+        m = tk.Menu(root, bg=BG2, fg=FG, activebackground=CUR)
+        fm = tk.Menu(m, tearoff=0, bg=BG2, fg=FG, activebackground=CUR)
+        fm.add_command(label="New", command=self.new_song, accelerator="Ctrl+N")
+        fm.add_command(label="Open… (.rct)", command=self.open_dialog,
+                       accelerator="Ctrl+O")
+        fm.add_command(label="Import… (.nsf/.pt3/.mcs)", command=self.import_dialog)
+        fm.add_separator()
+        fm.add_command(label="Save .RCT", command=self.save, accelerator="Ctrl+S")
+        fm.add_command(label="Save .RCT As…", command=self.save_as)
+        fm.add_separator()
+        xm = tk.Menu(fm, tearoff=0, bg=BG2, fg=FG, activebackground=CUR)
+        xm.add_command(label="4-voice PC speaker .COM",
+                       command=lambda: self.export_com("4voice"))
+        xm.add_command(label="4-voice foreground (XT) .COM",
+                       command=lambda: self.export_com("4voice", foreground=True))
+        xm.add_command(label="Tandy / PCjr .COM",
+                       command=lambda: self.export_com("tandy"))
+        xm.add_command(label="1-voice PC speaker .COM",
+                       command=lambda: self.export_com("1voice"))
+        xm.add_command(label=".MCS song", command=self.export_mcs)
+        xm.add_command(label="WAV render", command=self.export_wav)
+        xm.add_separator()
+        xm.add_command(label="RCPLAY.COM (DOS player)", command=self.export_rcplay)
+        fm.add_cascade(label="Export", menu=xm)
+        fm.add_separator()
+        fm.add_command(label="Quit", command=root.destroy)
+        m.add_cascade(label="File", menu=fm)
+        pm = tk.Menu(m, tearoff=0, bg=BG2, fg=FG, activebackground=CUR)
+        pm.add_command(label="Play song", command=self.play_song, accelerator="F5")
+        pm.add_command(label="Play pattern", command=self.play_pattern,
+                       accelerator="F6")
+        pm.add_command(label="Stop", command=self.stop, accelerator="F8")
+        m.add_cascade(label="Play", menu=pm)
+        root.config(menu=m)
+
+        # top bar: song settings
+        top = tk.Frame(root, bg=BG)
+        top.pack(fill="x", padx=6, pady=(6, 2))
+        self.v_title = tk.StringVar(value=self.song.title)
+        self.v_tempo = tk.IntVar(value=self.song.tempo_byte0)
+        self.v_speed = tk.IntVar(value=self.song.speed)
+        self.v_mode = tk.StringVar(value="3 tone + noise")
+        self.v_status = tk.StringVar(value="ready")
+
+        def lab(text):
+            return tk.Label(top, text=text, bg=BG, fg=DIM, font=FONT)
+
+        lab("Title").pack(side="left")
+        tk.Entry(top, textvariable=self.v_title, width=18, bg=BG2, fg=FG,
+                 insertbackground=FG, font=FONT).pack(side="left", padx=(2, 10))
+        lab("Tempo").pack(side="left")
+        tk.Spinbox(top, from_=0x77, to=0x92, increment=3,
+                   textvariable=self.v_tempo, width=5, bg=BG2, fg=FG,
+                   font=FONT, command=self._settings_changed
+                   ).pack(side="left", padx=(2, 10))
+        lab("Speed").pack(side="left")
+        tk.Spinbox(top, from_=1, to=32, textvariable=self.v_speed, width=3,
+                   bg=BG2, fg=FG, font=FONT, command=self._settings_changed
+                   ).pack(side="left", padx=(2, 10))
+        lab("Channels").pack(side="left")
+        mode = ttk.Combobox(top, textvariable=self.v_mode, width=14,
+                            state="readonly",
+                            values=["3 tone + noise", "4 tone"])
+        mode.pack(side="left", padx=(2, 10))
+        mode.bind("<<ComboboxSelected>>", lambda e: self._settings_changed())
+        self.l_oct = tk.Label(top, text="oct 4  step 1", bg=BG, fg=ACC, font=FONTB)
+        self.l_oct.pack(side="right")
+
+        body = tk.Frame(root, bg=BG)
+        body.pack(fill="both", expand=True, padx=6, pady=2)
+
+        # left rail: order list + pattern picker
+        rail = tk.Frame(body, bg=BG)
+        rail.pack(side="left", fill="y", padx=(0, 6))
+        tk.Label(rail, text="ORDER", bg=BG, fg=ACC, font=FONTB).pack(anchor="w")
+        of = tk.Frame(rail, bg=BG)
+        of.pack(fill="y", expand=False)
+        self.orderbox = tk.Listbox(of, width=9, height=14, bg=BG2, fg=FG,
+                                   font=FONT, selectbackground=CUR,
+                                   exportselection=False)
+        self.orderbox.pack(side="left", fill="y")
+        self.orderbox.bind("<<ListboxSelect>>", self._order_pick)
+        ob = tk.Frame(rail, bg=BG)
+        ob.pack(fill="x")
+        for txt, cmd in (("+", self.order_add), ("−", self.order_del),
+                         ("↑", lambda: self.order_move(-1)),
+                         ("↓", lambda: self.order_move(1)),
+                         ("pat#", self.order_set)):
+            tk.Button(ob, text=txt, command=cmd, bg=BG2, fg=FG, width=3,
+                      relief="flat", activebackground=CUR).pack(side="left")
+        tk.Label(rail, text="INSTRUMENTS", bg=BG, fg=ACC, font=FONTB
+                 ).pack(anchor="w", pady=(8, 0))
+        self.instbox = tk.Listbox(rail, width=16, height=8, bg=BG2, fg=FG,
+                                  font=FONT, selectbackground=CUR,
+                                  exportselection=False)
+        self.instbox.pack()
+        self.instbox.bind("<Double-Button-1>", lambda e: self.edit_instrument())
+        ib = tk.Frame(rail, bg=BG)
+        ib.pack(fill="x")
+        tk.Button(ib, text="edit", command=self.edit_instrument, bg=BG2, fg=FG,
+                  relief="flat", activebackground=CUR).pack(side="left")
+        tk.Button(ib, text="+", command=self.add_instrument, bg=BG2, fg=FG,
+                  relief="flat", activebackground=CUR).pack(side="left")
+        tk.Button(ib, text="ornaments", command=self.edit_ornaments, bg=BG2,
+                  fg=FG, relief="flat", activebackground=CUR).pack(side="left")
+
+        # the pattern grid
+        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.bind("<Button-1>", self._click)
+        self.canvas.bind("<MouseWheel>",
+                         lambda e: self.move(-3 if e.delta > 0 else 3, 0))
+
+        status = tk.Label(root, textvariable=self.v_status, bg=BG2, fg=DIM,
+                          anchor="w", font=FONT)
+        status.pack(fill="x", side="bottom")
+
+    def _bind_keys(self):
+        r = self.root
+        r.bind("<Up>", lambda e: self.move(-1, 0))
+        r.bind("<Down>", lambda e: self.move(1, 0))
+        r.bind("<Left>", lambda e: self.move(0, -1))
+        r.bind("<Right>", lambda e: self.move(0, 1))
+        r.bind("<Tab>", self._tab)
+        r.bind("<Prior>", lambda e: self.move(-8, 0))
+        r.bind("<Next>", lambda e: self.move(8, 0))
+        r.bind("<Home>", lambda e: self.jump(0))
+        r.bind("<End>", lambda e: self.jump(self.pattern().rows - 1))
+        r.bind("<Delete>", lambda e: self.clear_cell())
+        r.bind("<F1>", lambda e: self.set_octave(self.octave - 1))
+        r.bind("<F2>", lambda e: self.set_octave(self.octave + 1))
+        r.bind("<F5>", lambda e: self.play_song())
+        r.bind("<F6>", lambda e: self.play_pattern())
+        r.bind("<F8>", lambda e: self.stop())
+        r.bind("<minus>", lambda e: self.set_step(self.step - 1))
+        r.bind("<equal>", lambda e: self.set_step(self.step + 1))
+        r.bind("<space>", self._space)
+        r.bind("<Control-n>", lambda e: self.new_song())
+        r.bind("<Control-o>", lambda e: self.open_dialog())
+        r.bind("<Control-s>", lambda e: self.save())
+        r.bind("<Key>", self._key)
+
+    # ---- model helpers -------------------------------------------------------
+
+    def pattern(self) -> R.RctPattern:
+        return self.song.patterns.setdefault(self.cur_pat, R.RctPattern())
+
+    def cell(self) -> R.RctCell:
+        return self.pattern().cell(self.row, self.chan)
+
+    def _settings_changed(self):
+        self.song.title = self.v_title.get()[:32]
+        self.song.tempo_byte0 = int(self.v_tempo.get())
+        self.song.speed = max(1, min(32, int(self.v_speed.get())))
+        self.song.channel_mode = (R.MODE_4TONE if self.v_mode.get() == "4 tone"
+                                  else R.MODE_3TONE_NOISE)
+        self.refresh()
+
+    # ---- navigation ----------------------------------------------------------
+
+    def move(self, drow: int, dfield: int):
+        pat = self.pattern()
+        if drow:
+            self.row = (self.row + drow) % pat.rows
+        if dfield:
+            f = self.chan * _FIELDS + self.field + dfield
+            f %= 4 * _FIELDS
+            self.chan, self.field = divmod(f, _FIELDS)
+        self.refresh()
+        return "break"
+
+    def _tab(self, _e):
+        self.chan = (self.chan + 1) % 4
+        self.field = 0
+        self.refresh()
+        return "break"
+
+    def jump(self, row: int):
+        self.row = max(0, min(self.pattern().rows - 1, row))
+        self.refresh()
+
+    def set_octave(self, o: int):
+        self.octave = max(0, min(7, o))
+        self.refresh()
+
+    def set_step(self, s: int):
+        self.step = max(0, min(16, s))
+        self.refresh()
+
+    def _space(self, _e):
+        self.field = 3 if self.field == 0 else 0     # hop note <-> fx
+        self.refresh()
+        return "break"
+
+    def _click(self, e):
+        # canvas cell geometry mirrors _draw
+        row = (e.y - 24) // 18 + self.top_row
+        col = (e.x - 40) // self.chan_w
+        if 0 <= col < 4 and 0 <= row < self.pattern().rows:
+            self.row, self.chan = row, col
+            self.refresh()
+
+    # ---- editing -------------------------------------------------------------
+
+    def _key(self, e):
+        if e.state & 0x4:                            # Ctrl combos handled above
+            return None
+        ks = e.keysym.lower()
+        if self.field == 0:                          # note column
+            if ks in ("a", "grave"):
+                self.cell().note = R.NOTE_OFF
+                return self._advance()
+            if ks in _PIANO:
+                note = 12 * self.octave + _PIANO[ks] + 1
+                c = self.cell()
+                c.note = max(1, min(R.NOTE_MAX, note))
+                if c.inst == 0:
+                    c.inst = self._sel_inst()
+                return self._advance()
+            return None
+        ch = e.char.lower()
+        if not ch:
+            return None
+        c = self.cell()
+        if self.field == 3:                          # effect LETTER column
+            up = ch.upper()
+            if up in _FX_KEYS and up != "-":         # A 1 2 3 4 V C D O F B
+                c.fx = _FX_KEYS[up]
+            elif ch in ("-", "."):
+                c.fx = c.param = 0
+            else:
+                return None
+        elif ch in "0123456789abcdef-.":
+            if self.field == 1:                      # instrument (hex nibble)
+                c.inst = int(ch, 16) if ch in "0123456789abcdef" else 0
+            elif self.field == 2:                    # volume 0-F
+                c.vol = (int(ch, 16) + 1) if ch in "0123456789abcdef" else 0
+            else:                                    # param: hex digits roll in
+                c.param = (0 if ch in "-." else
+                           ((c.param << 4) & 0xFF) | int(ch, 16))
+        else:
+            return None
+        self.refresh()
+        return "break"
+
+    def _advance(self):
+        self.row = (self.row + self.step) % self.pattern().rows
+        self.refresh()
+        return "break"
+
+    def _sel_inst(self) -> int:
+        sel = self.instbox.curselection()
+        keys = sorted(self.song.instruments)
+        return keys[sel[0]] if sel and sel[0] < len(keys) else (keys[0] if keys else 1)
+
+    def clear_cell(self):
+        pat = self.pattern()
+        pat.cells[self.row][self.chan] = R.RctCell()
+        self._advance()
+
+    # ---- order list ----------------------------------------------------------
+
+    def _order_pick(self, _e):
+        sel = self.orderbox.curselection()
+        if sel:
+            self.cur_pat = self.song.order[sel[0]]
+            self.row = 0
+            self.refresh()
+
+    def order_add(self):
+        new = max(self.song.patterns) + 1 if len(self.song.patterns) < 256 else None
+        if new is None:
+            return
+        self.song.patterns[new] = R.RctPattern(rows=self.pattern().rows)
+        self.song.order.append(new)
+        self.cur_pat = new
+        self.refresh()
+
+    def order_del(self):
+        if len(self.song.order) > 1:
+            sel = self.orderbox.curselection()
+            i = sel[0] if sel else len(self.song.order) - 1
+            self.song.order.pop(i)
+            self.refresh()
+
+    def order_move(self, d: int):
+        sel = self.orderbox.curselection()
+        if not sel:
+            return
+        i, j = sel[0], sel[0] + d
+        if 0 <= j < len(self.song.order):
+            o = self.song.order
+            o[i], o[j] = o[j], o[i]
+            self.refresh()
+            self.orderbox.selection_set(j)
+
+    def order_set(self):
+        sel = self.orderbox.curselection()
+        if not sel:
+            return
+        n = simpledialog.askinteger("Pattern", "pattern # (0-255):",
+                                    parent=self.root, minvalue=0, maxvalue=255)
+        if n is None:
+            return
+        self.song.patterns.setdefault(n, R.RctPattern(rows=self.pattern().rows))
+        self.song.order[sel[0]] = n
+        self.cur_pat = n
+        self.refresh()
+
+    # ---- instruments / ornaments --------------------------------------------
+
+    def add_instrument(self):
+        free = [i for i in range(1, 16) if i not in self.song.instruments]
+        if free:
+            self.song.instruments[free[0]] = R.RctInstrument()
+            self.refresh()
+
+    def edit_instrument(self):
+        keys = sorted(self.song.instruments)
+        sel = self.instbox.curselection()
+        if not (keys and sel):
+            return
+        idx = keys[sel[0]]
+        ins = self.song.instruments[idx]
+        d = tk.Toplevel(self.root)
+        d.title(f"Instrument {idx:X}")
+        d.configure(bg=BG)
+        tk.Label(d, text="Name", bg=BG, fg=FG, font=FONT).grid(row=0, column=0)
+        vn = tk.StringVar(value=ins.name)
+        tk.Entry(d, textvariable=vn, bg=BG2, fg=FG, insertbackground=FG,
+                 font=FONT).grid(row=0, column=1)
+        tk.Label(d, text="Waveform", bg=BG, fg=FG, font=FONT).grid(row=1, column=0)
+        vw = tk.StringVar(value=ins.waveform)
+        ttk.Combobox(d, textvariable=vw, values=list(R.WAVEFORM_IDS),
+                     state="readonly").grid(row=1, column=1)
+        tk.Label(d, text="Volume 0-15", bg=BG, fg=FG, font=FONT).grid(row=2, column=0)
+        vv = tk.IntVar(value=ins.volume)
+        tk.Spinbox(d, from_=0, to=15, textvariable=vv, width=4, bg=BG2,
+                   fg=FG, font=FONT).grid(row=2, column=1)
+        tk.Label(d, text="Ornament (0=none)", bg=BG, fg=FG, font=FONT
+                 ).grid(row=3, column=0)
+        vo = tk.IntVar(value=ins.ornament)
+        tk.Spinbox(d, from_=0, to=15, textvariable=vo, width=4, bg=BG2,
+                   fg=FG, font=FONT).grid(row=3, column=1)
+
+        def ok():
+            ins.name = vn.get()[:16]
+            ins.waveform = vw.get()
+            ins.volume = int(vv.get()) & 0x0F
+            ins.ornament = int(vo.get())
+            d.destroy()
+            self.refresh()
+        tk.Button(d, text="OK", command=ok, bg=BG2, fg=FG).grid(row=4, column=1)
+
+    def edit_ornaments(self):
+        cur = "; ".join(f"{i}: {','.join(map(str, o.steps))} loop {o.loop}"
+                        for i, o in sorted(self.song.ornaments.items())) or "(none)"
+        s = simpledialog.askstring(
+            "Ornaments", "index: steps loop N (semicolon-separated)\n"
+            "e.g.  1: 0,12 loop 0; 2: 0,4,7 loop 0\ncurrent: " + cur,
+            parent=self.root)
+        if s is None:
+            return
+        try:
+            orns = {}
+            for part in filter(None, (p.strip() for p in s.split(";"))):
+                head, _, tail = part.partition(":")
+                steps_s, _, loop_s = tail.partition("loop")
+                steps = [int(x) for x in steps_s.replace(" ", "").split(",") if x]
+                orns[int(head)] = R.RctOrnament(
+                    steps=steps or [0], loop=int(loop_s or 0))
+            self.song.ornaments = orns
+        except (ValueError, KeyError) as exc:
+            messagebox.showerror("Ornaments", f"could not parse: {exc}")
+        self.refresh()
+
+    # ---- playback ------------------------------------------------------------
+
+    def _render(self, song: R.RctSong):
+        flat = flatten(song)
+        master, _ = render_flat(flat, sr=44100)
+        return master, flat
+
+    def play_song(self):
+        self.stop()
+        try:
+            master, flat = self._render(self.song)
+        except Exception as exc:
+            messagebox.showerror("Play", str(exc))
+            return
+        self._play_total = flat.total_subs
+        self._sub_s = flat.subtick_seconds
+        self.player.play(pcm16(master), 44100)
+        self._playing = True
+        self._follow()
+
+    def play_pattern(self):
+        self.stop()
+        solo = R.RctSong(channel_mode=self.song.channel_mode,
+                         tempo_byte0=self.song.tempo_byte0,
+                         speed=self.song.speed)
+        solo.patterns = {0: self.pattern()}
+        solo.order = [0]
+        solo.instruments = self.song.instruments
+        solo.ornaments = self.song.ornaments
+        try:
+            master, flat = self._render(solo)
+        except Exception as exc:
+            messagebox.showerror("Play", str(exc))
+            return
+        self._play_total = flat.total_subs
+        self._sub_s = flat.subtick_seconds
+        self.player.play(pcm16(master), 44100)
+        self._playing = True
+        self._follow()
+
+    def _follow(self):
+        if not self._playing:
+            return
+        pos = self.player.position_seconds()
+        sub = int(pos / self._sub_s) if self._sub_s else 0
+        self._play_subs = sub
+        if sub >= self._play_total:
+            self.stop()
+            return
+        self.refresh()
+        self._play_follow = self.root.after(50, self._follow)
+
+    def stop(self):
+        self._playing = False
+        if self._play_follow:
+            self.root.after_cancel(self._play_follow)
+            self._play_follow = None
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+        self.refresh()
+
+    # ---- file ops ------------------------------------------------------------
+
+    def new_song(self):
+        self.stop()
+        self.song = R.RctSong()
+        self.path = None
+        self.cur_pat = self.row = self.chan = self.field = 0
+        self._sync_settings()
+        self.refresh()
+
+    def open_dialog(self):
+        p = filedialog.askopenfilename(filetypes=[("RCT tracker", "*.rct")])
+        if p:
+            self.open_file(p)
+
+    def open_file(self, path: str):
+        self.stop()
+        try:
+            self.song = R.load(path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Open", str(exc))
+            return
+        self.path = path
+        self.cur_pat = self.song.order[0] if self.song.order else 0
+        self.row = self.chan = self.field = 0
+        self._sync_settings()
+        self.refresh()
+
+    def import_dialog(self):
+        p = filedialog.askopenfilename(filetypes=[
+            ("chiptunes", "*.nsf;*.pt3;*.mcs;*.mcd"), ("all", "*.*")])
+        if not p:
+            return
+        self.stop()
+        from ..convert import song_to_rct
+        ext = p.lower().rsplit(".", 1)[-1]
+        try:
+            if ext == "nsf":
+                from ..nsf.extract import extract_song
+                sub = simpledialog.askinteger("NSF", "subsong #:",
+                                              parent=self.root, minvalue=1) or 1
+                song, byte0 = extract_song(p, subsong=sub)
+            elif ext == "pt3":
+                from ..pt3 import parse_pt3
+                with open(p, "rb") as fh:
+                    song, byte0 = parse_pt3(fh.read())
+            else:
+                from ..mcs.reader import parse
+                from .export import nearest_tempo_byte0
+                song = parse(p)
+                byte0 = nearest_tempo_byte0(song.tempo_tick_seconds)
+            self.song = song_to_rct(song, tempo_byte0=byte0)
+        except Exception as exc:
+            messagebox.showerror("Import", str(exc))
+            return
+        self.path = None
+        self.cur_pat = self.song.order[0]
+        self.row = self.chan = 0
+        self._sync_settings()
+        self.refresh()
+        self.v_status.set(f"imported {p}")
+
+    def save(self):
+        if not self.path:
+            return self.save_as()
+        self._do_save(self.path)
+
+    def save_as(self):
+        p = filedialog.asksaveasfilename(defaultextension=".rct",
+                                         filetypes=[("RCT tracker", "*.rct")])
+        if p:
+            self._do_save(p)
+
+    def _do_save(self, path: str):
+        self._settings_changed()
+        from ..streams import perf_chunks
+        try:
+            self.song.perf = perf_chunks(self.song)   # bake DOS streams on save
+            R.save(path, self.song)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Save", str(exc))
+            return
+        self.path = path
+        self.v_status.set(f"saved {path} (with DOS performance streams)")
+
+    def export_com(self, mode: str, foreground: bool = False):
+        from ..streams import build_com
+        p = filedialog.asksaveasfilename(defaultextension=".com",
+                                         filetypes=[("DOS player", "*.com")])
+        if not p:
+            return
+        try:
+            ts = 5 if (mode == "4voice" and not foreground) else 0
+            data = build_com(self.song, mode, foreground=foreground,
+                             text_scope=ts)
+            with open(p, "wb") as fh:
+                fh.write(data)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export", str(exc))
+            return
+        self.v_status.set(f"wrote {p} ({len(data)} bytes)")
+
+    def export_mcs(self):
+        p = filedialog.asksaveasfilename(defaultextension=".mcs",
+                                         filetypes=[("MCS song", "*.mcs")])
+        if not p:
+            return
+        from ..convert import rct_to_universal
+        from ..mcs.encode import encode_song
+        from ..retrack import retrack
+        try:
+            data = encode_song(retrack(rct_to_universal(self.song), "mcs"),
+                               tempo_byte0=self.song.tempo_byte0, cap=True)
+            with open(p, "wb") as fh:
+                fh.write(data)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export", str(exc))
+            return
+        self.v_status.set(f"wrote {p} ({len(data)} bytes)")
+
+    def export_wav(self):
+        p = filedialog.asksaveasfilename(defaultextension=".wav",
+                                         filetypes=[("WAV", "*.wav")])
+        if not p:
+            return
+        from ..audio import wav_bytes
+        try:
+            master, _ = self._render(self.song)
+            with open(p, "wb") as fh:
+                fh.write(wav_bytes(pcm16(master), 44100))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export", str(exc))
+            return
+        self.v_status.set(f"wrote {p}")
+
+    def export_rcplay(self):
+        p = filedialog.asksaveasfilename(defaultextension=".com",
+                                         initialfile="RCPLAY.COM",
+                                         filetypes=[("DOS player", "*.com")])
+        if not p:
+            return
+        from ..rcplay_dos import save_rcplay
+        try:
+            n = save_rcplay(p)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export", str(exc))
+            return
+        self.v_status.set(f"wrote {p} ({n} bytes) — put it next to your .RCT "
+                          f"files in DOS")
+
+    def _sync_settings(self):
+        self.v_title.set(self.song.title)
+        self.v_tempo.set(self.song.tempo_byte0)
+        self.v_speed.set(self.song.speed)
+        self.v_mode.set("4 tone" if self.song.channel_mode == R.MODE_4TONE
+                        else "3 tone + noise")
+
+    # ---- drawing -------------------------------------------------------------
+
+    top_row = 0
+    chan_w = 150
+
+    def refresh(self):
+        self.l_oct.config(text=f"oct {self.octave}  step {self.step}"
+                          + ("  ▶" if self._playing else ""))
+        # order list
+        self.orderbox.delete(0, "end")
+        for i, pnum in enumerate(self.song.order):
+            mark = "▶" if pnum == self.cur_pat else " "
+            self.orderbox.insert("end", f"{mark}{i:02X}:{pnum:02X}")
+        # instrument list
+        self.instbox.delete(0, "end")
+        for i in sorted(self.song.instruments):
+            ins = self.song.instruments[i]
+            self.instbox.insert("end", f"{i:X} {ins.name[:10]:<10}{ins.waveform[:4]}")
+        if self.song.instruments and not self.instbox.curselection():
+            self.instbox.selection_set(0)
+        self._draw()
+
+    def _draw(self):
+        cv = self.canvas
+        cv.delete("all")
+        pat = self.pattern()
+        h = max(1, cv.winfo_height() or 400)
+        vis_rows = max(8, (h - 30) // 18)
+        self.top_row = max(0, min(self.row - vis_rows // 2,
+                                  pat.rows - vis_rows))
+        # header
+        cv.create_text(20, 12, text=f"P{self.cur_pat:02X}", fill=ACC, font=FONTB)
+        names = (["CH1", "CH2", "CH3",
+                  "NSE" if self.song.channel_mode == R.MODE_3TONE_NOISE else "CH4"])
+        for c, name in enumerate(names):
+            cv.create_text(40 + c * self.chan_w + self.chan_w // 2, 12,
+                           text=name, fill=CHCOL[c], font=FONTB)
+        play_row = None
+        if self._playing:
+            # highlight the playing row inside the current pattern chain
+            sub = self._play_subs
+            offset = 0
+            for pnum in self.song.order:
+                p = self.song.patterns.get(pnum)
+                if p is None:
+                    continue
+                span = p.rows * self.song.speed
+                if sub < offset + span:
+                    if pnum == self.cur_pat:
+                        play_row = (sub - offset) // self.song.speed
+                    break
+                offset += span
+        for i in range(vis_rows):
+            row = self.top_row + i
+            if row >= pat.rows:
+                break
+            y = 24 + i * 18 + 8
+            if row == play_row:
+                cv.create_rectangle(0, y - 9, 40 + 4 * self.chan_w, y + 9,
+                                    fill=ROWHL, width=0)
+            elif row % 4 == 0:
+                cv.create_rectangle(0, y - 9, 40 + 4 * self.chan_w, y + 9,
+                                    fill=BEAT, width=0)
+            cv.create_text(20, y, text=f"{row:02X}", fill=DIM, font=FONT)
+            for c in range(4):
+                cell = pat.cell(row, c)
+                x0 = 40 + c * self.chan_w
+                if row == self.row and c == self.chan:
+                    fx0 = x0 + (0, 46, 64, 84, 100)[self.field]
+                    fx1 = x0 + (44, 62, 82, 98, 128)[self.field]
+                    cv.create_rectangle(fx0, y - 9, fx1, y + 9, fill=CUR, width=0)
+                note = R.note_name(cell.note)
+                inst = f"{cell.inst:X}" if cell.inst else "."
+                vol = f"{cell.vol - 1:X}" if cell.vol else "."
+                fxl = R.FX_LETTERS[cell.fx] if cell.fx else "."
+                fxp = f"{cell.param:02X}" if (cell.fx or cell.param) else ".."
+                colour = CHCOL[c] if cell.note else FG if not cell.empty else DIM
+                cv.create_text(x0 + 22, y, text=note, fill=colour, font=FONT)
+                cv.create_text(x0 + 54, y, text=inst, fill=FG if cell.inst else DIM,
+                               font=FONT)
+                cv.create_text(x0 + 73, y, text=vol, fill=FG if cell.vol else DIM,
+                               font=FONT)
+                cv.create_text(x0 + 91, y, text=fxl,
+                               fill=ACC if cell.fx else DIM, font=FONT)
+                cv.create_text(x0 + 112, y, text=fxp,
+                               fill=ACC if cell.fx else DIM, font=FONT)
+
+
+def main(argv=None) -> int:
+    import sys
+    args = list(argv if argv is not None else sys.argv[1:])
+    root = tk.Tk()
+    TrackerApp(root, path=args[0] if args else None)
+    root.geometry("980x640")
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

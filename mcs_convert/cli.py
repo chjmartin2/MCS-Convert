@@ -162,6 +162,11 @@ def _com_target(args) -> "str | None":
     return None
 
 
+def _cmd_tracker(args) -> int:
+    from .gui.tracker import main as tracker_main
+    return tracker_main([args.file] if args.file else [])
+
+
 def _cmd_rcplay(args) -> int:
     from .rcplay_dos import save_rcplay
     n = save_rcplay(args.output)
@@ -188,6 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_play = sub.add_parser("play", help="open the MCS/MCD viewer + player GUI")
     p_play.add_argument("file", nargs="?", help="optional .mcs/.mcd file to open")
     p_play.set_defaults(func=_cmd_play)
+
+    p_trk = sub.add_parser("tracker",
+                           help="open RCTracker, the .RCT tracker editor")
+    p_trk.add_argument("file", nargs="?", help="optional .rct file to open")
+    p_trk.set_defaults(func=_cmd_tracker)
 
     p_rcp = sub.add_parser("rcplay",
                            help="write RCPLAY.COM, the universal DOS .RCT "
