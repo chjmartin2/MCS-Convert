@@ -68,20 +68,20 @@ generator into one coherent product family around a **new native format**:
 ## Phases (commit each)
 
 - [x] **0. v1.1.0 GitHub release** — capture the pre-rebuild state.
-- [ ] **1. Format**: docs/RCT-FORMAT.md spec; rct.py dataclasses + read/write +
+- [x] **1. Format**: docs/RCT-FORMAT.md spec; rct.py dataclasses + read/write +
       byte-exact roundtrip tests.
-- [ ] **2. Effects**: effects.py flattener (all v1 effects + ornaments) with
+- [x] **2. Effects**: effects.py flattener (all v1 effects + ornaments) with
       unit tests per effect; preview rendering from flattened arrays.
-- [ ] **3. Import/Export**: universal Song ⇄ RctSong (patternize with pattern
+- [x] **3. Import/Export**: universal Song ⇄ RctSong (patternize with pattern
       dedup); PERF compilation for all targets; export paths to .MCS/.COM/WAV
       driven from an RctSong.
-- [ ] **4. RCTracker**: vertical tracker editor with keyboard entry, order
+- [x] **4. RCTracker**: vertical tracker editor with keyboard entry, order
       list, instruments/ornaments, live preview, import/export, .RCT save/load.
-- [ ] **5. RCPlay**: standalone Windows player (open/play .RCT, viz, metadata).
-- [ ] **6. RCPLAY.COM**: DOS player — loads .RCT via int 21h, walks chunks,
+- [x] **5. RCPlay**: standalone Windows player (open/play .RCT, viz, metadata).
+- [x] **6. RCPLAY.COM**: DOS player — loads .RCT via int 21h, walks chunks,
       picks PERF by target/CPU (foreground engine calibration reused), startup-
       selectable visualization; capstone-verified.
-- [ ] **7. Ship**: PyInstaller builds (build script, not committed binaries),
+- [x] **7. Ship**: PyInstaller builds (build script, not committed binaries),
       README overhaul, final test pass.
 
 ## Risks / notes

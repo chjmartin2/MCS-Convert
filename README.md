@@ -1,9 +1,39 @@
-# MCS-Convert
+# RetroComputerist Tracker (MCS-Convert)
 
-A **universal chiptune tracker and converter**, built around a byte-exact
+A **chiptune tracker for 1980s PC hardware** with its own native format —
+**`.RCT`, the RetroComputerist Tracker format** — plus standalone players for
+Windows *and* DOS, and a converter lineage built on a byte-exact
 reverse-engineering of **Will Harvey's Music Construction Set** (IBM-PC, 1984).
+
+**The product family:**
+
+| | |
+|---|---|
+| **RCTracker** | Windows editor: classic vertical tracker (4 channels — 4 tone or 3 tone + noise), PT3-style effects + ornaments, live preview, imports NSF / PT3 / MCS, exports everything below |
+| **`.RCT` format** | patterns + order + instruments + ornaments **and** precompiled per-target performance streams in one file ([spec](docs/RCT-FORMAT.md)) |
+| **RCPlay** | Windows standalone player: playlist, seek, live scopes |
+| **RCPLAY.COM** | DOS standalone player (8088+): plays any `.RCT` from disk, **auto-detects CPU speed** — a 4.77 MHz XT gets the calibrated foreground engine, faster machines get live visualizations (text monitor / VGA scopes / VU) |
+| **Exports** | original `.MCS` files, standalone `.COM` players (Tandy SN76489, 1-voice + 4-voice PC speaker, SoundBlaster DAC/DMA + OPL2 FM), WAV |
+
+Effects are baked at **sub-tick resolution** by one shared flattener, so the
+Windows preview, the WAV render, the `.COM` exports, and RCPLAY.COM all play
+the *same* slides, vibrato, and arpeggios.
+
+```powershell
+python -m mcs_convert tracker              # open RCTracker
+python -m mcs_convert rcplaywin song.rct   # open RCPlay
+python -m mcs_convert rcplay               # write RCPLAY.COM for your DOS box
+python -m mcs_convert convert game.nsf song.rct --subsong 3   # NSF -> RCT
+python -m mcs_convert convert song.rct song.com --4voice      # RCT -> DOS player
+python build_exes.py                       # RCTracker.exe + RCPlay.exe + RCPLAY.COM
+```
+
+---
+
+## The converter heritage
+
 Import NES (`.nsf`), Vortex Tracker (`.pt3`), or MCS songs into one neutral
-tracker that preserves *every* nuance — waveforms, duty cycles, per-note
+model that preserves *every* nuance — waveforms, duty cycles, per-note
 volumes, effects, a real noise voice — then **export** to any of a dozen
 targets (the original `.MCS` format, standalone DOS `.COM` players for Tandy /
 PC-speaker / SoundBlaster, or WAV), each reduced to what that hardware can
