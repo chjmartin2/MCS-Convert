@@ -204,4 +204,4 @@ def test_block_ops(app):
     app.delete_row()
     assert pat.cell(1, 0).note == R.midi_to_note(73)
     app.undo()                                        # every op is undoable
-    assert pat.cell(1, 0).note == 0
+    assert app.pattern().cell(1, 0).note == 0         # (undo swaps the song)
