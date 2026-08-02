@@ -357,6 +357,10 @@ def parse_pt3(data: bytes, percussion: str = "clicks",
     ticks_per_row, byte0 = grid if grid is not None else row_ticks_and_tempo(delay)
 
     song = Song(title=title or "PT3 module", source=f"pt3:{author}" if author else "pt3")
+    # the EXACT source tempo: a row is `delay` frames at 50 Hz spread over
+    # `ticks_per_row` 32nd-ticks. Set it so the RCT importer's arbitrary-BPM
+    # capture plays at the true speed, not the 0.042 model placeholder.
+    song.tempo_tick_seconds = (max(1, delay) / 50.0) / max(1, ticks_per_row)
     total_rows = max(c.row for c in chans)
 
     # Drum classification needs USAGE, not just the sample table: a tone+noise

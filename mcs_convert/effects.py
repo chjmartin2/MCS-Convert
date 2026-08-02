@@ -45,6 +45,12 @@ from .rct import (FX_ARP, FX_BREAK, FX_CUT, FX_DELAY, FX_NONE, FX_ORNAMENT,
 
 _CENT = 0.01                     # one cent in fractional-midi units
 
+#: per-waveform loudness in the preview mix -- pulses cut through, the triangle
+#: is a mellow bass that sits underneath, sine mid. (The DOS exports don't use
+#: this; it's the render/preview's perceptual balance.)
+_WAVE_GAIN = {"pulse12": 1.0, "pulse25": 1.0, "pulse50": 0.92, "pulse75": 1.0,
+              "square": 0.92, "triangle": 0.6, "nestri": 0.6, "sine": 0.72}
+
 
 @dataclass
 class FlatChannel:
@@ -232,7 +238,14 @@ def render_flat(flat: FlatSong, sr: int = 44100):
             b = min(total, int((s + 1) * sps * sr))
             if b <= a or ch.pitch[s] is None:
                 continue
-            amp = 0.22 * (ch.vol[s] / 15.0)
+            # perceptual balance: a full-volume TRIANGLE is a mellow bass and
+            # must sit UNDER a punchy pulse melody, not over it (a vol-15
+            # triangle drowning a vol-7 pulse was why the imported melody was
+            # "too quiet"). Weight by waveform, and lift low volumes gently
+            # (chiptune volume is heard closer to log than linear).
+            w = ch.wave[s] or "square"
+            gain = _WAVE_GAIN.get(w, 0.9)
+            amp = 0.24 * gain * (ch.vol[s] / 15.0) ** 0.7
             if ch.kind == "noise":
                 # brightness follows the pitch: high = hissy, low = rumbly
                 hold = max(1, int(sr / max(200.0, midi_to_freq(ch.pitch[s]) * 8)))

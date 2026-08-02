@@ -183,3 +183,32 @@ def test_silent_noise_keyon_is_not_a_drum_hit():
     apu.write(0x400C, 0x03)                          # envelope mode (starts at 15)
     apu.write(0x400F, 0x18)                          # audible key-on
     assert [p for _, p in apu.noise_hits] == [3, 3]  # two hits, the mute skipped
+
+
+def test_nsf_sets_real_tempo_not_the_model_default(nsf_path):
+    # the NSF importer must stamp the REAL 32nd-tick period (the beat-aligned
+    # grid tempo), not leave the 0.042 s model placeholder that made the RCT
+    # importer play imported songs ~1.5x too fast and swung the rhythm
+    from mcs_convert.mcs.reader import tick_seconds_for
+    song, byte0 = extract_song(nsf_path)
+    assert song.tempo_tick_seconds != 0.042           # not the default
+    # it agrees with the fitted MCS tempo within the design's ~5%
+    assert abs(song.tempo_tick_seconds - tick_seconds_for(byte0)) \
+        < 0.06 * tick_seconds_for(byte0)
+
+
+def test_song_to_rct_keeps_true_tempo_and_channel_identity(nsf_path):
+    from mcs_convert.convert import song_to_rct
+    from mcs_convert import rct as R
+    song, byte0 = extract_song(nsf_path)
+    rct = song_to_rct(song, tempo_byte0=byte0)
+    # exact tempo preserved (subtick_us set from the source, not derived)
+    assert rct.subtick_us > 0
+    assert abs(rct.subtick_seconds - song.tempo_tick_seconds / 4) < 1e-6
+    # <=3 tone tracks map DIRECTLY to channels: each channel uses one waveform
+    # (the triangle stays "nestri", the pulses stay pulses -- no pitch reshuffle)
+    for ci in range(3):
+        waves = {rct.instruments[c.inst].waveform
+                 for pat in rct.patterns.values() for row in pat.cells
+                 for c in [row[ci]] if c.note and c.note < 97 and c.inst}
+        assert len(waves) <= 1                        # one instrument per channel

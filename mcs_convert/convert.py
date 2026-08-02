@@ -57,7 +57,7 @@ def song_to_rct(song: Song, tempo_byte0: int = 0x80,
         rct.instruments[i] = RctInstrument(name=w, waveform=w, volume=15)
         inst_of[w] = i
 
-    # -- deal tone tracks onto 3 channels; collect noise/drum hits ------------
+    # -- map tone tracks onto 3 channels; collect noise/drum hits -------------
     tone_tracks, perc = [], []
     for t in song.tracks:
         kind = getattr(t, "kind", "tone")
@@ -66,17 +66,32 @@ def song_to_rct(song: Song, tempo_byte0: int = 0x80,
                 if not n.is_rest:
                     perc.append((n.start_tick, n.midi_note))
             continue
-        tone_tracks.append([(s, d, m, n) for (s, d, m) in
-                            _note_events([n for n in t.notes if not n.percussive])
-                            for n in [_src(t, s, m)]])
+        # each event carries its source note AND the effective waveform (a
+        # note's own duty, else the track's default -- the triangle's "nestri"
+        # lives on the track, not the note)
+        twave = t.waveform or "square"
+        tone_tracks.append(
+            [(s, d, m, n, (n.waveform or twave) if n is not None else twave)
+             for (s, d, m) in _note_events([n for n in t.notes if not n.percussive])
+             for n in [_src(t, s, m)]])
         for n in t.notes:
             if n.percussive and not n.is_rest:
                 perc.append((n.start_tick, n.midi_note))
-    chans = _allocate_voices([[e[:3] for e in tt] for tt in tone_tracks], n=3)
-    src_by = {}
-    for tt in tone_tracks:
-        for s, d, m, n in tt:
-            src_by[(s, m)] = n
+    # Keep each SOURCE channel on its own tracker channel when they fit (the
+    # usual case: NES = 2 pulse + triangle, PT3 = 3 AY voices). This preserves
+    # the instrument/duty/velocity per channel -- reshuffling by pitch scrambled
+    # the melody's waveform and buried it. Only when there are MORE tone voices
+    # than channels do we fall back to pitch allocation (a real reduction).
+    if len(tone_tracks) <= 3:
+        chans = [tone_tracks[i] if i < len(tone_tracks) else [] for i in range(3)]
+    else:
+        src_by = {}
+        for tt in tone_tracks:
+            for s, d, m, n, w in tt:
+                src_by[(s, m)] = (n, w)
+        alloc = _allocate_voices([[e[:3] for e in tt] for tt in tone_tracks], n=3)
+        chans = [[(s, d, m) + src_by.get((s, m), (None, "square"))
+                  for (s, d, m) in ch] for ch in alloc]
 
     total_ticks = max([e[0] + e[1] for ch in chans for e in ch] +
                       [t + 1 for t, _ in perc] + [1])
@@ -93,12 +108,10 @@ def song_to_rct(song: Song, tempo_byte0: int = 0x80,
         return grid[tick // _ROWS].cell(tick % _ROWS, ch)
 
     for ch, events in enumerate(chans):
-        for start, dur, midi in events:
-            src = src_by.get((start, midi))
+        for start, dur, midi, src, eff_wave in events:
             c = cell(start, ch)
             c.note = midi_to_note(midi)
-            wave = ((src.waveform if src is not None else "") or "square")
-            c.inst = inst_of.get(wave, 1)
+            c.inst = inst_of.get(eff_wave or "square", 1)
             if src is not None and src.velocity < 100:
                 c.vol = max(1, min(16, round(src.velocity * 15 / 127) + 1))
             end = start + dur

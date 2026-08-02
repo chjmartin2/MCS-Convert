@@ -376,6 +376,11 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
 
     title = header.song_name or "NSF"
     song = Song(title=f"{title} #{subsong}", source=f"nsf:{header.artist}")
+    # The REAL 32nd-tick period is the beat-aligned grid's fpt frames at the
+    # NSF play rate -- NOT the model default. Set it so downstream (the RCT
+    # importer's arbitrary-BPM capture) plays at the true source tempo instead
+    # of the 0.042 placeholder (which was 1.5x off and swung the rhythm).
+    song.tempo_tick_seconds = fpt / header.play_rate_hz
     timbres = log.timbres
     chip_info = (("nes-pulse", None), ("nes-pulse", None), ("nes-triangle", "nestri"))
     for k, (name, events) in enumerate(zip(_CHANNEL_NAMES, runs)):
@@ -389,7 +394,12 @@ def frames_to_song(header: NSFHeader, log: FrameLog, subsong: int,
             frame = min(len(timbres) - 1, int(start * fpt)) if timbres else -1
             wf, vel, effects = "", 100, {}
             if frame >= 0 and k < 2:
-                duty, vol = timbres[frame][2 * k], timbres[frame][2 * k + 1]
+                duty = timbres[frame][2 * k]         # timbre from the onset frame
+                # velocity from the note's PEAK volume, not the onset frame: the
+                # game often writes the volume a frame or two after the note, so
+                # the onset sample undershoots (Zelda's melody read 4, peaked 7)
+                f1 = min(len(timbres), max(frame + 1, int(end * fpt)))
+                vol = max(timbres[f][2 * k + 1] for f in range(frame, f1))
                 wf = ("pulse12", "pulse25", "pulse50", "pulse75")[duty & 3]
                 vel = max(10, round((vol or 15) * 100 / 15))
                 effects["duty"] = duty & 3

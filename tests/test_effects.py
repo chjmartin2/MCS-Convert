@@ -131,3 +131,24 @@ def test_render_flat_produces_audio():
     assert master.dtype.name == "float32" and len(voices) == 4
     assert (abs(master) > 0.01).any()                 # actually sounds
     assert (abs(voices[3]) > 0.001).any()             # noise channel too
+
+
+def test_render_balance_triangle_sits_under_pulse():
+    # a full-volume triangle must NOT drown a pulse at the same volume in the
+    # preview mix (that inverted balance buried imported NES melodies)
+    import numpy as np
+    from mcs_convert.effects import _WAVE_GAIN
+    assert _WAVE_GAIN["nestri"] < _WAVE_GAIN["pulse25"]
+    assert _WAVE_GAIN["triangle"] < _WAVE_GAIN["pulse12"]
+    # render a pulse and a triangle at identical volume; the pulse is louder
+    def rms_of(wave):
+        s = R.RctSong(speed=4, tempo_byte0=0x80)
+        s.instruments = {1: R.RctInstrument(waveform=wave, volume=15)}
+        pat = R.RctPattern(rows=4)
+        pat.cell(0, 0).note = R.midi_to_note(60)
+        pat.cell(0, 0).inst = 1
+        s.patterns = {0: pat}
+        s.order = [0]
+        m, v = render_flat(flatten(s), sr=8000)
+        return float(np.sqrt(np.mean(v[0] ** 2)))
+    assert rms_of("pulse25") > rms_of("nestri")
