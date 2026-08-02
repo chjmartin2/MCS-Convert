@@ -62,12 +62,24 @@ def _cmd_convert(args) -> int:
                                        drum_sound=args.drum_sound)
             if args.slow:                            # override the fitted tempo
                 byte0 = 0x77 + 3 * min(9, args.slow)  # for slow-motion study
+        elif ext == "rct":
+            from .convert import rct_to_universal
+            from .rct import load as load_rct
+            rct_song = load_rct(args.input)
+            song, byte0 = rct_to_universal(rct_song), rct_song.tempo_byte0
         else:
-            print(f"error: no importer for .{ext} (supported: .pt3, .nsf)",
+            print(f"error: no importer for .{ext} (supported: .pt3, .nsf, .rct)",
                   file=sys.stderr)
             return 1
 
-        if target:                                   # standalone DOS .COM player
+        if args.output.lower().endswith(".rct"):     # save as native tracker
+            from .convert import song_to_rct
+            from .rct import write_rct
+            from .streams import perf_chunks
+            rct_song = song_to_rct(song, tempo_byte0=byte0)
+            rct_song.perf = perf_chunks(rct_song, mix_rate=args.mix_rate)
+            data = write_rct(rct_song)
+        elif target:                                 # standalone DOS .COM player
             text_scope = (8 if args.scope_vga else 7 if args.scope_static else
                           6 if args.scope_vu else 5 if args.scope_text5 else
                           4 if args.scope_text4 else 3 if args.scope_text3 else
@@ -89,14 +101,23 @@ def _cmd_convert(args) -> int:
             if args.arp and target != "1voice":
                 raise ValueError("--arp is a 1-voice feature; use --1voice (or "
                                  "drop the .COM target for a 1-voice arp .MCS)")
-            from .dosplayer import build_com
-            data = build_com(song, target, byte0, scope=args.scope,
-                             text_scope=text_scope, mix_rate=args.mix_rate,
-                             draw_skip=args.draw_skip, fps=args.fps, mcs=args.mcs,
-                             sb=args.sb, sb_port=args.sb_port,
-                             sb_wave=args.sb_wave, spk_wave=args.spk_wave,
-                             sb_fm=args.sb_fm, foreground=args.foreground,
-                             arp=args.arp)
+            if ext == "rct":
+                # native tracker input: compile the stream straight from the
+                # flattened effects (slides/vibrato survive at full fidelity)
+                from .streams import build_com as rct_build_com
+                data = rct_build_com(rct_song, target, mix_rate=args.mix_rate,
+                                     text_scope=text_scope, scope=args.scope,
+                                     foreground=args.foreground, sb=args.sb,
+                                     sb_port=args.sb_port, fps=args.fps)
+            else:
+                from .dosplayer import build_com
+                data = build_com(song, target, byte0, scope=args.scope,
+                                 text_scope=text_scope, mix_rate=args.mix_rate,
+                                 draw_skip=args.draw_skip, fps=args.fps,
+                                 mcs=args.mcs, sb=args.sb, sb_port=args.sb_port,
+                                 sb_wave=args.sb_wave, spk_wave=args.spk_wave,
+                                 sb_fm=args.sb_fm, foreground=args.foreground,
+                                 arp=args.arp)
         else:                                        # the default .MCS song file
             # The universal Song may carry noise tracks / waveforms / effects MCS
             # can't voice — retrack() reduces to 4 square voices + drum clicks.
@@ -117,7 +138,8 @@ def _cmd_convert(args) -> int:
     with open(args.output, "wb") as fh:
         fh.write(data)
     notes = sum(1 for t in song.tracks for n in t.notes if not n.is_rest)
-    kind = f"{target} .COM player" if target else ".MCS song"
+    kind = (".RCT tracker song" if args.output.lower().endswith(".rct")
+            else f"{target} .COM player" if target else ".MCS song")
     print(f"wrote {args.output} ({len(data)} bytes, {notes} notes, "
           f"'{song.title}') - {kind}")
     if not target:
@@ -140,6 +162,13 @@ def _com_target(args) -> "str | None":
     return None
 
 
+def _cmd_rcplay(args) -> int:
+    from .rcplay_dos import save_rcplay
+    n = save_rcplay(args.output)
+    print(f"wrote {args.output} ({n} bytes) - universal DOS .RCT player")
+    return 0
+
+
 def _cmd_validate(args) -> int:
     from .mcs.validate import summary, validate
     with open(args.file, "rb") as fh:
@@ -159,6 +188,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_play = sub.add_parser("play", help="open the MCS/MCD viewer + player GUI")
     p_play.add_argument("file", nargs="?", help="optional .mcs/.mcd file to open")
     p_play.set_defaults(func=_cmd_play)
+
+    p_rcp = sub.add_parser("rcplay",
+                           help="write RCPLAY.COM, the universal DOS .RCT "
+                                "player (auto-detects CPU speed and hardware; "
+                                "run as RCPLAY SONG.RCT in DOS)")
+    p_rcp.add_argument("output", nargs="?", default="RCPLAY.COM",
+                       help="output path (default RCPLAY.COM)")
+    p_rcp.set_defaults(func=_cmd_rcplay)
 
     p_val = sub.add_parser("validate",
                            help="check a .MCS against real-MCS playback limits")

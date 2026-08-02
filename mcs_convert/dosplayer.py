@@ -23,7 +23,7 @@ Phase 2 (not here yet): "4voice" — a 1-bit PWM multiplex of the PC speaker.
 from __future__ import annotations
 
 import struct
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .audio import (_allocate_voices, _note_events, arp_pick_array,
                     midi_to_freq)
@@ -2147,12 +2147,18 @@ def _emit_draw_wait(a: "_Asm", draw_skip: int) -> None:
 
 def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
               stream: bytes, vis: str = "", draw_skip: int = 1,
-              wave: str = "square") -> bytes:
+              wave: str = "square", org: int = 0x100,
+              stream_at: Optional[int] = None) -> bytes:
     """The engine: (optionally set a graphics/text video mode), install the timer
     ISR, run — waiting for a key or redrawing the scopes — then tear down.
     Followed by the silence record and per-sub-tick event stream. `vis` is "",
-    "graphics" (mode 9) or "text" (mode 3)."""
-    a = _Asm()
+    "graphics" (mode 9) or "text" (mode 3).
+
+    `org`/`stream_at` support RCPLAY.COM's embedded-engine layout: the body is
+    assembled at an arbitrary origin with the stream label pointed at a shared
+    heap the loader fills at run time (the loader also pokes the `imm_*`-labeled
+    immediates -- total, divider -- for the loaded song)."""
+    a = _Asm(org)
     if vis:
         video_mode = (0x03 if vis.startswith("text") else 0x13 if vis == "vga"
                       else 0x09)                        # text3 / VGA13h / Tandy9
@@ -2168,9 +2174,12 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("isr")  # mov word[es:0x20], isr
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # mov [es:0x22], cs
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")   # mov ax,stream;mov[streamptr],ax
-    a.db(0xB8).bytes(struct.pack("<H", total_ticks)).db(0xA3).abs16("ticksleft")
+    a.db(0xB8)                                       # mov ax, total_ticks
+    a.label("imm_total_a"); a.bytes(struct.pack("<H", total_ticks))
+    a.db(0xA3).abs16("ticksleft")
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # mov al,0x36 ; out 0x43,al
-    a.db(0xB8).bytes(struct.pack("<H", divider))     # mov ax, divider
+    a.db(0xB8)                                       # mov ax, divider
+    a.label("imm_div"); a.bytes(struct.pack("<H", divider))
     a.db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)   # out 0x40,al;mov al,ah;out 0x40,al
     a.db(0xBE).abs16("silence").db(0xE8).rel16("playrec")    # silence the chip now
     a.db(0xFB)                                       # sti
@@ -2233,7 +2242,8 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     # reached the end -> rewind to the top and keep playing (auto-repeat). The
     # stream's last tick is the silence record, so held notes are already off; the
     # loop just re-attacks from tick 0. A keypress in the main loop still quits.
-    a.db(0xC7, 0x06).abs16("ticksleft").bytes(struct.pack("<H", total_ticks))  # mov word[ticksleft],total
+    a.db(0xC7, 0x06).abs16("ticksleft")              # mov word[ticksleft], total
+    a.label("imm_total_b"); a.bytes(struct.pack("<H", total_ticks))
     a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")   # mov word[streamptr],stream
     a.label("isr_play")
     a.db(0x8B, 0x36).abs16("streamptr")              # mov si,[streamptr]
@@ -2255,7 +2265,10 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     _emit_scope_vars(a, vis, wave)                    # shared + per-vis draw state
     # ---- appended data ------------------------------------------------------
     a.label("silence"); a.bytes(silence)
-    a.label("stream"); a.bytes(stream)
+    if stream_at is None:
+        a.label("stream"); a.bytes(stream)
+    else:
+        a.labels["stream"] = stream_at               # the loader's shared heap
     return a.resolve()
 
 
@@ -2710,7 +2723,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
                    stream: bytes, vis: str = "", draw_skip: int = 1,
                    poster: bytes = b"", mcs: bool = False, sb: bool = False,
                    sb_port: int = _SB_PORT, wave_table: bytes = b"",
-                   wave: str = "square", fm: bool = False) -> bytes:
+                   wave: str = "square", fm: bool = False, org: int = 0x100,
+                   stream_at: Optional[int] = None) -> bytes:
     """The 4-voice software-mixed PC-speaker engine. PIT ch0 fires the ISR at Fs;
     each interrupt it advances the phase accumulators (3 squares + an LFSR noise
     voice), delta-sigma modulates the summed bits to the speaker, and every
@@ -2720,8 +2734,9 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     fired by a gate edge on each 'high' sample, so every high is a fixed-width click
     (a pulse-density DAC) instead of our direct data-bit level. `vis` picks the display: a live text-mode scope
     (drawframe/blit), the 'static' full-song CGA poster (drawn once, zero runtime
-    cost -- the XT answer), or nothing. Auto-repeats; a keypress restores and exits."""
-    a = _Asm()
+    cost -- the XT answer), or nothing. Auto-repeats; a keypress restores and exits.
+    `org`/`stream_at` place the body inside RCPLAY.COM (see _assemble)."""
+    a = _Asm(org)
     static = vis == "static"
     # the "real" oscilloscope shows the ACTUAL mixed output; only possible where
     # the CPU synthesizes the samples (the SB DAC) and on the pixel display
@@ -2764,10 +2779,14 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
     # stream pointers; sampctr=1 so the first sub-tick applies immediately
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
-    a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
+    a.db(0xB8)                                       # mov ax, total_subs
+    a.label("imm_total_a"); a.bytes(_w(total_subs))
+    a.db(0xA3).abs16("ticksleft")
     a.db(0xB8).bytes(_w(1)).db(0xA3).abs16("sampctr")
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
-    a.db(0xB8).bytes(_w(divider)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
+    a.db(0xB8)                                       # mov ax, divider
+    a.label("imm_div"); a.bytes(_w(divider))
+    a.db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
     a.db(0xFB)                                        # sti
     # ---- foreground: a live scope redraws; static/none just wait for a key -----
     if vis and not static:
@@ -2864,7 +2883,8 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xA1).abs16("sampsub").db(0xA3).abs16("sampctr")   # reload sampctr
     a.db(0x83, 0x3E).abs16("ticksleft").db(0x00)     # cmp word[ticksleft],0
     a.db(0x75).rel8("sp_apply")                      # jne apply
-    a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))   # rewind (auto-repeat)
+    a.db(0xC7, 0x06).abs16("ticksleft")              # rewind (auto-repeat)
+    a.label("imm_total_b"); a.bytes(_w(total_subs))
     a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")
     a.label("sp_apply")
     a.db(0x8B, 0x36).abs16("streamptr")              # si=[streamptr]
@@ -2962,7 +2982,10 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.label("poster"); a.bytes(poster)               # the baked 320x200x4 song picture
     else:
         _emit_scope_vars(a, vis, wave)                # shared + per-vis draw state
-    a.label("stream"); a.bytes(stream)
+    if stream_at is None:
+        a.label("stream"); a.bytes(stream)
+    else:
+        a.labels["stream"] = stream_at               # the loader's shared heap
     return a.resolve()
 
 
@@ -3013,13 +3036,15 @@ def _emit_fg_body(a: "_Asm", pfx: str) -> None:
 
 
 def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
-                      fs: float) -> bytes:
+                      fs: float, org: int = 0x100,
+                      stream_at: Optional[int] = None) -> bytes:
     """MCS-style foreground 4-voice player. `subtick_div` is the PIT ch0 divider
     for the sub-tick tempo clock; `stream` is the same per-sub-tick change stream
     as _assemble_spk4 (voice|lvl<<4, inc_lo, inc_hi, viz), its increments computed
     for `fs`. Startup calibration measures the real loop speed and scales the
-    increments to it, so pitch is correct on any CPU. No display."""
-    a = _Asm()
+    increments to it, so pitch is correct on any CPU. No display.
+    `org`/`stream_at` place the body inside RCPLAY.COM (see _assemble)."""
+    a = _Asm(org)
     # calibration timing window: M silent iterations, timed on PIT ch0. Choose M
     # so a machine at the reference speed spends ~30000 PIT counts in it (fine
     # resolution, and stays inside one 65536-count ch0 period even at half speed).
@@ -3038,11 +3063,14 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
     a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
-    a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
+    a.db(0xB8)                                       # mov ax, total_subs
+    a.label("imm_total_a"); a.bytes(_w(total_subs))
+    a.db(0xA3).abs16("ticksleft")
     # ---- calibrate: time M silent loop iterations on PIT ch0 -------------------
     a.db(0xB0, 0x34).db(0xE6, _PIT_CMD)              # ch0 mode 2 (count down by 1)
     a.db(0x30, 0xC0).db(0xE6, _PIT_CH0).db(0xE6, _PIT_CH0)   # divisor 0 = 65536
-    a.db(0xBD).bytes(_w(M))                          # mov bp, M (iteration counter)
+    a.db(0xBD)                                       # mov bp, M (iteration counter)
+    a.label("imm_calM"); a.bytes(_w(M))
     a.db(0x31, 0xFF).db(0x31, 0xF6).db(0x31, 0xDB)  # di=si=bx=0 (silent accumulators)
     a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # dl = base61
     a.db(0xB0, 0x00).db(0xE6, _PIT_CMD)              # latch ch0
@@ -3058,7 +3086,8 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     # scale256 = (elapsed << 8) / elapsed_ref  (fixed-point ref_Fs / actual_Fs * 256)
     a.db(0x88, 0xE2).db(0xB6, 0x00)                  # mov dl,ah; mov dh,0
     a.db(0x88, 0xC4).db(0x30, 0xC0)                  # mov ah,al; xor al,al  (DX:AX = elapsed<<8)
-    a.db(0xB9).bytes(_w(elapsed_ref))                # mov cx, elapsed_ref
+    a.db(0xB9)                                       # mov cx, elapsed_ref
+    a.label("imm_calref"); a.bytes(_w(elapsed_ref))
     a.db(0xF7, 0xF1)                                 # div cx  (AX = scale256)
     a.db(0x09, 0xC0).db(0x75, 0x03).db(0xB8, 0x01, 0x00)   # or ax,ax; jnz +3; mov ax,1
     a.db(0xA3).abs16("scale256")                     # [scale256] = ax
@@ -3067,7 +3096,9 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("tisr")  # [es:0x20] = tempo ISR
     a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3 (the tempo clock)
-    a.db(0xB8).bytes(_w(subtick_div)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
+    a.db(0xB8)                                       # mov ax, subtick divider
+    a.label("imm_div"); a.bytes(_w(subtick_div))
+    a.db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
     a.db(0x31, 0xED).db(0x31, 0xFF).db(0x31, 0xF6).db(0x31, 0xDB)   # bp=di=si=bx=0
     a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # dl = base61
     a.db(0xFB)                                        # sti
@@ -3107,7 +3138,8 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0xFF, 0x0E).abs16("ticksleft")              # dec word[ticksleft]
     a.db(0x75).rel8("tdone")                         # jnz tdone (not end of song)
     a.db(0xC7, 0x06).abs16("streamptr").abs16("stream")      # rewind to the top
-    a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))
+    a.db(0xC7, 0x06).abs16("ticksleft")
+    a.label("imm_total_b"); a.bytes(_w(total_subs))
     a.label("tdone")
     # quit when a key is waiting in the BIOS buffer (head != tail). Letting BIOS
     # own the keyboard sidesteps the make/break/ack pitfalls of a custom INT 9 --
@@ -3133,7 +3165,10 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.label("nlfsr"); a.bytes(_w(_NOISE_SEED))       # noise LFSR state (nonzero)
     a.label("incaddr")                               # voice -> address of its self-mod inc
     a.abs16("fginc0"); a.abs16("fginc1"); a.abs16("fginc2"); a.abs16("fgninc")
-    a.label("stream"); a.bytes(stream)
+    if stream_at is None:
+        a.label("stream"); a.bytes(stream)
+    else:
+        a.labels["stream"] = stream_at               # the loader's shared heap
     return a.resolve()
 
 

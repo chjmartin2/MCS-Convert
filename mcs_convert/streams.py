@@ -216,13 +216,19 @@ def perf_chunks(song: RctSong, mix_rate: Optional[int] = None) -> Dict[int, byte
     samps = max(1, min(65535, round(fs * subtick_s)))
     sdiv = _subtick_divider(song.tempo_byte0)
 
-    s4, t4 = spk4_stream(flat, fs)
+    def _sil(rec):                                   # trailing silence sub-tick,
+        return bytes([len(rec)]) + b"".join(          # so auto-repeat rewinds from
+            bytes([p, v]) for p, v in rec)            # a quiet state (like build_com)
+
+    s4, t4 = spk4_stream(flat, fs)                    # (has its own all-off tail)
     s1, t1 = mono_stream(flat, arp=True)
     st, tt = tandy_stream(flat)
     return {
         PERF_4VOICE: make_perf(PERF_4VOICE, div4, samps, t4, s4),
-        PERF_1VOICE: make_perf(PERF_1VOICE, sdiv, 1, t1, s1),
-        PERF_TANDY: make_perf(PERF_TANDY, sdiv, 1, tt, st),
+        PERF_1VOICE: make_perf(PERF_1VOICE, sdiv, 1, t1 + 1,
+                               s1 + _sil(D._spk_note_off())),
+        PERF_TANDY: make_perf(PERF_TANDY, sdiv, 1, tt + 1,
+                              st + _sil(D._tandy_silence())),
     }
 
 
