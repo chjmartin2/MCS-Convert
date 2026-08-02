@@ -852,36 +852,22 @@ class TrackerApp:
     def import_dialog(self):
         p = filedialog.askopenfilename(filetypes=[
             ("chiptunes", "*.nsf;*.pt3;*.mcs;*.mcd"), ("all", "*.*")])
-        if not p:
-            return
-        self.stop()
-        from ..convert import song_to_rct
-        ext = p.lower().rsplit(".", 1)[-1]
-        try:
-            if ext == "nsf":
-                from ..nsf.extract import extract_song
-                sub = simpledialog.askinteger("NSF", "subsong #:",
-                                              parent=self.root, minvalue=1) or 1
-                song, byte0 = extract_song(p, subsong=sub)
-            elif ext == "pt3":
-                from ..pt3 import parse_pt3
-                with open(p, "rb") as fh:
-                    song, byte0 = parse_pt3(fh.read())
-            else:
-                from ..mcs.reader import parse
-                from .export import nearest_tempo_byte0
-                song = parse(p)
-                byte0 = nearest_tempo_byte0(song.tempo_tick_seconds)
-            self.song = song_to_rct(song, tempo_byte0=byte0)
-        except Exception as exc:
-            messagebox.showerror("Import", str(exc))
-            return
+        if p:
+            self.stop()
+            _ImportDialog(self, p)
+
+    def _load_import(self, rct_song, source: str):
+        """Called by the import dialog with a finished RctSong."""
+        self._checkpoint()
+        self.song = rct_song
         self.path = None
         self.cur_pat = self.song.order[0]
         self.row = self.chan = 0
+        self.mute = [False] * 4
         self._sync_settings()
         self.refresh()
-        self.v_status.set(f"imported {p}")
+        self.v_status.set(f"imported {source} — {self.song.bpm:.1f} BPM "
+                          f"(exact tempo preserved)")
 
     def save(self):
         if not self.path:
@@ -1076,6 +1062,126 @@ class TrackerApp:
                                fill=ACC if cell.fx else DIM, font=FONT)
                 cv.create_text(x0 + 112, y, text=fxp,
                                fill=ACC if cell.fx else DIM, font=FONT)
+
+
+class _ImportDialog(tk.Toplevel):
+    """Import options for NSF / PT3 / MCS: subsong, percussion handling, drop
+    noise, with per-channel note-count stats and an audition button. Preserves
+    the source's exact tempo (song_to_rct sets subtick_us)."""
+
+    _PERC = {"two-tone clicks": ("clicks", "auto"),
+             "wood block": ("clicks", "block"),
+             "as written (pitched)": ("pitched", "auto"),
+             "drop": ("drop", "auto")}
+
+    def __init__(self, app: "TrackerApp", path: str):
+        super().__init__(app.root)
+        self.app = app
+        self.path = path
+        self.ext = path.lower().rsplit(".", 1)[-1]
+        self.title(f"Import — {path.rsplit('/', 1)[-1]}")
+        self.configure(bg=BG)
+        self._preview = None
+        r = 0
+        tk.Label(self, text=path, bg=BG, fg=ACC, font=FONT, wraplength=380,
+                 anchor="w").grid(row=r, column=0, columnspan=2, sticky="w",
+                                  padx=8, pady=(8, 4))
+        r += 1
+        self.v_sub = tk.IntVar(value=1)
+        if self.ext == "nsf":
+            tk.Label(self, text="Subsong #", bg=BG, fg=FG, font=FONT).grid(
+                row=r, column=0, sticky="w", padx=8)
+            tk.Spinbox(self, from_=1, to=255, textvariable=self.v_sub, width=5,
+                       bg=BG2, fg=FG, font=FONT, command=self._restat).grid(
+                row=r, column=1, sticky="w")
+            r += 1
+        tk.Label(self, text="Percussion", bg=BG, fg=FG, font=FONT).grid(
+            row=r, column=0, sticky="w", padx=8)
+        self.v_perc = tk.StringVar(value="two-tone clicks")
+        ttk.Combobox(self, textvariable=self.v_perc, width=18, state="readonly",
+                     values=list(self._PERC)).grid(row=r, column=1, sticky="w")
+        r += 1
+        self.v_dropn = tk.BooleanVar(value=False)
+        tk.Checkbutton(self, text="drop the noise channel", variable=self.v_dropn,
+                       bg=BG, fg=FG, selectcolor=BG2, activebackground=BG,
+                       font=FONT).grid(row=r, column=0, columnspan=2, sticky="w",
+                                       padx=6)
+        r += 1
+        self.stats = tk.Label(self, text="", bg=BG2, fg=DIM, font=FONT,
+                              justify="left", anchor="w")
+        self.stats.grid(row=r, column=0, columnspan=2, sticky="we", padx=8, pady=4)
+        r += 1
+        bar = tk.Frame(self, bg=BG)
+        bar.grid(row=r, column=0, columnspan=2, sticky="e", padx=8, pady=8)
+        for txt, cmd in (("Audition", self._audition), ("Stop", self.app.stop),
+                         ("Import", self._do_import),
+                         ("Cancel", self.destroy)):
+            tk.Button(bar, text=txt, command=cmd, bg=BG2, fg=FG, relief="flat",
+                      activebackground=CUR, font=FONT).pack(side="left", padx=3)
+        self._restat()
+
+    def _parse(self):
+        perc, drum = self._PERC[self.v_perc.get()]
+        if self.ext == "nsf":
+            from ..nsf.extract import extract_song
+            return extract_song(self.path, subsong=self.v_sub.get(),
+                                percussion=perc, drum_sound=drum)
+        if self.ext == "pt3":
+            from ..pt3 import parse_pt3
+            with open(self.path, "rb") as fh:
+                return parse_pt3(fh.read(), percussion=perc, drum_sound=drum)
+        from ..mcs.reader import parse
+        from .export import nearest_tempo_byte0
+        song = parse(self.path)
+        return song, nearest_tempo_byte0(song.tempo_tick_seconds)
+
+    def _build(self):
+        from ..convert import song_to_rct
+        song, byte0 = self._parse()
+        rct = song_to_rct(song, tempo_byte0=byte0)
+        if self.v_dropn.get():
+            for pat in rct.patterns.values():
+                for row in pat.cells:
+                    if row[3].note and rct.channel_mode == R.MODE_3TONE_NOISE:
+                        row[3] = R.RctCell()
+        return song, rct
+
+    def _restat(self):
+        try:
+            song, rct = self._build()
+        except Exception as exc:
+            self.stats.config(text=f"(cannot read: {exc})")
+            return
+        lines = [f"{song.title or 'untitled'} — {rct.bpm:.1f} BPM "
+                 f"(MCS snap {rct.mcs_tempo_byte():#04x})"]
+        for i, t in enumerate(song.tracks):
+            n = sum(1 for x in t.notes if not x.is_rest)
+            lines.append(f"  track {i + 1} [{getattr(t, 'kind', 'tone')}]: "
+                         f"{n} notes, wave {t.waveform}")
+        self.stats.config(text="\n".join(lines[:8]))
+
+    def _audition(self):
+        try:
+            _song, rct = self._build()
+        except Exception as exc:
+            messagebox.showerror("Audition", str(exc))
+            return
+        self._preview = rct
+        master, flat = self.app._render(rct)
+        self.app._master, self.app._voices = master, self.app._voices
+        self.app._flat = None
+        self.app._seek_base = 0.0
+        self.app.player.play(pcm16(master), 44100)
+        self.app._playing = True
+
+    def _do_import(self):
+        try:
+            _song, rct = self._build()
+        except Exception as exc:
+            messagebox.showerror("Import", str(exc))
+            return
+        self.app._load_import(rct, self.path.rsplit("/", 1)[-1])
+        self.destroy()
 
 
 class _ExportHost:
