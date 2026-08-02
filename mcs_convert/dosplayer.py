@@ -318,6 +318,15 @@ def _spk_note_on(freq: float) -> List[Tuple[int, int]]:
     #                                                   high bits — see the ISR)
 
 
+def _spk_note_change(freq: float) -> List[Tuple[int, int]]:
+    """Just retune ch2 (write the new count) -- mode 3 and the gate are already
+    set. Half the writes of a full note-on, which matters for the arpeggiator
+    where the frequency changes EVERY sub-tick while a chord holds: re-latching
+    the mode/gate each step doubled the stream and blew past the .COM size."""
+    div = max(1, min(65535, round(_PIT_HZ / freq)))
+    return [(_PIT_CH2, div & 0xFF), (_PIT_CH2, (div >> 8) & 0xFF)]
+
+
 def _spk_note_off() -> List[Tuple[int, int]]:
     return [(_SPEAKER, 0x00)]                        # clear the low 2 bits -> quiet
 
@@ -423,7 +432,10 @@ def _mono_stream(song: Song, scope: bool = False,
                     by.setdefault(s, []).append((_VIZ_PORT, 0))
             else:
                 freq = midi_to_freq(m)
-                by.setdefault(s, []).extend(_spk_note_on(freq))
+                # first note out of silence sets mode + gate; a note-to-note arp
+                # step only needs to retune (half the bytes -- see _spk_note_change)
+                by.setdefault(s, []).extend(_spk_note_on(freq) if prev is None
+                                            else _spk_note_change(freq))
                 if scope:
                     by.setdefault(s, []).append((_VIZ_PORT, _viz_period(freq)))
             prev = m

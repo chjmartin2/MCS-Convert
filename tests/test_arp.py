@@ -60,6 +60,25 @@ def test_dos_1voice_arp_beats_the_plain_top_line():
             D.build_com(song, mode, 0x80, arp=True)
 
 
+def test_arp_continuation_only_retunes_to_stay_under_com_size():
+    # The arp changes pitch EVERY sub-tick while a chord holds. A full note-on
+    # each step (mode + count + gate = 4 writes) ballooned the stream past the
+    # 64 KB .COM limit on long tracks. A note-to-note step only needs to retune
+    # ch2 (2 writes: count lo/hi), so mid-chord sub-ticks are half the size.
+    assert D._spk_note_change(440.0) == [(0x42, D._spk_note_change(440.0)[0][1]),
+                                         (0x42, D._spk_note_change(440.0)[1][1])]
+    assert [p for p, _ in D._spk_note_change(440.0)] == [0x42, 0x42]   # count only
+    # a sustained 3-note chord: the first onset is a full note-on, the following
+    # arp steps are retune-only (2 writes), never re-latching mode 0x43 / gate 0x61
+    song = _chord_song([72, 67, 60], dur=8)
+    by = D._mono_stream(song, arp=True)
+    steps = sorted(by.items())
+    assert steps[0][1][0][0] == 0x43                 # first step: full note-on (mode)
+    later = [w for _, writes in steps[1:] for w in writes]
+    assert all(port == 0x42 for port, _ in later)    # the rest: retune only
+    assert (0x43, 0xB6) not in later and (0x61, 0x03) not in later
+
+
 def test_mcs_1voice_arp_encodes_more_notes_than_top_line_collapse():
     # the 1-voice .MCS collapse normally keeps the highest note; the arp variant
     # cycles the chord onto the 32nd grid, so it encodes strictly more onsets
