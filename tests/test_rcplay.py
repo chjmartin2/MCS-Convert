@@ -92,3 +92,57 @@ def test_saved_rct_carries_streams_rcplay_can_pick():
     idx = data.index(b"PERF")
     (size,) = struct.unpack_from("<I", data, idx + 4)
     assert data[idx + 8] in (1, 2, 3)                 # target byte first in payload
+
+
+def test_loader_file_walk_simulated_on_a_real_rct(tmp_path):
+    # A "paper DOS": replay the loader's EXACT int-21h operation sequence
+    # (sequential reads + relative seeks, as assembled) over a real saved .RCT
+    # and check it lands on the same PERF stream parse_perf extracts. This is
+    # the math a real 8088 will execute -- off-by-one seeks would show here.
+    import struct
+    s = R.RctSong(speed=4, tempo_byte0=0x80)
+    pat = R.RctPattern(rows=16)
+    pat.cell(0, 0).note = R.midi_to_note(60)
+    pat.cell(0, 0).inst = 1
+    pat.cell(4, 3).note = R.midi_to_note(84)
+    s.patterns = {0: pat}
+    s.order = [0, 0]
+    s.perf = perf_chunks(s)
+    data = R.write_rct(s)
+
+    def loader_walk(want_target):
+        pos = 0
+
+        def read(n):
+            nonlocal pos
+            chunk = data[pos:pos + n]
+            pos += len(chunk)
+            return chunk
+
+        def seek_cur(off):
+            nonlocal pos
+            pos += off
+
+        hdr = read(16)                       # file header
+        assert hdr[:4] == b"RCT!" and hdr[4] == 1
+        while True:
+            ch = read(8)                     # chunk header
+            if len(ch) < 8:
+                return None                  # e_nostream
+            size = struct.unpack_from("<I", ch, 4)[0]
+            if ch[:4] != b"PERF":
+                seek_cur(size)               # skipchunk
+                continue
+            ph = read(16)                    # PERF header
+            if ph[0] != want_target:
+                seek_cur(size - 16)          # skipperf
+                continue
+            assert ph[1] == 1                # stream version
+            slen = struct.unpack_from("<I", ph, 12)[0]
+            return read(slen)                # the stream RCPLAY loads
+
+    for target in (R.PERF_TANDY, R.PERF_1VOICE, R.PERF_4VOICE):
+        got = loader_walk(target)
+        want = R.parse_perf(s.perf[target])["stream"]
+        assert got == want, f"target {target}: loader walk diverged"
+    assert loader_walk(99) is None           # unknown target -> e_nostream

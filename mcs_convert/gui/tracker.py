@@ -141,6 +141,11 @@ class TrackerApp:
         tk.Spinbox(top, from_=1, to=32, textvariable=self.v_speed, width=3,
                    bg=BG2, fg=FG, font=FONT, command=self._settings_changed
                    ).pack(side="left", padx=(2, 10))
+        lab("Rows").pack(side="left")
+        self.v_rows = tk.IntVar(value=32)
+        tk.Spinbox(top, from_=1, to=64, textvariable=self.v_rows, width=3,
+                   bg=BG2, fg=FG, font=FONT, command=self._rows_changed
+                   ).pack(side="left", padx=(2, 10))
         lab("Channels").pack(side="left")
         mode = ttk.Combobox(top, textvariable=self.v_mode, width=14,
                             state="readonly",
@@ -192,6 +197,7 @@ class TrackerApp:
         self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._click)
+        self.canvas.bind("<Configure>", lambda e: self._draw())
         self.canvas.bind("<MouseWheel>",
                          lambda e: self.move(-3 if e.delta > 0 else 3, 0))
 
@@ -232,6 +238,17 @@ class TrackerApp:
     def cell(self) -> R.RctCell:
         return self.pattern().cell(self.row, self.chan)
 
+    def _rows_changed(self):
+        """Resize the CURRENT pattern (cells beyond the new length are kept in
+        memory only until save, like most trackers)."""
+        pat = self.pattern()
+        n = max(1, min(64, int(self.v_rows.get())))
+        while len(pat.cells) < n:
+            pat.cells.append([R.RctCell() for _ in range(4)])
+        pat.rows = n
+        self.row = min(self.row, n - 1)
+        self.refresh()
+
     def _settings_changed(self):
         self.song.title = self.v_title.get()[:32]
         self.song.tempo_byte0 = int(self.v_tempo.get())
@@ -243,6 +260,8 @@ class TrackerApp:
     # ---- navigation ----------------------------------------------------------
 
     def move(self, drow: int, dfield: int):
+        if self._typing_elsewhere():
+            return None
         pat = self.pattern()
         if drow:
             self.row = (self.row + drow) % pat.rows
@@ -277,6 +296,8 @@ class TrackerApp:
         return "break"
 
     def _click(self, e):
+        self.canvas.focus_set()
+        self.root.focus_set()                        # leave any Entry widget
         # canvas cell geometry mirrors _draw
         row = (e.y - 24) // 18 + self.top_row
         col = (e.x - 40) // self.chan_w
@@ -286,8 +307,16 @@ class TrackerApp:
 
     # ---- editing -------------------------------------------------------------
 
+    def _typing_elsewhere(self) -> bool:
+        """True while an Entry/Spinbox/Combobox has keyboard focus -- grid keys
+        must not fire while the user types in the Title box."""
+        w = self.root.focus_get()
+        return isinstance(w, (tk.Entry, tk.Spinbox, ttk.Combobox))
+
     def _key(self, e):
         if e.state & 0x4:                            # Ctrl combos handled above
+            return None
+        if self._typing_elsewhere():
             return None
         ks = e.keysym.lower()
         if self.field == 0:                          # note column
@@ -338,6 +367,8 @@ class TrackerApp:
         return keys[sel[0]] if sel and sel[0] < len(keys) else (keys[0] if keys else 1)
 
     def clear_cell(self):
+        if self._typing_elsewhere():
+            return None
         pat = self.pattern()
         pat.cells[self.row][self.chan] = R.RctCell()
         self._advance()
@@ -349,6 +380,7 @@ class TrackerApp:
         if sel:
             self.cur_pat = self.song.order[sel[0]]
             self.row = 0
+            self.v_rows.set(self.pattern().rows)
             self.refresh()
 
     def order_add(self):
@@ -673,6 +705,7 @@ class TrackerApp:
 
     def _sync_settings(self):
         self.v_title.set(self.song.title)
+        self.v_rows.set(self.pattern().rows)
         self.v_tempo.set(self.song.tempo_byte0)
         self.v_speed.set(self.song.speed)
         self.v_mode.set("4 tone" if self.song.channel_mode == R.MODE_4TONE
