@@ -2901,7 +2901,11 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
         a.db(0xEB).rel8("sp_vz")
         a.label("sp_dac")
     a.db(0x89, 0x87).abs16("inc")                    # [inc+bx]=ax
-    a.db(0xC7, 0x87).abs16("acc").bytes(_w(0))       # [acc+bx]=0 (reset phase on change)
+    # NOTE: the accumulator is deliberately NOT reset on a change. Retunes are
+    # phase-continuous, which is inaudible for plain note changes but essential
+    # for the RCT effects streams: a slide/vibrato retunes EVERY sub-tick, and
+    # a phase reset each time was a 60-120 Hz buzz. Matches the foreground,
+    # Tandy, and 1-voice engines, which all retune continuously by nature.
     if fm:
         a.label("sp_vz")
     a.db(0xAC).db(0x88, 0x85).abs16("viz")           # lodsb (viz); [viz+di]=al
