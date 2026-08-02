@@ -28,10 +28,25 @@ def _labels_and_orgs():
 
 def test_rcplay_builds_and_is_com_sized():
     com = RP.build_rcplay()
-    assert 8 * 1024 < len(com) < 20 * 1024            # loader + 6 engines
+    assert 10 * 1024 < len(com) < 24 * 1024           # loader + 8 engines
     assert 0xFFF0 - 0x100 - len(com) > 40 * 1024      # plenty of stream heap
-    assert com[0] == 0xBE                             # mov si,0x81 (cmdline parse)
-    assert b"RCPLAY" in com and b"RCT" in com         # usage text present
+    assert com[0] == 0xC7                             # engine-exit retarget pokes
+    assert b"RCPLAY" in com and b"RCT" in com         # UI text present
+
+
+def test_rcplay_has_the_browser_and_settings_ui():
+    com = RP.build_rcplay()
+    loader = com[:RP._LOADER_SIZE]
+    assert b"*.RCT" + bytes(1) in loader          # FindFirst pattern (ASCIIZ)
+    assert bytes([0xB4, 0x4E, 0xCD, 0x21]) in loader   # int 21h FindFirst
+    assert bytes([0xB4, 0x4F, 0xCD, 0x21]) in loader   # int 21h FindNext
+    for s in (b"RCPLAY SETTINGS", b"ENTER play", b"TARGET", b"ENGINE",
+              b"DISPLAY", b"no .RCT files"):
+        assert s in loader, s
+    # VU builds exist for every target (the /V6-on-1voice fix)
+    assert [b[:2] for b in RP.BUILDS].count(("4voice", "vu")) == 1
+    assert ("tandy", "vu") in [b[:2] for b in RP.BUILDS]
+    assert ("1voice", "vu") in [b[:2] for b in RP.BUILDS]
 
 
 def test_every_build_reads_the_shared_heap():

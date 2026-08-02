@@ -12,7 +12,7 @@ reverse-engineering of **Will Harvey's Music Construction Set** (IBM-PC, 1984).
 | **RCTracker** | Windows editor: classic vertical tracker (4 channels — 4 tone or 3 tone + noise), PT3-style effects + ornaments, live preview, imports NSF / PT3 / MCS, exports everything below |
 | **`.RCT` format** | patterns + order + instruments + ornaments **and** precompiled per-target performance streams in one file ([spec](docs/RCT-FORMAT.md)) |
 | **RCPlay** | Windows standalone player: playlist, seek, live scopes |
-| **RCPLAY.COM** | DOS standalone player (8088+): plays any `.RCT` from disk, **auto-detects CPU speed** — a 4.77 MHz XT gets the calibrated foreground engine, faster machines get live visualizations (text monitor / VGA scopes / VU) |
+| **RCPLAY.COM** | DOS standalone player (8088+): run it bare for a **full-screen file browser + settings screen** (target / engine / display), or `RCPLAY SONG.RCT /flags`. **Auto-detects CPU speed** — a 4.77 MHz XT gets the calibrated foreground engine, faster machines get live visualizations; the VU display works on every target |
 | **Exports** | original `.MCS` files, standalone `.COM` players (Tandy SN76489, 1-voice + 4-voice PC speaker, SoundBlaster DAC/DMA + OPL2 FM), WAV |
 
 Effects are baked at **sub-tick resolution** by one shared flattener, so the

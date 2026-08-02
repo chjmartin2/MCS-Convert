@@ -2160,8 +2160,11 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     immediates -- total, divider -- for the loaded song)."""
     a = _Asm(org)
     if vis:
-        video_mode = (0x03 if vis.startswith("text") else 0x13 if vis == "vga"
-                      else 0x09)                        # text3 / VGA13h / Tandy9
+        # VU is a TEXT renderer: it must get mode 3, not fall through to Tandy
+        # mode 9 (it used to -- text-cell writes into a graphics framebuffer).
+        video_mode = (0x03 if vis.startswith("text") or vis == "vu"
+                      else 0x13 if vis == "vga"
+                      else 0x09)                        # text/vu / VGA13h / Tandy9
         a.db(0xB8, video_mode, 0x00).db(0xCD, 0x10)     # mov ax,000N; int 0x10 (set video mode)
         # back buffer one 64 KB block past our program (a .COM owns all memory)
         a.db(0x8C, 0xC8).db(0x05, 0x00, 0x10)           # mov ax,cs; add ax,0x1000
@@ -2205,6 +2208,7 @@ def _assemble(divider: int, subdiv: int, total_ticks: int, silence: bytes,
     a.db(0xFB)                                       # sti
     if vis:
         a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (back to text mode)
+    a.label("exit21")                                # RCPLAY retargets this exit
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # mov ax,0x4C00 ; int 0x21
     # ---- playrec: apply one [count][port,val]* record at DS:SI --------------
     a.label("playrec")
@@ -2822,6 +2826,7 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
     a.db(0xFB)                                        # sti
     if vis:
         a.db(0xB8, 0x03, 0x00).db(0xCD, 0x10)        # mov ax,0x0003; int 0x10 (clear/restore text)
+    a.label("exit21")                                # RCPLAY retargets this exit
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
     # ---- isr: one audio sample (+ a sub-tick's note changes when due) ----------
     a.label("isr")
@@ -3116,6 +3121,7 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0xA1).abs16("old_seg").db(0x26, 0xA3, 0x22, 0x00)
     a.db(0x26, 0xA1, 0x1C, 0x04).db(0x26, 0xA3, 0x1A, 0x04)  # flush key (head=tail)
     a.db(0xFB)                                        # sti
+    a.label("exit21")                                # RCPLAY retargets this exit
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
     # ---- tempo ISR (INT 8): scale + patch this sub-tick's increments -----------
     a.label("tisr")
