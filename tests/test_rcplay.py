@@ -146,3 +146,99 @@ def test_loader_file_walk_simulated_on_a_real_rct(tmp_path):
         want = R.parse_perf(s.perf[target])["stream"]
         assert got == want, f"target {target}: loader walk diverged"
     assert loader_walk(99) is None           # unknown target -> e_nostream
+
+
+def test_loader_cmdline_parse_simulated():
+    # Mirror the assembled parser instruction-for-instruction (lodsb/dec cx/
+    # loop semantics) over real PSP-style command tails. The original scanner
+    # forgot `dec cx` on the not-a-slash path, ran off the command line, and
+    # parsed stray 0x2F bytes in memory as flags -- /1 always came out Tandy.
+    def parse(tail):
+        buf = tail.encode() + b"\r" + b"\x2fT" * 40   # then GARBAGE memory that
+        cx = len(tail)                                # looks like endless /T
+        si = 0
+        target = force = viz = 0
+        fname = ""
+
+        def lodsb():
+            nonlocal si
+            b = buf[si]
+            si += 1
+            return b
+
+        # skipsp
+        if cx == 0:
+            return None
+        while True:
+            al = lodsb()
+            if al != 0x20:
+                break
+            cx -= 1                                   # loop skipsp
+            if cx == 0:
+                return None
+        # copyf
+        while True:
+            if al in (0x0D, 0x20):
+                break
+            fname += chr(al)
+            al = lodsb()
+            cx -= 1                                   # loop copyf
+            if cx == 0:
+                break
+        # args (the FIXED scanner: every lodsb pairs with dec cx)
+        while cx:
+            al = lodsb(); cx -= 1
+            if al != 0x2F:
+                continue
+            if not cx:
+                break
+            al = lodsb(); cx -= 1
+            if al == ord("1"):
+                target = 2
+            if al == ord("4"):
+                target = 3
+            up = al & 0xDF
+            if up == ord("T"):
+                target = 1
+            if up == ord("F"):
+                force = 1
+            if up == ord("X"):
+                force = 2
+            if up == ord("V"):
+                if not cx:
+                    break
+                al = lodsb(); cx -= 1
+                viz = al - ord("0")
+        return fname, target, force, viz
+
+    assert parse(" SONG.RCT /1") == ("SONG.RCT", 2, 0, 0)     # THE bug case
+    assert parse(" SONG.RCT /T") == ("SONG.RCT", 1, 0, 0)
+    assert parse(" SONG.RCT /4 /F") == ("SONG.RCT", 3, 1, 0)
+    assert parse(" SONG.RCT /X /V8") == ("SONG.RCT", 0, 2, 8)
+    assert parse(" SONG.RCT /t /v6") == ("SONG.RCT", 1, 0, 6)  # lowercase
+    assert parse(" SONG.RCT") == ("SONG.RCT", 0, 0, 0)         # no flags at all
+
+
+def test_loader_arg_scan_decrements_cx_every_char():
+    # pin the machine code: in the flag scanner, every lodsb (0xAC) outside the
+    # filename copy is immediately followed by dec cx (0x49)
+    com = RP.build_rcplay()
+    loader = com[:RP._LOADER_SIZE]
+    # the scan region sits between the first jcxz-heavy parse and 'argsdone'
+    # (mov byte[di],0 = C6 05 00); check the pairing property there
+    end = loader.index(b"\xC6\x05\x00")
+    start = loader.index(b"\xBF")                     # mov di, fname (copyf setup)
+    region = loader[start:end]
+    i = 0
+    unpaired = 0
+    while True:
+        i = region.find(b"\xAC", i)
+        if i < 0:
+            break
+        nxt = region[i + 1]
+        # a consume is counted by an explicit dec cx (0x49) or by the loop
+        # instruction itself (0xE2 = dec cx + jnz, the filename copy)
+        if nxt not in (0x49, 0xE2):
+            unpaired += 1
+        i += 1
+    assert unpaired == 0                              # no un-counted consumes

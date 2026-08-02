@@ -173,13 +173,16 @@ def _build_loader(labels: List[dict], orgs: List[int], heap: int,
     a.db(0xE2).rel8("copyf")                         # loop copyf
     a.db(0xEB).rel8("argsdone")                      # cx ran out
     # ---- flags: /T /1 /4 (target)  /F /X (engine)  /V5 /V6 /V8 (viz) --------
+    # EVERY lodsb pairs with a dec cx: the counter tracks characters consumed,
+    # or the scan runs off the end of the command line into raw memory and
+    # random 0x2F bytes there get parsed as flags (the "/1 played the Tandy
+    # stream" bug -- a stray '/T'-looking pair always won).
     a.label("args")
     a.db(0xE3).rel8("argsdone")                      # jcxz argsdone
-    a.db(0xAC)                                       # lodsb
+    a.db(0xAC).db(0x49)                              # lodsb; dec cx
     a.db(0x3C, 0x2F).db(0x75).rel8("argnext")        # only care past a '/'
     a.db(0xE3).rel8("argsdone")
-    a.db(0xAC)                                       # lodsb (the flag letter)
-    a.db(0x49)                                       # dec cx
+    a.db(0xAC).db(0x49)                              # lodsb (the flag letter); dec cx
     _set_if_eq(a, ord("1"), "v_target", 0x02)        # /1 -> 1voice
     _set_if_eq(a, ord("4"), "v_target", 0x03)        # /4 -> 4voice
     a.db(0x24, 0xDF)                                 # and al,0xDF (uppercase)
