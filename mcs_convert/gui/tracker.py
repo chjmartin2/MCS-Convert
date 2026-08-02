@@ -13,11 +13,21 @@ Keys
   0-9 A-F      hex entry in the inst / vol / fx columns
   arrows/Tab   move   PgUp/PgDn page   Home/End top/bottom
   F1/F2        octave down/up          step +/- with - / =
-  F5 / F6      play song / pattern     F8  stop
-  Space        toggle edit cursor between note and fx columns
+  F5 / F6      play song / pattern     F8  stop    F9  play from cursor
+  F7           toggle follow           Space  hop note <-> fx column
+  Ctrl+Z / Y   undo / redo             Ctrl+E  Export Center
+  Ctrl+B       mark block start        Ctrl+C/V/X  copy / paste / cut block
+  Ctrl+Up/Dn   transpose semitone      Ctrl+PgUp/Dn  transpose octave
+  Insert       insert row              Ctrl+Del  delete row
+  (click a channel header to MUTE it, Ctrl+click to SOLO)
 
 Everything else is menus/panels: order list, instruments, ornaments, song
-settings, import (NSF/PT3/MCS/RCT), export (.RCT/.MCS/.COM/WAV/RCPLAY.COM).
+settings, an arbitrary-BPM box (MCS-mode snaps it to the grid), a per-song
+target MODE that lints cells the chosen output can't express, Scope / VU /
+Spectrum / DOS-replica visualization windows, import (NSF/PT3/MCS/RCT with
+options), and the Export Center (every target with preview + MCS notation +
+retrack-into-editor). This is the primary app; MCS-Player is now a format
+inspector.
 """
 
 from __future__ import annotations

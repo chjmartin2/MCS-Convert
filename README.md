@@ -9,7 +9,7 @@ reverse-engineering of **Will Harvey's Music Construction Set** (IBM-PC, 1984).
 
 | | |
 |---|---|
-| **RCTracker** | Windows editor: classic vertical tracker (4 channels — 4 tone or 3 tone + noise), PT3-style effects + ornaments, live preview, imports NSF / PT3 / MCS, exports everything below |
+| **RCTracker** | Windows editor (**the primary app**): classic vertical tracker (4 channels), PT3-style effects + ornaments, **arbitrary BPM**, follow-mode playback, multi-level undo, block edit/transpose, Scope/VU/Spectrum/DOS-replica scopes, mute/solo, per-song **target-mode linting** (incl. **MCS-mode**), imports NSF/PT3/MCS, and an **Export Center** with per-target preview, **MCS notation preview**, and retrack-into-editor |
 | **`.RCT` format** | patterns + order + instruments + ornaments **and** precompiled per-target performance streams in one file ([spec](docs/RCT-FORMAT.md)) |
 | **RCPlay** | Windows standalone player: playlist, seek, live scopes |
 | **RCPLAY.COM** | DOS standalone player (8088+): run it bare for a **full-screen file browser + settings screen** (target / engine / display), or `RCPLAY SONG.RCT /flags`. **Auto-detects CPU speed** — a 4.77 MHz XT gets the calibrated foreground engine, faster machines get live visualizations; the VU display works on every target; **/S SoundBlaster DAC** (with the real-waveform VGA oscilloscope) and **/O OPL2 FM** play through the card |
@@ -110,10 +110,12 @@ Open a song, watch it scroll by in a tracker-style grid, and listen:
 
 ### Just want to listen? (Windows, no Python)
 
-Download **`MCS-Player.exe`** from the
-[latest release](https://github.com/chjmartin2/MCS-Convert/releases/latest)
-and double-click it. (SmartScreen will warn about an unrecognized app — the
-exe isn't code-signed; choose *More info → Run anyway*.)
+Download **`RCTracker.exe`** (edit + play) or **`RCPlay.exe`** (play only)
+from the [latest release](https://github.com/chjmartin2/MCS-Convert/releases/latest)
+and double-click. (SmartScreen warns about unrecognized apps — they aren't
+code-signed; choose *More info → Run anyway*.) `MCS-Player.exe` is still
+available as a dedicated **MCS format inspector** (notation view + byte-exact
+round-trip), but RCTracker is now the main editor.
 
 ### Quick start from source (Windows)
 
