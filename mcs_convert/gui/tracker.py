@@ -72,6 +72,8 @@ class TrackerApp:
         self.octave = 4
         self.step = 1
         self.mode = "free"           # target lint mode (TM.MODES)
+        self.sel_anchor = None       # (row, chan) marking a block start
+        self.clip = None             # copied block: list of cell rows
         self.player = WaveOutPlayer()
         self._playing = False
         self._play_subs = 0
@@ -283,6 +285,16 @@ class TrackerApp:
         r.bind("<Control-o>", lambda e: self.open_dialog())
         r.bind("<Control-s>", lambda e: self.save())
         r.bind("<Control-e>", lambda e: self.open_export_center())
+        r.bind("<Control-b>", lambda e: self.mark_block())
+        r.bind("<Control-c>", lambda e: self.copy_block())
+        r.bind("<Control-v>", lambda e: self.paste_block())
+        r.bind("<Control-x>", lambda e: (self.copy_block(), self.clear_block()))
+        r.bind("<Insert>", lambda e: self.insert_row())
+        r.bind("<Control-Delete>", lambda e: self.delete_row())
+        r.bind("<Control-Up>", lambda e: self.transpose(1))
+        r.bind("<Control-Down>", lambda e: self.transpose(-1))
+        r.bind("<Control-Prior>", lambda e: self.transpose(12))
+        r.bind("<Control-Next>", lambda e: self.transpose(-12))
         r.bind("<Key>", self._key)
 
     # ---- undo ----------------------------------------------------------------
@@ -512,6 +524,81 @@ class TrackerApp:
         pat = self.pattern()
         pat.cells[self.row][self.chan] = R.RctCell()
         self._advance()
+
+    # ---- block ops -----------------------------------------------------------
+
+    def _block_bounds(self):
+        """(r0, r1, c0, c1) inclusive of the marked block, or the single cell."""
+        if self.sel_anchor is None:
+            return self.row, self.row, self.chan, self.chan
+        ar, ac = self.sel_anchor
+        return (min(ar, self.row), max(ar, self.row),
+                min(ac, self.chan), max(ac, self.chan))
+
+    def mark_block(self):
+        self.sel_anchor = (self.row, self.chan)
+        self.refresh()
+
+    def copy_block(self):
+        r0, r1, c0, c1 = self._block_bounds()
+        pat = self.pattern()
+        self.clip = [[copy.deepcopy(pat.cell(r, c)) for c in range(c0, c1 + 1)]
+                     for r in range(r0, r1 + 1)]
+        self.v_status.set(f"copied {len(self.clip)}x{c1 - c0 + 1} block")
+        self.sel_anchor = None
+        self.refresh()
+
+    def paste_block(self):
+        if not self.clip:
+            return
+        self._checkpoint()
+        pat = self.pattern()
+        for dr, crow in enumerate(self.clip):
+            for dc, cell in enumerate(crow):
+                rr, cc = self.row + dr, self.chan + dc
+                if rr < pat.rows and cc < 4:
+                    pat.cells[rr][cc] = copy.deepcopy(cell)
+        self.refresh()
+
+    def clear_block(self):
+        self._checkpoint()
+        r0, r1, c0, c1 = self._block_bounds()
+        pat = self.pattern()
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                pat.cells[r][c] = R.RctCell()
+        self.sel_anchor = None
+        self.refresh()
+
+    def transpose(self, semis: int):
+        """Shift notes in the block (or current cell) by `semis`, clamped."""
+        self._checkpoint()
+        r0, r1, c0, c1 = self._block_bounds()
+        pat = self.pattern()
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                cell = pat.cell(r, c)
+                if 1 <= cell.note <= R.NOTE_MAX:
+                    cell.note = max(1, min(R.NOTE_MAX, cell.note + semis))
+        self.refresh()
+
+    def insert_row(self):
+        """Push the current channel's cells down from the cursor row."""
+        self._checkpoint()
+        pat = self.pattern()
+        for r in range(pat.rows - 1, self.row, -1):
+            pat.cells[r][self.chan] = pat.cells[r - 1][self.chan]
+        pat.cells[self.row][self.chan] = R.RctCell()
+        self.refresh()
+
+    def delete_row(self):
+        """Pull the current channel's cells up into the cursor row."""
+        self._checkpoint()
+        pat = self.pattern()
+        for r in range(self.row, pat.rows - 1):
+            pat.cells[r][self.chan] = pat.cells[r + 1][self.chan]
+        pat.cells[pat.rows - 1][self.chan] = R.RctCell()
+        self.refresh()
 
     # ---- order list ----------------------------------------------------------
 
@@ -1038,6 +1125,11 @@ class TrackerApp:
             for c in range(4):
                 cell = pat.cell(row, c)
                 x0 = 40 + c * self.chan_w
+                r0, r1, c0, c1 = self._block_bounds()
+                if (self.sel_anchor is not None and r0 <= row <= r1
+                        and c0 <= c <= c1):
+                    cv.create_rectangle(x0, y - 9, x0 + self.chan_w - 4, y + 9,
+                                        fill="#20304a", width=0)
                 if row == self.row and c == self.chan:
                     fx0 = x0 + (0, 46, 64, 84, 100)[self.field]
                     fx1 = x0 + (44, 62, 82, 98, 128)[self.field]

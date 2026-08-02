@@ -175,3 +175,33 @@ def test_target_mode_lints_and_snaps(app):
     app.v_tmode.set(TM.MODE_LABELS["free"])
     app._mode_changed()
     assert app.mode == "free" and app._lint_count() == 0
+
+
+def test_block_ops(app):
+    pat = app.pattern()
+    for r in range(3):
+        pat.cell(r, 0).note = R.midi_to_note(60 + r)
+        pat.cell(r, 0).inst = 1
+    app.row, app.chan = 0, 0
+    app.mark_block()
+    app.row = 2
+    app.copy_block()                                  # 3-row block on ch0
+    app.row = 4
+    app.paste_block()
+    assert pat.cell(4, 0).note == R.midi_to_note(60)
+    assert pat.cell(6, 0).note == R.midi_to_note(62)
+    # transpose the original block up an octave
+    app.row = 0
+    app.mark_block()
+    app.row = 2
+    app.transpose(12)
+    assert pat.cell(0, 0).note == R.midi_to_note(72)
+    # insert/delete row shift the channel
+    app.sel_anchor = None
+    app.row = 1
+    app.insert_row()
+    assert pat.cell(1, 0).note == 0
+    app.delete_row()
+    assert pat.cell(1, 0).note == R.midi_to_note(73)
+    app.undo()                                        # every op is undoable
+    assert pat.cell(1, 0).note == 0
