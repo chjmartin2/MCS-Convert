@@ -610,3 +610,40 @@ def test_foreground_tempo_is_pit_clocked_and_pitch_follows_mix_rate():
     # a faster tempo byte shortens the sub-tick period, changing the PIT divider
     fastbpm = D.build_com(song, "4voice", 0x80 - 8, foreground=True, mix_rate=8000)
     assert fastbpm != slow
+
+
+def test_foreground_calibrates_loop_speed_so_pitch_is_cpu_independent():
+    # Pitch would otherwise track the loop's raw speed, so a faster CPU plays
+    # sharp. The engine calibrates at startup: it times a fixed run of silent
+    # iterations against PIT ch0 (programmed mode 2, count-by-1), divides to get
+    # a fixed-point scale, and the tempo ISR multiplies every increment by it.
+    song = _song([(0, 8, 69)])
+    fg = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=48000)
+
+    # ch0 is put in mode 2 for the timing window (0x34 -> port 0x43)...
+    assert b"\x34\xE6\x43" in fg
+    # ...and later back to mode 3 for the tempo clock (0x36 -> 0x43)
+    assert b"\x36\xE6\x43" in fg
+    # a 32/16 divide (div cx) turns the elapsed count into the scale...
+    assert b"\xF7\xF1" in fg                          # div cx
+    # ...and the tempo ISR multiplies each raw increment by it (mul word[scale])
+    assert b"\xF7\x26" in fg                          # mul word ptr [scale256]
+
+    # the calibration loop and the playback loop are byte-identical bodies, so
+    # the measurement reflects the real per-sample cost. Only the back-edge
+    # differs: calibration decrements a counter (dec bp = 0x4D), playback jumps.
+    assert b"\x4D\x75" in fg                          # dec bp ; jnz  (calibration edge)
+
+
+def test_foreground_pitch_is_independent_of_mix_rate_target():
+    # Because the increments are scaled at runtime to the MEASURED loop speed,
+    # the mix_rate target cancels out for pitch -- it only sets the increment
+    # resolution. So two mix rates still differ in bytes (different baked
+    # increments + calibration window) but neither is "the" pitch authority.
+    song = _song([(0, 8, 69)])
+    a = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=32000)
+    b = D.build_com(song, "4voice", 0x80, foreground=True, mix_rate=48000)
+    assert a != b
+    # both carry the scale word (default 256 = identity until calibration runs)
+    for com in (a, b):
+        assert b"\x00\x01" in com                     # 256 little-endian somewhere

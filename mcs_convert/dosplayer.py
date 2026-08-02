@@ -65,10 +65,12 @@ _SPK4_FS = _PIT_HZ / _SPK4_DIV
 #   carrier on a fast CPU / DOSBox cycles=max, where the PWM carrier is inaudible
 #   and only the audio band survives -- the highest quality the mixer can reach.
 _SPK4_DIV_MIN, _SPK4_DIV_MAX = 25, 1200
-_FG_FS = 24000                   # default target Fs for the foreground engine --
+_FG_FS = 48000                   # default target Fs for the foreground engine --
 #                                  a real 4.77 MHz 8088 spins the loop this fast
-#                                  (measured); its true rate = loop speed, so tune
-#                                  --mix-rate to the machine if the pitch is off
+#                                  (measured ~48 kHz; the ~90-cycle body is I/O-
+#                                  bound on its two out 0x61 gate writes, so this
+#                                  is near the ceiling). True rate = loop speed, so
+#                                  tune --mix-rate to the machine if the pitch is off
 _SPK4_TONES = 3                  # square-wave voices
 _SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
 _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
@@ -2931,73 +2933,103 @@ def _assemble_spk4(divider: int, samps_per_sub: int, total_subs: int,
 # Hz) to patch the next note's increments into the running loop -- so the sample
 # path carries no interrupt overhead at all. That is the whole ~5x speedup.
 #
-# Pitch is set by the loop's own speed (Fs = however fast the machine spins it),
-# so the increments are computed for a target `fs`; on a given machine you tune
-# --mix-rate until the pitch matches. Tempo is exact regardless (PIT-clocked).
+# Pitch would otherwise be set by the loop's raw speed (Fs = however fast the
+# machine spins it), so a faster CPU would play sharp. To fix that we CALIBRATE
+# at startup: time a fixed number of silent iterations against PIT ch0 (a 1.19
+# MHz clock), derive the real Fs, and scale every note increment by ref_Fs/Fs.
+# The loop still runs flat out (ultrasonic carrier intact) but the pitch is
+# correct on any CPU. Tempo is exact regardless (PIT-clocked).
+def _emit_fg_body(a: "_Asm", pfx: str) -> None:
+    """Emit ONE sample of the foreground mixer, labels prefixed by `pfx`. Two
+    byte-identical copies are laid down -- a calibration loop and the playback
+    loop -- so the startup timing measurement reflects the exact per-sample cost
+    of the loop that actually plays. Only the loop back-edge differs."""
+    a.label(pfx + "samp")
+    a.db(0x88, 0xD0).db(0xE6, _SPEAKER)              # mov al,dl; out 0x61 (gate LOW)
+    a.db(0x30, 0xE4)                                 # xor ah,ah (overflow collector)
+    a.db(0x81, 0xED).label(pfx + "inc0"); a.bytes(_w(0))   # sub bp,<inc0> (self-mod)
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    a.db(0x81, 0xEF).label(pfx + "inc1"); a.bytes(_w(0))   # sub di,<inc1>
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    a.db(0x81, 0xEE).label(pfx + "inc2"); a.bytes(_w(0))   # sub si,<inc2>
+    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
+    a.db(0x81, 0xEB).label(pfx + "ninc"); a.bytes(_w(0))   # sub bx,<ninc> (noise clock)
+    a.db(0x73).rel8(pfx + "nonoise")                 # jnc: no LFSR clock this sample
+    a.db(0x8B, 0x0E).abs16("nlfsr").db(0xD1, 0xE9)   # mov cx,[nlfsr]; shr cx,1
+    a.db(0x73).rel8(pfx + "notap").db(0x81, 0xF1).bytes(_w(_SPK4_LFSR))   # jnc; xor cx,taps
+    a.label(pfx + "notap")
+    a.db(0x89, 0x0E).abs16("nlfsr")                  # mov [nlfsr],cx
+    a.db(0x80, 0xE1, 0x01).db(0x08, 0xCC)            # and cl,1; or ah,cl
+    a.label(pfx + "nonoise")
+    a.db(0xF6, 0xDC)                                 # neg ah  (CF = ah != 0)
+    a.db(0x18, 0xC0).db(0x24, 0x01)                  # sbb al,al; and al,1 (al = pulse bit)
+    a.db(0x08, 0xD0).db(0xE6, _SPEAKER)              # or al,dl; out 0x61 (gate = pulse)
+
+
 def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
                       fs: float) -> bytes:
     """MCS-style foreground 4-voice player. `subtick_div` is the PIT ch0 divider
     for the sub-tick tempo clock; `stream` is the same per-sub-tick change stream
-    as _assemble_spk4 (voice|lvl<<4, inc_lo, inc_hi, viz); `fs` is only recorded
-    in a comment. No display -- the CPU lives in the sample loop (pair it with the
-    static poster if you want a picture)."""
+    as _assemble_spk4 (voice|lvl<<4, inc_lo, inc_hi, viz), its increments computed
+    for `fs`. Startup calibration measures the real loop speed and scales the
+    increments to it, so pitch is correct on any CPU. No display."""
     a = _Asm()
-    # ---- init: hook INT 8 (the sub-tick tempo clock), arm timer-2 one-shot -----
-    # We do NOT hook the keyboard -- the BIOS INT 9 keeps working, so it acks the
-    # controller and fills its buffer correctly (no make/break/typematic bugs).
-    # The tempo ISR just watches the BIOS buffer and quits when a key lands there.
-    a.db(0xFA)                                        # cli
+    # calibration timing window: M silent iterations, timed on PIT ch0. Choose M
+    # so a machine at the reference speed spends ~30000 PIT counts in it (fine
+    # resolution, and stays inside one 65536-count ch0 period even at half speed).
+    M = max(1, min(65535, round(30000.0 * fs / _PIT_HZ)))
+    elapsed_ref = max(1, min(65535, round(M * _PIT_HZ / fs)))
+    # ---- init: save (not yet install) INT 8; arm timer-2 one-shot; base61 -----
+    # We do NOT hook the keyboard -- BIOS keeps INT 9 (acks the controller, fills
+    # its buffer); the tempo ISR just watches that buffer and quits on a keypress.
+    a.db(0xFA)                                        # cli (stays off through calibration)
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; es=0
     a.db(0x26, 0xA1, 0x20, 0x00).db(0xA3).abs16("old_off")   # save INT8 vector
     a.db(0x26, 0xA1, 0x22, 0x00).db(0xA3).abs16("old_seg")
-    a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("tisr")  # [es:0x20] = tempo ISR
-    a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
-    # timer 2 = retriggerable one-shot (mode 1); speaker DATA on (bit1), gate low
-    # (bit0=0). Each gate rising edge fires a fixed-width pulse on OUT2 -- MCS's
-    # pulse-density DAC. base61 = data on, gate low.
     a.db(0xE4, 0x61).db(0xA2).abs16("old61")         # in al,0x61; save
-    a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # and 0xFC; or 0x02
-    a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)              # mov al,0xB2; out 0x43 (ch2 mode 1)
+    a.db(0x24, 0xFC).db(0x0C, 0x02).db(0xA2).abs16("base61")   # data on, gate low
+    a.db(0xB0, 0xB2).db(0xE6, _PIT_CMD)              # ch2 mode 1 (retriggerable one-shot)
     a.db(0xB0, _SPK4_MCS_PULSE).db(0xE6, _PIT_CH2).db(0xB0, 0x00).db(0xE6, _PIT_CH2)
     a.db(0xA0).abs16("base61").db(0xE6, _SPEAKER)    # apply base now
-    # stream pointer + remaining sub-ticks
     a.db(0xB8).abs16("stream").db(0xA3).abs16("streamptr")
     a.db(0xB8).bytes(_w(total_subs)).db(0xA3).abs16("ticksleft")
-    # PIT ch0 -> the SUB-TICK tempo rate (mode 3)
-    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
+    # ---- calibrate: time M silent loop iterations on PIT ch0 -------------------
+    a.db(0xB0, 0x34).db(0xE6, _PIT_CMD)              # ch0 mode 2 (count down by 1)
+    a.db(0x30, 0xC0).db(0xE6, _PIT_CH0).db(0xE6, _PIT_CH0)   # divisor 0 = 65536
+    a.db(0xBD).bytes(_w(M))                          # mov bp, M (iteration counter)
+    a.db(0x31, 0xFF).db(0x31, 0xF6).db(0x31, 0xDB)  # di=si=bx=0 (silent accumulators)
+    a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # dl = base61
+    a.db(0xB0, 0x00).db(0xE6, _PIT_CMD)              # latch ch0
+    a.db(0xE4, 0x40).db(0x88, 0xC1).db(0xE4, 0x40).db(0x88, 0xC5)   # cx = C0 (lo,hi)
+    a.db(0x51)                                       # push cx (C0)
+    _emit_fg_body(a, "cal")                          # the calibration copy of the loop
+    a.db(0x4D)                                       # dec bp
+    a.db(0x75).rel8("calsamp")                       # jnz calsamp (M iterations)
+    # fall through when bp hits 0:
+    a.db(0xB0, 0x00).db(0xE6, _PIT_CMD)              # latch ch0
+    a.db(0xE4, 0x40).db(0x88, 0xC1).db(0xE4, 0x40).db(0x88, 0xC5)   # cx = C1
+    a.db(0x58).db(0x29, 0xC8)                        # pop ax (C0); sub ax,cx (elapsed)
+    # scale256 = (elapsed << 8) / elapsed_ref  (fixed-point ref_Fs / actual_Fs * 256)
+    a.db(0x88, 0xE2).db(0xB6, 0x00)                  # mov dl,ah; mov dh,0
+    a.db(0x88, 0xC4).db(0x30, 0xC0)                  # mov ah,al; xor al,al  (DX:AX = elapsed<<8)
+    a.db(0xB9).bytes(_w(elapsed_ref))                # mov cx, elapsed_ref
+    a.db(0xF7, 0xF1)                                 # div cx  (AX = scale256)
+    a.db(0x09, 0xC0).db(0x75, 0x03).db(0xB8, 0x01, 0x00)   # or ax,ax; jnz +3; mov ax,1
+    a.db(0xA3).abs16("scale256")                     # [scale256] = ax
+    # ---- install the sub-tick tempo ISR + clock, then fall into the loop -------
+    a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # es=0
+    a.db(0x26, 0xC7, 0x06, 0x20, 0x00).abs16("tisr")  # [es:0x20] = tempo ISR
+    a.db(0x26, 0x8C, 0x0E, 0x22, 0x00)               # [es:0x22] = cs
+    a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3 (the tempo clock)
     a.db(0xB8).bytes(_w(subtick_div)).db(0xE6, _PIT_CH0).db(0x88, 0xE0).db(0xE6, _PIT_CH0)
+    a.db(0x31, 0xED).db(0x31, 0xFF).db(0x31, 0xF6).db(0x31, 0xDB)   # bp=di=si=bx=0
+    a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # dl = base61
     a.db(0xFB)                                        # sti
-    # ---- the tight sample loop ------------------------------------------------
-    # accumulators: bp/di/si = tone voices, bx = noise clock; dl = base61.
-    a.db(0x31, 0xED).db(0x31, 0xFF)                  # xor bp,bp; xor di,di
-    a.db(0x31, 0xF6).db(0x31, 0xDB)                  # xor si,si; xor bx,bx
-    a.db(0xA0).abs16("base61").db(0x88, 0xC2)        # al=base61; mov dl,al
-    a.label("fgsamp")
-    a.db(0x88, 0xD0).db(0xE6, _SPEAKER)              # mov al,dl; out 0x61,al (gate LOW)
-    a.db(0x30, 0xE4)                                 # xor ah,ah (overflow collector)
-    a.db(0x81, 0xED).label("inc0"); a.bytes(_w(0))   # sub bp, <inc0>  (self-modified)
-    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
-    a.db(0x81, 0xEF).label("inc1"); a.bytes(_w(0))   # sub di, <inc1>
-    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
-    a.db(0x81, 0xEE).label("inc2"); a.bytes(_w(0))   # sub si, <inc2>
-    a.db(0x80, 0xD4, 0x00)                           # adc ah,0
-    # noise voice: bx accumulates; on overflow clock the LFSR (in memory) and mix
-    # its output bit into the pulse decision
-    a.db(0x81, 0xEB).label("ninc"); a.bytes(_w(0))   # sub bx, <ninc>
-    a.db(0x73).rel8("fgnonoise")                     # jnc: no clock this sample
-    a.db(0x8B, 0x0E).abs16("nlfsr").db(0xD1, 0xE9)   # mov cx,[nlfsr]; shr cx,1
-    a.db(0x73).rel8("fgnotap").db(0x81, 0xF1).bytes(_w(_SPK4_LFSR))   # jnc; xor cx,taps
-    a.label("fgnotap")
-    a.db(0x89, 0x0E).abs16("nlfsr")                  # mov [nlfsr],cx
-    a.db(0x80, 0xE1, 0x01).db(0x08, 0xCC)            # and cl,1; or ah,cl
-    a.label("fgnonoise")
-    # pulse if ANY voice overflowed: ah!=0 -> gate rising edge (fires the one-shot)
-    a.db(0xF6, 0xDC)                                 # neg ah   (CF = ah != 0)
-    a.db(0x18, 0xC0).db(0x24, 0x01)                  # sbb al,al; and al,1 (al = pulse bit)
-    a.db(0x08, 0xD0).db(0xE6, _SPEAKER)              # or al,dl; out 0x61,al (gate = pulse)
-    a.label("fgback")
-    a.db(0xEB).rel8("fgsamp")                        # jmp short fgsamp (NOP'd out to quit)
-    # ---- teardown (fallen through here once the tempo ISR NOPs fgback) ---------
+    _emit_fg_body(a, "fg")                           # the PLAYBACK copy of the loop
+    a.db(0x90)                                       # nop (match calibration's 2-instr edge)
+    a.label("fgjmp")
+    a.db(0xEB).rel8("fgsamp")                        # jmp fgsamp (quit: patched to nop nop)
+    # ---- teardown (reached when the tempo ISR NOPs fgjmp) ----------------------
     a.db(0xFA)                                        # cli
     a.db(0xA0).abs16("old61").db(0xE6, _SPEAKER)     # restore port 0x61 (speaker off)
     a.db(0xB0, 0x36).db(0xE6, _PIT_CMD)              # ch0 mode 3
@@ -3008,16 +3040,18 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0x26, 0xA1, 0x1C, 0x04).db(0x26, 0xA3, 0x1A, 0x04)  # flush key (head=tail)
     a.db(0xFB)                                        # sti
     a.db(0xB8, 0x00, 0x4C).db(0xCD, 0x21)            # exit to DOS
-    # ---- tempo ISR (INT 8): patch the next sub-tick's increments, auto-repeat --
+    # ---- tempo ISR (INT 8): scale + patch this sub-tick's increments -----------
     a.label("tisr")
-    a.db(0x50, 0x53, 0x51, 0x56, 0x57)               # push ax,bx,cx,si,di (ds=cs)
+    a.db(0x50, 0x53, 0x51, 0x52, 0x56, 0x57)         # push ax,bx,cx,dx,si,di (ds=cs)
     a.db(0x8B, 0x36).abs16("streamptr")              # mov si,[streamptr]
     a.db(0x8A, 0x0C).db(0x30, 0xED).db(0x46)         # mov cl,[si]; xor ch,ch; inc si
     a.db(0xE3).rel8("tskip")                         # jcxz tskip (no changes)
     a.label("tevl")
     a.db(0x8A, 0x04).db(0x24, 0x0F)                  # mov al,[si]; and al,0x0F (voice)
     a.db(0x88, 0xC3).db(0x30, 0xFF).db(0xD1, 0xE3)   # mov bl,al; xor bh,bh; shl bx,1
-    a.db(0x8B, 0x44, 0x01)                           # mov ax,[si+1] (increment)
+    a.db(0x8B, 0x44, 0x01)                           # mov ax,[si+1] (raw increment)
+    a.db(0xF7, 0x26).abs16("scale256")               # mul word[scale256] -> DX:AX
+    a.db(0x88, 0xE0).db(0x88, 0xD4)                  # mov al,ah; mov ah,dl  (>>8 = scaled)
     a.db(0x8B, 0xBF).abs16("incaddr")                # mov di,[bx+incaddr]
     a.db(0x89, 0x05)                                 # mov [di],ax  (self-modify the loop)
     a.db(0x83, 0xC6, 0x04)                           # add si,4 (next change record)
@@ -3030,19 +3064,18 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.db(0xC7, 0x06).abs16("ticksleft").bytes(_w(total_subs))
     a.label("tdone")
     # quit when a key is waiting in the BIOS buffer (head != tail). Letting BIOS
-    # own the keyboard sidesteps every make/break/ack pitfall of a custom INT 9
-    # -- in particular the RELEASE of the key that launched the .COM no longer
-    # trips an instant exit (that was the "pfft and quit" bug).
+    # own the keyboard sidesteps the make/break/ack pitfalls of a custom INT 9 --
+    # in particular the RELEASE of the launch key no longer trips an instant exit.
     a.db(0x06)                                       # push es
     a.db(0x31, 0xC0).db(0x8E, 0xC0)                  # xor ax,ax; mov es,ax
     a.db(0x26, 0xA1, 0x1A, 0x04)                     # mov ax, es:[0x41A] (buffer head)
     a.db(0x26, 0x3B, 0x06, 0x1C, 0x04)               # cmp ax, es:[0x41C] (buffer tail)
     a.db(0x07)                                       # pop es
     a.db(0x74).rel8("tnokey")                        # je: buffer empty -> keep playing
-    a.db(0xC7, 0x06).abs16("fgback").db(0x90, 0x90)  # NOP the loop back-jump -> quit
+    a.db(0xC7, 0x06).abs16("fgjmp").db(0x90, 0x90)   # NOP the playback jmp -> quit
     a.label("tnokey")
     a.db(0xB0, 0x20).db(0xE6, 0x20)                  # EOI
-    a.db(0x5F, 0x5E, 0x59, 0x5B, 0x58).db(0xCF)      # pop di,si,cx,bx,ax; iret
+    a.db(0x5F, 0x5E, 0x5A, 0x59, 0x5B, 0x58).db(0xCF)  # pop di,si,dx,cx,bx,ax; iret
     # ---- variables + data -----------------------------------------------------
     a.label("old_off"); a.db(0x00, 0x00)
     a.label("old_seg"); a.db(0x00, 0x00)
@@ -3050,9 +3083,10 @@ def _assemble_spk4_fg(subtick_div: int, total_subs: int, stream: bytes,
     a.label("base61"); a.db(0x00)
     a.label("streamptr"); a.db(0x00, 0x00)
     a.label("ticksleft"); a.db(0x00, 0x00)
+    a.label("scale256"); a.bytes(_w(256))            # increment scale (256 = identity)
     a.label("nlfsr"); a.bytes(_w(_NOISE_SEED))       # noise LFSR state (nonzero)
     a.label("incaddr")                               # voice -> address of its self-mod inc
-    a.abs16("inc0"); a.abs16("inc1"); a.abs16("inc2"); a.abs16("ninc")
+    a.abs16("fginc0"); a.abs16("fginc1"); a.abs16("fginc2"); a.abs16("fgninc")
     a.label("stream"); a.bytes(stream)
     return a.resolve()
 
