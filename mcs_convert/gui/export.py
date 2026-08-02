@@ -243,7 +243,7 @@ class ExportDialog(tk.Toplevel):
         return TARGETS[0]
 
     def _on_target(self) -> None:
-        label, rt, _, _ = self._spec()
+        label, rt, _, ext = self._spec()
         allowed = TARGET_WAVEFORMS.get(rt, ("square",)) if rt else \
             ("square", "triangle", "sine")
         vals = ["native"] + [w for w in ("square", "triangle", "sine")
@@ -251,12 +251,18 @@ class ExportDialog(tk.Toplevel):
         self.wave_box.configure(values=vals)
         if self.wave.get() not in vals:
             self.wave.set("native")
+        # The MCS voice-count picker is only meaningful for the POLYPHONIC .MCS
+        # export. The arpeggiated .MCS is a deliberate single voice, and the
+        # arp 1-voice .COM merely retracks via "mcs" to keep the chord for its
+        # own arp -- neither should offer a voice count. Key off the file kind
+        # and the arp label, not `rt` (which is overloaded as the retrack step).
+        mcs_polyphonic = ext == ".mcs" and "arpeggiated" not in label
         self.mcs_voices_box.configure(
-            state="readonly" if rt == "mcs" else "disabled")
-        # the Visualization picker builds a .COM's on-screen display: a WAV has
-        # no screen, and the .MCS target always previews as music notation
-        com_display = not (label.startswith("WAV") or rt == "mcs")
-        self.scope_box.configure(state="readonly" if com_display else "disabled")
+            state="readonly" if mcs_polyphonic else "disabled")
+        # the Visualization picker builds a .COM's on-screen display (any .COM);
+        # a WAV has no screen and the .MCS targets preview as music notation
+        self.scope_box.configure(
+            state="readonly" if ext == ".com" else "disabled")
 
     def _byte0(self) -> int:
         """The MCS tempo byte from the Tempo picker (pure playback speed —
