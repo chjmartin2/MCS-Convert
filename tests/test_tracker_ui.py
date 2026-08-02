@@ -151,3 +151,27 @@ def test_mute_blanks_the_channel_in_render(app):
     app.mute[0] = False
     master, flat = app._render(app.song)
     assert any(p is not None for p in flat.channels[0].pitch)
+
+
+def test_target_mode_lints_and_snaps(app):
+    from mcs_convert import targetmode as TM
+    app.song.instruments[1] = R.RctInstrument(waveform="pulse25", volume=12)
+    c = app.pattern().cell(0, 0)
+    c.note = R.midi_to_note(60)
+    c.inst = 1
+    c.fx, c.param = R.FX_VIBRATO, 0x4C
+    app.song.set_bpm(150.0)                            # arbitrary tempo
+    # switching to MCS mode snaps the tempo to the grid and flags the cell
+    app.v_tmode.set(TM.MODE_LABELS["mcs"])
+    app._mode_changed()
+    assert app.mode == "mcs"
+    assert app.song.subtick_us == 0                    # locked to MCS grid
+    assert app._lint_count() == 1                      # the vibrato cell
+    # SoundBlaster keeps waveform + effects -> clean
+    app.v_tmode.set(TM.MODE_LABELS["sb"])
+    app._mode_changed()
+    assert app._lint_count() == 0
+    # back to free: nothing flagged
+    app.v_tmode.set(TM.MODE_LABELS["free"])
+    app._mode_changed()
+    assert app.mode == "free" and app._lint_count() == 0

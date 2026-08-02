@@ -27,6 +27,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .. import rct as R
+from .. import targetmode as TM
 from ..audio import WaveOutPlayer, pcm16
 from ..effects import flatten, render_flat
 from . import viz
@@ -41,6 +42,7 @@ CUR = "#2a4a2a"                  # cursor cell
 ROWHL = "#1c2433"                # playing row
 BEAT = "#171d28"                 # every 4th row shade
 CHCOL = ("#e8d44d", "#e07070", "#6f9fe8", "#70d0a0")   # per-channel accents
+LINT = "#d88a2a"                 # amber: a cell the current target drops
 FONT = ("Consolas", 11)
 FONTB = ("Consolas", 11, "bold")
 
@@ -69,6 +71,7 @@ class TrackerApp:
         self.field = 0               # 0 note 1 inst 2 vol 3 fx
         self.octave = 4
         self.step = 1
+        self.mode = "free"           # target lint mode (TM.MODES)
         self.player = WaveOutPlayer()
         self._playing = False
         self._play_subs = 0
@@ -171,6 +174,13 @@ class TrackerApp:
                             values=["3 tone + noise", "4 tone"])
         mode.pack(side="left", padx=(2, 10))
         mode.bind("<<ComboboxSelected>>", lambda e: self._settings_changed())
+        lab("Mode").pack(side="left")
+        self.v_tmode = tk.StringVar(value=TM.MODE_LABELS["free"])
+        tmode = ttk.Combobox(top, textvariable=self.v_tmode, width=16,
+                             state="readonly",
+                             values=[TM.MODE_LABELS[m] for m in TM.MODES])
+        tmode.pack(side="left", padx=(2, 10))
+        tmode.bind("<<ComboboxSelected>>", lambda e: self._mode_changed())
         self.l_oct = tk.Label(top, text="oct 4  step 1", bg=BG, fg=ACC, font=FONTB)
         self.l_oct.pack(side="right")
         self.v_follow = tk.BooleanVar(value=True)
@@ -334,6 +344,33 @@ class TrackerApp:
                                   else R.MODE_3TONE_NOISE)
         self.refresh()
 
+    def _mode_changed(self):
+        label = self.v_tmode.get()
+        self.mode = next((m for m in TM.MODES if TM.MODE_LABELS[m] == label),
+                         "free")
+        if TM.tempo_is_snapped(self.mode) and self.song.subtick_us:
+            self._checkpoint()
+            self.song.tempo_byte0 = self.song.mcs_tempo_byte()
+            self.song.subtick_us = 0              # MCS-mode: lock to the grid
+            self._sync_settings()
+        self.refresh()
+
+    def _cell_wave(self, cell) -> str:
+        ins = self.song.instruments.get(cell.inst)
+        return ins.waveform if ins else "square"
+
+    def _lint_count(self) -> int:
+        if self.mode == "free":
+            return 0
+        n = 0
+        for pat in self.song.patterns.values():
+            for row in pat.cells:
+                for cell in row:
+                    if not cell.empty and TM.lint_cell(
+                            cell, self.mode, self._cell_wave(cell)):
+                        n += 1
+        return n
+
     def _bpm_changed(self):
         try:
             bpm = float(self.v_bpm.get())
@@ -342,6 +379,8 @@ class TrackerApp:
             return
         self._checkpoint()
         self.song.set_bpm(bpm)                       # arbitrary; MCS byte snaps
+        if TM.tempo_is_snapped(self.mode):           # MCS-mode: lock to grid
+            self.song.subtick_us = 0
         self.v_bpm.set(f"{self.song.bpm:.1f}")
         self.refresh()
 
@@ -951,6 +990,12 @@ class TrackerApp:
         self.l_snap.config(
             text=f"→ MCS {self.song.tempo_byte0:#04x}"
                  if self.song.subtick_us else "(MCS grid)")
+        if self.mode != "free":
+            n = self._lint_count()
+            self.v_status.set(
+                f"{TM.MODE_LABELS[self.mode]} mode: "
+                + (f"{n} cell(s) won't fully export (amber)" if n
+                   else "every cell exports cleanly"))
         # order list
         self.orderbox.delete(0, "end")
         for i, pnum in enumerate(self.song.order):
@@ -1011,9 +1056,14 @@ class TrackerApp:
                     fx0 = x0 + (0, 46, 64, 84, 100)[self.field]
                     fx1 = x0 + (44, 62, 82, 98, 128)[self.field]
                     cv.create_rectangle(fx0, y - 9, fx1, y + 9, fill=CUR, width=0)
+                bad = self.mode != "free" and TM.lint_cell(
+                    cell, self.mode, self._cell_wave(cell))
                 note = R.note_name(cell.note)
                 inst = f"{cell.inst:X}" if cell.inst else "."
                 vol = f"{cell.vol - 1:X}" if cell.vol else "."
+                if bad:
+                    cv.create_text(x0 + 4, y, text="•",
+                                   fill=LINT, font=FONT, anchor="w")
                 fxl = R.FX_LETTERS[cell.fx] if cell.fx else "."
                 fxp = f"{cell.param:02X}" if (cell.fx or cell.param) else ".."
                 colour = CHCOL[c] if cell.note else FG if not cell.empty else DIM
