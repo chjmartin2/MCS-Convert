@@ -120,6 +120,9 @@ class TrackerApp:
         xm.add_command(label="RCPLAY.COM (DOS player)", command=self.export_rcplay)
         fm.add_cascade(label="Export", menu=xm)
         fm.add_separator()
+        fm.add_command(label="Export Center… (targets, previews, retrack)",
+                       command=self.open_export_center, accelerator="Ctrl+E")
+        fm.add_separator()
         fm.add_command(label="Quit", command=root.destroy)
         m.add_cascade(label="File", menu=fm)
         pm = tk.Menu(m, tearoff=0, bg=BG2, fg=FG, activebackground=CUR)
@@ -269,6 +272,7 @@ class TrackerApp:
         r.bind("<Control-n>", lambda e: self.new_song())
         r.bind("<Control-o>", lambda e: self.open_dialog())
         r.bind("<Control-s>", lambda e: self.save())
+        r.bind("<Control-e>", lambda e: self.open_export_center())
         r.bind("<Key>", self._key)
 
     # ---- undo ----------------------------------------------------------------
@@ -589,6 +593,39 @@ class TrackerApp:
         except (ValueError, KeyError) as exc:
             messagebox.showerror("Ornaments", f"could not parse: {exc}")
         self.refresh()
+
+    # ---- Export Center (MCS-Player's ExportDialog, adapted) ------------------
+
+    def open_export_center(self):
+        """Open the full export dialog -- every target with its own preview
+        (audio + DOS viz + MCS NOTATION), Retrack-into-editor, and the tempo
+        optimizers -- driven by an adapter that speaks the universal Song the
+        dialog expects and folds any retrack result back into the tracker."""
+        from ..convert import rct_to_universal
+        from .export import ExportDialog
+        self.stop()
+        adapter = _ExportHost(self)
+        adapter.song = rct_to_universal(self.song)
+        adapter.song.tempo_tick_seconds = self.song.subtick_seconds * 4.0
+        ExportDialog(adapter)
+
+    def _load_universal(self, song, label: str = ""):
+        """The Export Center's Retrack reloads the tracker with a reduced
+        universal Song -- convert it back to RctSong (an automatic undo
+        snapshot first, so Ctrl+Z restores the pre-retrack tracker)."""
+        from ..convert import song_to_rct
+        self._checkpoint()
+        keep_bpm = self.song.subtick_us
+        self.song = song_to_rct(song, tempo_byte0=self.song.tempo_byte0,
+                                title=self.song.title)
+        if keep_bpm:                                 # retrack preserves the BPM
+            self.song.subtick_us = keep_bpm
+            self.song.tempo_byte0 = self.song.mcs_tempo_byte()
+        self.cur_pat = self.song.order[0]
+        self.row = self.chan = 0
+        self._sync_settings()
+        self.refresh()
+        self.v_status.set(f"tracker reloaded — {label}")
 
     # ---- DOS-replica preview -------------------------------------------------
 
@@ -989,6 +1026,31 @@ class TrackerApp:
                                fill=ACC if cell.fx else DIM, font=FONT)
                 cv.create_text(x0 + 112, y, text=fxp,
                                fill=ACC if cell.fx else DIM, font=FONT)
+
+
+class _ExportHost:
+    """Adapts a TrackerApp to the surface ExportDialog expects of its host
+    (`.song` universal, `.player`, `.root`, `.volume`, `.path`, `.load_song`).
+    Lets the tracker reuse MCS-Player's export center verbatim -- including the
+    MCS notation preview and Retrack-into-editor -- so nothing is lost."""
+
+    class _Vol:
+        def __init__(self, app):
+            self.app = app
+
+        def get(self):
+            return self.app.v_vol.get()
+
+    def __init__(self, app: "TrackerApp"):
+        self.app = app
+        self.root = app.root
+        self.player = app.player
+        self.volume = _ExportHost._Vol(app)
+        self.path = app.path
+        self.song = None                             # set by open_export_center
+
+    def load_song(self, song, label: str = ""):
+        self.app._load_universal(song, label)
 
 
 def main(argv=None) -> int:
