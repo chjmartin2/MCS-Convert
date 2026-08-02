@@ -20,6 +20,7 @@ import numpy as np
 from .. import rct as R
 from ..audio import WaveOutPlayer, pcm16
 from ..effects import flatten, render_flat
+from . import viz
 
 BG = "#101014"
 BG2 = "#16161c"
@@ -50,6 +51,7 @@ class RCPlayApp:
         self.paused = False
         self._tick = None
         self._seek_drag = False
+        self.vizpack = viz.VizPack(root, ["CH1", "CH2", "CH3", "NSE"])
         self._build_ui()
         for p in paths:
             self._add(p)
@@ -86,6 +88,13 @@ class RCPlayApp:
             tk.Button(btns, text=txt, command=cmd, width=4, bg=BG2, fg=FG,
                       relief="flat", activebackground="#2a4a2a",
                       font=FONTB).pack(side="left", padx=2)
+        for txt, cmd in (("〰", lambda: self.vizpack.open_scope()),
+                         ("▮", lambda: self.vizpack.open_vu()),
+                         ("▁▃▅",
+                          lambda: self.vizpack.open_spectrum())):
+            tk.Button(btns, text=txt, command=cmd, width=3, bg=BG2, fg=FG,
+                      relief="flat", activebackground="#2a4a2a",
+                      font=FONT).pack(side="left", padx=2)
 
         pf = tk.Frame(r, bg=BG)
         pf.pack(fill="both", expand=True, padx=10, pady=(2, 8))
@@ -209,6 +218,7 @@ class RCPlayApp:
         if not self._seek_drag:
             self.seek.set(pos / self.total_s if self.total_s else 0)
         self.v_time.set(f"{self._fmt(pos)} / {self._fmt(self.total_s)}")
+        self.vizpack.tick(self.master, self.voices, _SR, pos)
         cv = self.scope
         cv.delete("all")
         w = cv.winfo_width() or 540

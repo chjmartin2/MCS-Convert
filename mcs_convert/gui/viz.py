@@ -727,3 +727,118 @@ def voice_periods(song) -> List[float]:
             med = sorted(pitches)[len(pitches) // 2]
             out.append(max(0.05, min(1.0, (96 - med) / 60.0)))
     return out
+
+
+# --- shared live-visualization pack (RCTracker + RCPlay) ---------------------
+
+_SCOPE_LINE = "#00ff41"          # phosphor green
+_SCOPE_DIM = "#0c3d1e"           # midline / frame green
+
+
+class ScopeWindow:
+    """The oscilloscope window (v1..v4 in a 2x2 grid + master below), extracted
+    from MCS-Player so RCTracker and RCPlay share one implementation."""
+
+    def __init__(self, parent, names=None) -> None:
+        import numpy as np                            # local: keeps import light
+        self._np = np
+        self.win = _window(parent, "Oscilloscope", (380, 300))
+        self.win.configure(bg="#101014")
+        self.win.rowconfigure(0, weight=2)
+        self.win.rowconfigure(1, weight=1)
+        self.win.columnconfigure(0, weight=1)
+        names = list(names or ["v1", "v2", "v3", "v4"])[:4]
+        self.panels = []
+        grid = tk.Frame(self.win, bg="#101014")
+        grid.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 2))
+        for rc in (0, 1):
+            grid.rowconfigure(rc, weight=1)
+            grid.columnconfigure(rc, weight=1)
+        for k in range(4):
+            c = tk.Canvas(grid, width=224, height=92, bg="#000000",
+                          highlightthickness=1, highlightbackground=_SCOPE_DIM)
+            c.grid(row=k // 2, column=k % 2, padx=3, pady=3, sticky="nsew")
+            self.panels.append(self._panel(c, names[k]))
+        m = tk.Canvas(self.win, width=458, height=116, bg="#000000",
+                      highlightthickness=1, highlightbackground=_SCOPE_DIM)
+        m.grid(row=1, column=0, sticky="nsew", padx=11, pady=(2, 8))
+        self.panels.append(self._panel(m, "master"))
+
+    def _panel(self, c, label):
+        c.create_line(0, 0, 0, 0, fill=_SCOPE_DIM)
+        c.create_text(6, 4, text=label, anchor="nw", fill=_SCOPE_DIM,
+                      font=("TkDefaultFont", 8))
+        trace = c.create_line(0, 0, 0, 0, fill=_SCOPE_LINE)
+        return (c, trace)
+
+    def alive(self) -> bool:
+        return bool(self.win.winfo_exists())
+
+    def draw(self, master, voices, sr: int, pos: Optional[float]) -> None:
+        """~30 ms window of each voice + master at `pos` seconds; None flatlines."""
+        if not self.alive():
+            return
+        np = self._np
+        bufs = [None] * 5
+        idx = span = 0
+        if pos is not None and master is not None:
+            vs = list(voices or [])[:4]
+            bufs = vs + [None] * (4 - len(vs)) + [master]
+            idx = max(0, int(pos * sr))
+            span = int(0.030 * sr)
+        for buf, (c, trace) in zip(bufs, self.panels):
+            w = max(c.winfo_width(), 60)
+            h = max(c.winfo_height(), 40)
+            mid = h / 2
+            seg = buf[idx:idx + span] if buf is not None else ()
+            n = min(w // 2, len(seg))
+            if n < 2:
+                c.coords(trace, 2, mid, w - 2, mid)
+                continue
+            ys = seg[np.linspace(0, len(seg) - 1, n).astype(int)]
+            pts = np.empty(2 * n)
+            pts[0::2] = np.linspace(2, w - 2, n)
+            pts[1::2] = mid - ys * (mid - 8)
+            c.coords(trace, *pts.tolist())
+
+
+class VizPack:
+    """The Scope / VU / Spectrum trio for any host with rendered buffers.
+    The host calls tick(master, voices, sr, pos) ~30x/sec; closed windows are
+    simply skipped, so the pack needs no lifecycle management."""
+
+    def __init__(self, parent, names=None) -> None:
+        self.parent = parent
+        self.names = list(names or ["CH1", "CH2", "CH3", "NSE"])
+        self.scope = None
+        self.vu = None
+        self.spectrum = None
+
+    def open_scope(self) -> None:
+        if self.scope is None or not self.scope.alive():
+            self.scope = ScopeWindow(self.parent, self.names)
+        else:
+            self.scope.win.lift()
+
+    def open_vu(self) -> None:
+        if self.vu is None or not self.vu.alive():
+            self.vu = VUWindow(self.parent, self.names)
+        else:
+            self.vu.win.lift()
+
+    def open_spectrum(self) -> None:
+        if self.spectrum is None or not self.spectrum.alive():
+            self.spectrum = SpectrumWindow(self.parent)
+        else:
+            self.spectrum.win.lift()
+
+    def tick(self, master, voices, sr: int, pos: Optional[float]) -> None:
+        idx = max(0, int((pos or 0) * sr))
+        span = int(0.030 * sr)
+        playing = pos is not None and master is not None
+        if self.scope is not None and self.scope.alive():
+            self.scope.draw(master if playing else None, voices, sr, pos)
+        if self.vu is not None and self.vu.alive():
+            self.vu.draw(_rms_levels(voices, idx, span) if playing else None)
+        if self.spectrum is not None and self.spectrum.alive():
+            self.spectrum.draw(_spectrum(master, idx, sr) if playing else None)

@@ -29,6 +29,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from .. import rct as R
 from ..audio import WaveOutPlayer, pcm16
 from ..effects import flatten, render_flat
+from . import viz
 
 # ---- theme ------------------------------------------------------------------
 BG = "#101014"
@@ -77,11 +78,17 @@ class TrackerApp:
         self._undo: list = []        # (deepcopy(song), cur_pat, row) snapshots
         self._redo: list = []
         self.mute = [False] * 4
+        self._voices = None
+        self._master = None
+        self.vizpack = viz.VizPack(root, ["CH1", "CH2", "CH3", "NSE"])
+        self._dos_win = None
+        self._periods = None
         self._build_ui()
         self._bind_keys()
         if path:
             self.open_file(path)
         self.refresh()
+        self._viz_tick()
 
     # ---- UI construction ----------------------------------------------------
 
@@ -175,6 +182,16 @@ class TrackerApp:
                  ).pack(side="right", padx=(0, 8))
         tk.Label(top, text="vol", bg=BG, fg=DIM, font=FONT).pack(side="right")
 
+        vbar = tk.Frame(root, bg=BG)
+        vbar.pack(fill="x", padx=6)
+        for txt, cmd in (("\u3030 Scope", lambda: self.vizpack.open_scope()),
+                         ("\u25ae VU", lambda: self.vizpack.open_vu()),
+                         ("\u2581\u2583\u2585 Spectrum",
+                          lambda: self.vizpack.open_spectrum()),
+                         ("\u25a6 DOS view", self.open_dos_view)):
+            tk.Button(vbar, text=txt, command=cmd, bg=BG2, fg=FG,
+                      relief="flat", activebackground=CUR, font=FONT
+                      ).pack(side="left", padx=(0, 4), pady=(0, 2))
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True, padx=6, pady=2)
 
@@ -573,6 +590,46 @@ class TrackerApp:
             messagebox.showerror("Ornaments", f"could not parse: {exc}")
         self.refresh()
 
+    # ---- DOS-replica preview -------------------------------------------------
+
+    def open_dos_view(self):
+        """The DOS visualization replica: pick a .COM display style, see the
+        exact scope/VU/spectrum the standalone player will draw."""
+        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=CUR)
+        for style in viz.DOS_STYLES:
+            m.add_command(label=style,
+                          command=lambda s=style: self._open_dos(s))
+        m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+
+    def _open_dos(self, style: str):
+        if self._dos_win is not None and self._dos_win.alive():
+            self._dos_win.win.destroy()
+        self._dos_win = viz.DosVizWindow(self.root, style,
+                                         ["CH1", "CH2", "CH3", "NSE"])
+        waves = [i.waveform for i in self.song.instruments.values()]
+        self._dos_win.set_wave(max(set(waves), key=waves.count)
+                               if waves else "square")
+
+    # ---- the always-on viz tick ----------------------------------------------
+
+    def _viz_tick(self):
+        if not self.root.winfo_exists():
+            return
+        self.root.after(33, self._viz_tick)
+        pos = None
+        if self._playing and self._master is not None:
+            pos = self.player.position_seconds() + self._seek_base
+        self.vizpack.tick(self._master, self._voices, 44100, pos)
+        if self._dos_win is not None and self._dos_win.alive():
+            if pos is not None and self._voices is not None:
+                idx = int(pos * 44100)
+                span = int(0.030 * 44100)
+                self._dos_win.draw(viz._rms_levels(self._voices, idx, span),
+                                   viz._spectrum(self._master, idx, 44100, 18),
+                                   self._periods, elapsed=pos)
+            else:
+                self._dos_win.draw(None, None, None, elapsed=0.0)
+
     # ---- playback ------------------------------------------------------------
 
     def _render(self, song: R.RctSong):
@@ -597,6 +654,12 @@ class TrackerApp:
         self._flat = flat
         self._seek_base = 0.0
         self._master = master
+        try:
+            from ..convert import rct_to_universal
+            pr = viz.voice_periods(rct_to_universal(self.song))
+            self._periods = (list(pr) + [0.3] * 4)[:4]   # always 4 entries
+        except Exception:
+            self._periods = [0.3] * 4
         self.player.play(pcm16(master), 44100)
         self._playing = True
         self._follow()
@@ -619,6 +682,7 @@ class TrackerApp:
         self._sub_s = flat.subtick_seconds
         self._flat = None                            # pattern solo: no follow map
         self._seek_base = 0.0
+        self._master = master
         self.player.play(pcm16(master), 44100)
         self._playing = True
         self._follow()
