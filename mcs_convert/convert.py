@@ -27,10 +27,18 @@ _ROWS = 32                       # pattern length: one 4/4 bar of 32nd notes
 
 def song_to_rct(song: Song, tempo_byte0: int = 0x80,
                 title: Optional[str] = None) -> RctSong:
-    """Patternize a universal Song into an RctSong (speed 4: row = 32nd)."""
+    """Patternize a universal Song into an RctSong (speed 4: row = 32nd).
+
+    The EXACT source tempo survives: `subtick_us` is set from the importer's
+    measured tick length when it has one (PT3 frame timing, NSF fits...), so
+    the .RCT plays at the true speed and the MCS byte is just its snap."""
     rct = RctSong(title=(title or song.title or "imported")[:32],
                   channel_mode=MODE_3TONE_NOISE, tempo_byte0=tempo_byte0,
                   speed=4)
+    tick_s = getattr(song, "tempo_tick_seconds", 0) or 0
+    if tick_s > 0:
+        rct.subtick_us = max(1, min(65535, round(tick_s / 4.0 * 1_000_000)))
+        rct.tempo_byte0 = rct.mcs_tempo_byte()
     rct.patterns.clear()
     rct.instruments.clear()
 

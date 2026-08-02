@@ -132,7 +132,11 @@ class RctSong:
     comment: str = ""
     channel_mode: int = MODE_3TONE_NOISE
     target_hint: str = "4voice"
-    tempo_byte0: int = 0x80      # the MCS tempo byte
+    tempo_byte0: int = 0x80      # the MCS tempo byte (the SNAP, kept in sync)
+    subtick_us: int = 0          # exact sub-tick period in µs; 0 = derive from
+    #                              tempo_byte0 (legacy files). This is what makes
+    #                              BPM arbitrary: engines/exports use the exact
+    #                              period, the MCS byte is just its nearest snap.
     speed: int = 4               # sub-ticks per row (4 = one row per 32nd)
     patterns: Dict[int, RctPattern] = field(default_factory=dict)
     order: List[int] = field(default_factory=lambda: [0])
@@ -149,6 +153,34 @@ class RctSong:
     @property
     def channels(self) -> int:
         return 4
+
+    @property
+    def subtick_seconds(self) -> float:
+        """The exact sub-tick period: the free-BPM field when set, else the
+        MCS tempo byte's grid (legacy files and MCS-locked songs)."""
+        if self.subtick_us:
+            return self.subtick_us / 1_000_000.0
+        from .mcs.reader import tick_seconds_for
+        return tick_seconds_for(self.tempo_byte0) / 4.0
+
+    @property
+    def bpm(self) -> float:
+        """Quarter-note BPM (a quarter is 8 ticks = 32 sub-ticks)."""
+        return 60.0 / (32.0 * self.subtick_seconds)
+
+    def set_bpm(self, bpm: float) -> None:
+        """Set an ARBITRARY tempo. Stores the exact sub-tick period and keeps
+        tempo_byte0 tracking the nearest MCS speed (the MCS-mode/export snap)."""
+        bpm = max(20.0, min(900.0, float(bpm)))
+        self.subtick_us = max(1, min(65535, round(60_000_000.0 / (32.0 * bpm))))
+        self.tempo_byte0 = self.mcs_tempo_byte()
+
+    def mcs_tempo_byte(self) -> int:
+        """The MCS tempo byte whose grid is closest to the exact tempo."""
+        from .mcs.reader import tick_seconds_for
+        tick = self.subtick_seconds * 4.0
+        return min((0x77 + 3 * s for s in range(10)),
+                   key=lambda b: abs(tick_seconds_for(b) - tick))
 
     def channel_kind(self, ch: int) -> str:
         """'tone' or 'noise' for a channel index (0-3)."""
@@ -188,7 +220,8 @@ def write_rct(song: RctSong) -> bytes:
     out += bytes([VERSION, song.channel_mode,
                   TARGET_HINTS.index(song.target_hint),
                   song.tempo_byte0, song.speed])
-    out += bytes(7)                                  # reserved
+    out += struct.pack("<H", song.subtick_us)        # exact tempo (0 = legacy)
+    out += bytes(5)                                  # reserved
 
     out += _chunk(b"SONG", _pad(song.title, 32) + _pad(song.author, 32) +
                   _pad(song.comment, 64))
@@ -284,7 +317,9 @@ def read_rct(data: bytes) -> RctSong:
     song = RctSong(channel_mode=data[5],
                    target_hint=TARGET_HINTS[data[6]] if data[6] < len(TARGET_HINTS)
                    else "any",
-                   tempo_byte0=data[7], speed=max(1, data[8]))
+                   tempo_byte0=data[7],
+                   subtick_us=struct.unpack_from("<H", data, 9)[0],
+                   speed=max(1, data[8]))
     song.patterns.clear()
     song.instruments.clear()
 

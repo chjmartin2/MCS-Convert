@@ -252,8 +252,9 @@ def tandy_stream(flat: FlatSong, viz: bool = True) -> Tuple[bytes, int]:
 
 # --- PERF chunk compilation + .COM builds ------------------------------------
 
-def _subtick_divider(tempo_byte0: int) -> int:
-    return max(1, min(65535, round(D._PIT_HZ * tick_seconds_for(tempo_byte0) / 4)))
+def _subtick_divider(subtick_s: float) -> int:
+    """PIT divider for the EXACT sub-tick period (free BPM, not the MCS grid)."""
+    return max(1, min(65535, round(D._PIT_HZ * subtick_s)))
 
 
 def perf_chunks(song: RctSong, mix_rate: Optional[int] = None) -> Dict[int, bytes]:
@@ -262,9 +263,9 @@ def perf_chunks(song: RctSong, mix_rate: Optional[int] = None) -> Dict[int, byte
     flat = flatten(song)
     div4 = D._spk4_div_for(mix_rate)
     fs = D._PIT_HZ / div4
-    subtick_s = tick_seconds_for(song.tempo_byte0) / 4.0
+    subtick_s = song.subtick_seconds                  # exact (free BPM aware)
     samps = max(1, min(65535, round(fs * subtick_s)))
-    sdiv = _subtick_divider(song.tempo_byte0)
+    sdiv = _subtick_divider(subtick_s)
 
     def _sil(rec):                                   # trailing silence sub-tick,
         return bytes([len(rec)]) + b"".join(          # so auto-repeat rewinds from
@@ -291,8 +292,7 @@ def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
     """RctSong -> standalone .COM via the proven engines, at full effect
     fidelity (streams compiled straight from the flattened arrays)."""
     flat = flatten(song)
-    tempo = song.tempo_byte0
-    subtick_s = tick_seconds_for(tempo) / 4.0
+    subtick_s = song.subtick_seconds                  # exact (free BPM aware)
     vis = D._vis_for(scope, text_scope)
     skip = D._draw_skip_for(vis, fps)
 
@@ -303,7 +303,7 @@ def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
         waves = [w for ch in flat.channels for w in ch.wave
                  if w and ch.kind == "tone"]
         wf = max(set(waves), key=waves.count) if waves else "square"
-        com = D._assemble_spk4(_subtick_divider(tempo), 1, total, stream, vis,
+        com = D._assemble_spk4(_subtick_divider(subtick_s), 1, total, stream, vis,
                                skip, b"", False, True, sb_port,
                                D._sb_wave_bank(wf), wf, True)
         if len(com) > 0xFF00:
@@ -313,7 +313,7 @@ def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
         if foreground:
             fs_fg = float(mix_rate) if mix_rate else D._FG_FS
             stream, total = spk4_stream(flat, fs_fg)
-            return D._assemble_spk4_fg(_subtick_divider(tempo), total, stream,
+            return D._assemble_spk4_fg(_subtick_divider(subtick_s), total, stream,
                                        fs_fg)
         div = D._spk4_div_for(mix_rate)
         fs = D._PIT_HZ / div
@@ -335,7 +335,7 @@ def build_com(song: RctSong, mode: str, mix_rate: Optional[int] = None,
         sil_bytes = bytes([len(sil)]) + b"".join(bytes([p, v]) for p, v in sil)
         stream += sil_bytes
         total += 1
-        com = D._assemble(_subtick_divider(tempo), 1, total, sil_bytes, stream,
+        com = D._assemble(_subtick_divider(subtick_s), 1, total, sil_bytes, stream,
                           vis, skip)
     else:
         raise ValueError(f"unknown .COM mode {mode!r}")

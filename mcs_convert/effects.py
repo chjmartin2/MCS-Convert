@@ -60,6 +60,7 @@ class FlatChannel:
 class FlatSong:
     channels: List[FlatChannel]
     tempo_byte0: int
+    subtick_s: float = 0.0       # exact period (free BPM); 0 = MCS byte grid
 
     @property
     def total_subs(self) -> int:
@@ -67,7 +68,7 @@ class FlatSong:
 
     @property
     def subtick_seconds(self) -> float:
-        return tick_seconds_for(self.tempo_byte0) / 4.0
+        return self.subtick_s or tick_seconds_for(self.tempo_byte0) / 4.0
 
 
 class _ChanState:
@@ -198,7 +199,8 @@ def flatten(song: RctSong) -> FlatSong:
         order_pos += 1
         if brk is not None:
             start_row = brk
-    return FlatSong(channels=chans, tempo_byte0=song.tempo_byte0)
+    return FlatSong(channels=chans, tempo_byte0=song.tempo_byte0,
+                    subtick_s=song.subtick_seconds)
 
 
 # --- preview rendering (full effect fidelity) --------------------------------

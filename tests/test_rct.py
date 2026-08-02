@@ -89,3 +89,37 @@ def test_channel_kinds_follow_mode():
     assert [s.channel_kind(c) for c in range(4)] == ["tone"] * 3 + ["noise"]
     s.channel_mode = R.MODE_4TONE
     assert s.channel_kind(3) == "tone"
+
+
+def test_arbitrary_bpm_roundtrips_and_snaps_to_mcs():
+    # free BPM: the exact sub-tick period lives in the v1 header's reserved
+    # bytes; tempo_byte0 tracks the nearest MCS speed (the MCS-mode snap)
+    s = _demo_song()
+    s.set_bpm(144.0)
+    assert abs(s.bpm - 144.0) < 0.5                   # us resolution is plenty
+    assert s.subtick_us > 0
+    assert 0x77 <= s.tempo_byte0 <= 0x92              # snapped, still valid MCS
+    back = R.read_rct(R.write_rct(s))
+    assert back.subtick_us == s.subtick_us            # survives the file
+    assert abs(back.bpm - s.bpm) < 0.01
+    # legacy files (subtick_us == 0) still derive tempo from the MCS byte
+    legacy = _demo_song()
+    legacy.subtick_us = 0
+    from mcs_convert.mcs.reader import tick_seconds_for
+    assert abs(legacy.subtick_seconds - tick_seconds_for(legacy.tempo_byte0) / 4) < 1e-9
+    b2 = R.read_rct(R.write_rct(legacy))
+    assert b2.subtick_us == 0                         # legacy stays legacy
+
+
+def test_free_bpm_reaches_the_engines_exactly():
+    # the flattener and the PERF dividers use the EXACT period, not the snap
+    from mcs_convert.effects import flatten
+    from mcs_convert.streams import perf_chunks
+    s = _demo_song()
+    s.set_bpm(150.0)
+    flat = flatten(s)
+    assert abs(flat.subtick_seconds - s.subtick_seconds) < 1e-9
+    p = R.parse_perf(perf_chunks(s)[R.PERF_TANDY])
+    import math
+    want_div = round(1193182.0 * s.subtick_seconds)
+    assert abs(p["divider"] - want_div) <= 1          # exact PIT divider
