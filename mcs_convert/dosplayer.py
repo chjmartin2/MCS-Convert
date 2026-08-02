@@ -65,8 +65,10 @@ _SPK4_FS = _PIT_HZ / _SPK4_DIV
 #   carrier on a fast CPU / DOSBox cycles=max, where the PWM carrier is inaudible
 #   and only the audio band survives -- the highest quality the mixer can reach.
 _SPK4_DIV_MIN, _SPK4_DIV_MAX = 25, 1200
-_FG_FS = 16000                   # default target Fs for the foreground engine
-#                                  (its true rate = loop speed; tune --mix-rate to it)
+_FG_FS = 24000                   # default target Fs for the foreground engine --
+#                                  a real 4.77 MHz 8088 spins the loop this fast
+#                                  (measured); its true rate = loop speed, so tune
+#                                  --mix-rate to the machine if the pitch is off
 _SPK4_TONES = 3                  # square-wave voices
 _SPK4_VOICES = 4                 # + 1 noise voice = delta-sigma threshold
 _SPK4_LFSR = 0xB400              # 16-bit maximal Galois LFSR taps (noise source)
