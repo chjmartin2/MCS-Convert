@@ -31,5 +31,5 @@ plus the tracker features MCS-Player never had. Agreed decisions:
 - [x] **6. Editor QoL**: block select/copy/paste, insert/delete row,
       transpose; play-through target auditioning (incl. the MCS 1-bit
       speaker model).
-- [ ] **7. Retirement**: README/releases lead with RCTracker + RCPlay;
+- [x] **7. Retirement**: README/releases lead with RCTracker + RCPlay;
       `play` demoted to MCS format inspector.
