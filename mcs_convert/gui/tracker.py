@@ -14,6 +14,7 @@ Keys
   arrows/Tab   move   PgUp/PgDn page   Home/End top/bottom
   F1/F2        octave down/up          step +/- with - / =
   F5 / F6      play song / pattern     F8  stop    F9  play from cursor
+  (transport ▶ ⏸ ■ buttons sit on the top bar's first row)
   F7           toggle follow           Space  hop note <-> fx column
   Ctrl+Z / Y   undo / redo             Ctrl+E  Export Center
   Ctrl+B       mark block start        Ctrl+C/V/X  copy / paste / cut block
@@ -148,64 +149,78 @@ class TrackerApp:
         m.add_cascade(label="Play", menu=pm)
         root.config(menu=m)
 
-        # top bar: song settings
-        top = tk.Frame(root, bg=BG)
-        top.pack(fill="x", padx=6, pady=(6, 2))
+        # ---- top bar, split over TWO rows so nothing clips at the default size:
+        #   row 1 = identity + transport   row 2 = grid/target settings
+        top1 = tk.Frame(root, bg=BG)
+        top1.pack(fill="x", padx=6, pady=(6, 1))
+        top2 = tk.Frame(root, bg=BG)
+        top2.pack(fill="x", padx=6, pady=(0, 2))
         self.v_title = tk.StringVar(value=self.song.title)
         self.v_speed = tk.IntVar(value=self.song.speed)
         self.v_mode = tk.StringVar(value="3 tone + noise")
         self.v_status = tk.StringVar(value="ready")
 
-        def lab(text):
-            return tk.Label(top, text=text, bg=BG, fg=DIM, font=FONT)
+        def lab(parent, text):
+            return tk.Label(parent, text=text, bg=BG, fg=DIM, font=FONT)
 
-        lab("Title").pack(side="left")
-        tk.Entry(top, textvariable=self.v_title, width=18, bg=BG2, fg=FG,
+        # -- row 1: title, BPM, and the transport buttons --
+        lab(top1, "Title").pack(side="left")
+        tk.Entry(top1, textvariable=self.v_title, width=18, bg=BG2, fg=FG,
                  insertbackground=FG, font=FONT).pack(side="left", padx=(2, 10))
-        lab("BPM").pack(side="left")
+        lab(top1, "BPM").pack(side="left")
         self.v_bpm = tk.StringVar(value=f"{self.song.bpm:.1f}")
-        bpm_box = tk.Entry(top, textvariable=self.v_bpm, width=6, bg=BG2,
+        bpm_box = tk.Entry(top1, textvariable=self.v_bpm, width=6, bg=BG2,
                            fg=FG, insertbackground=FG, font=FONT)
         bpm_box.pack(side="left", padx=(2, 2))
         bpm_box.bind("<Return>", lambda e: self._bpm_changed())
         bpm_box.bind("<FocusOut>", lambda e: self._bpm_changed())
-        self.l_snap = tk.Label(top, text="", bg=BG, fg=DIM, font=FONT)
+        self.l_snap = tk.Label(top1, text="", bg=BG, fg=DIM, font=FONT)
         self.l_snap.pack(side="left", padx=(0, 10))
-        lab("Speed").pack(side="left")
-        tk.Spinbox(top, from_=1, to=32, textvariable=self.v_speed, width=3,
+        # transport (right side of row 1): play / pause / stop
+        self.l_oct = tk.Label(top1, text="oct 4  step 1", bg=BG, fg=ACC,
+                              font=FONTB)
+        self.l_oct.pack(side="right", padx=(8, 0))
+        for txt, cmd, col in (("■", self.stop, "#e07070"),
+                              ("⏸", self.pause, "#e8d44d"),
+                              ("▶", self.play_song, ACC)):
+            tk.Button(top1, text=txt, command=cmd, width=3, bg=BG2, fg=col,
+                      relief="flat", activebackground=CUR, font=FONTB
+                      ).pack(side="right", padx=2)
+
+        # -- row 2: speed, rows, channels, target mode + vol/follow --
+        lab(top2, "Speed").pack(side="left")
+        tk.Spinbox(top2, from_=1, to=32, textvariable=self.v_speed, width=3,
                    bg=BG2, fg=FG, font=FONT, command=self._settings_changed
                    ).pack(side="left", padx=(2, 10))
-        lab("Rows").pack(side="left")
+        lab(top2, "Rows").pack(side="left")
         self.v_rows = tk.IntVar(value=32)
-        tk.Spinbox(top, from_=1, to=64, textvariable=self.v_rows, width=3,
+        tk.Spinbox(top2, from_=1, to=64, textvariable=self.v_rows, width=3,
                    bg=BG2, fg=FG, font=FONT, command=self._rows_changed
                    ).pack(side="left", padx=(2, 10))
-        lab("Channels").pack(side="left")
-        mode = ttk.Combobox(top, textvariable=self.v_mode, width=14,
+        lab(top2, "Channels").pack(side="left")
+        mode = ttk.Combobox(top2, textvariable=self.v_mode, width=14,
                             state="readonly",
                             values=["3 tone + noise", "4 tone"])
         mode.pack(side="left", padx=(2, 10))
         mode.bind("<<ComboboxSelected>>", lambda e: self._settings_changed())
-        lab("Mode").pack(side="left")
+        lab(top2, "Mode").pack(side="left")
         self.v_tmode = tk.StringVar(value=TM.MODE_LABELS["free"])
-        tmode = ttk.Combobox(top, textvariable=self.v_tmode, width=16,
+        tmode = ttk.Combobox(top2, textvariable=self.v_tmode, width=16,
                              state="readonly",
                              values=[TM.MODE_LABELS[m] for m in TM.MODES])
         tmode.pack(side="left", padx=(2, 10))
         tmode.bind("<<ComboboxSelected>>", lambda e: self._mode_changed())
-        self.l_oct = tk.Label(top, text="oct 4  step 1", bg=BG, fg=ACC, font=FONTB)
-        self.l_oct.pack(side="right")
         self.v_follow = tk.BooleanVar(value=True)
-        tk.Checkbutton(top, text="follow", variable=self.v_follow, bg=BG,
+        tk.Checkbutton(top2, text="follow", variable=self.v_follow, bg=BG,
                        fg=FG, selectcolor=BG2, activebackground=BG,
                        font=FONT).pack(side="right", padx=(0, 8))
         self.v_vol = tk.DoubleVar(value=80.0)
-        tk.Scale(top, from_=0, to=100, orient="horizontal",
+        tk.Scale(top2, from_=0, to=100, orient="horizontal",
                  variable=self.v_vol, showvalue=False, length=90, bg=BG,
                  troughcolor=BG2, highlightthickness=0,
                  command=lambda v: self.player.set_volume(float(v) / 100.0)
-                 ).pack(side="right", padx=(0, 8))
-        tk.Label(top, text="vol", bg=BG, fg=DIM, font=FONT).pack(side="right")
+                 ).pack(side="right", padx=(0, 4))
+        tk.Label(top2, text="vol", bg=BG, fg=DIM, font=FONT).pack(side="right")
 
         vbar = tk.Frame(root, bg=BG)
         vbar.pack(fill="x", padx=6)
@@ -907,8 +922,17 @@ class TrackerApp:
         self.refresh()
         self._play_follow = self.root.after(50, self._follow)
 
+    def pause(self):
+        """Toggle pause/resume of the current playback (no-op when stopped)."""
+        if not self._playing:
+            return
+        self.player.pause()                          # winmm pause/resume toggle
+        self._paused = not getattr(self, "_paused", False)
+        self.refresh()
+
     def stop(self):
         self._playing = False
+        self._paused = False
         if self._play_follow:
             self.root.after_cancel(self._play_follow)
             self._play_follow = None

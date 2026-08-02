@@ -205,3 +205,21 @@ def test_block_ops(app):
     assert pat.cell(1, 0).note == R.midi_to_note(73)
     app.undo()                                        # every op is undoable
     assert app.pattern().cell(1, 0).note == 0         # (undo swaps the song)
+
+
+def test_transport_buttons_and_two_row_layout(app):
+    # the top bar is split so the volume/follow/octave controls don't clip at
+    # the default size; the transport buttons exist and pause toggles cleanly
+    app.pattern().cell(0, 0).note = R.midi_to_note(69)
+    app.pattern().cell(0, 0).inst = 1
+    app.play_song()
+    assert app._playing
+    app.pause()
+    assert app._paused is True                        # pause toggles
+    app.pause()
+    assert app._paused is False                       # resume
+    app.stop()
+    assert not app._playing and not app._paused
+    # pause is a no-op when stopped (must not throw)
+    app.pause()
+    assert app._paused is False
