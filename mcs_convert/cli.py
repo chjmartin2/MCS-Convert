@@ -167,6 +167,11 @@ def _cmd_tracker(args) -> int:
     return tracker_main([args.file] if args.file else [])
 
 
+def _cmd_rcplaywin(args) -> int:
+    from .gui.rcplay_win import main as rcplay_main
+    return rcplay_main(args.files)
+
+
 def _cmd_rcplay(args) -> int:
     from .rcplay_dos import save_rcplay
     n = save_rcplay(args.output)
@@ -198,6 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="open RCTracker, the .RCT tracker editor")
     p_trk.add_argument("file", nargs="?", help="optional .rct file to open")
     p_trk.set_defaults(func=_cmd_tracker)
+
+    p_rpw = sub.add_parser("rcplaywin",
+                           help="open RCPlay, the Windows .RCT player "
+                                "(playlist + scopes)")
+    p_rpw.add_argument("files", nargs="*", help=".rct files to queue")
+    p_rpw.set_defaults(func=_cmd_rcplaywin)
 
     p_rcp = sub.add_parser("rcplay",
                            help="write RCPLAY.COM, the universal DOS .RCT "
